@@ -105,7 +105,7 @@ export const DEFAULT_TRIGGERS: Triggers = {
   command: true,
   rewardId: null,
   keywords: [],
-  keywordChancePercent: 30,
+  keywordChancePercent: 25,
   streamerTargetPercent: 50,
   rewardMode: "verdict",
   streamerLoyaltyPercent: 50,

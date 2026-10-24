@@ -158,7 +158,7 @@ export const triggerSettingsSchema = z
     rewardId: z.string().min(1).nullable().default(null),
     // Chat messages containing one of these words (word start, any case) may trigger a roast.
     keywords: z.array(z.string().trim().min(1).max(40)).max(50).default([]),
-    keywordChancePercent: percentSchema.default(30),
+    keywordChancePercent: percentSchema.default(25),
     // For chat triggers (keywords, !роаст): chance that the streamer is roasted instead.
     streamerTargetPercent: percentSchema.default(50),
     // Channel-points reward: "verdict" judges the viewer's message (agree / mixed / refuse and

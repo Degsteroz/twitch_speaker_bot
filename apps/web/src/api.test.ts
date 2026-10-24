@@ -33,7 +33,7 @@ describe("normalizeSettings", () => {
       rewardId: "r1",
       events: { raid: { enabled: true } }
     });
-    expect(triggers).toMatchObject({ command: false, rewardId: "r1", keywordChancePercent: 30 });
+    expect(triggers).toMatchObject({ command: false, rewardId: "r1", keywordChancePercent: 25 });
     expect(triggers.events.raid).toEqual({ enabled: true, minViewers: 5 });
     expect(triggers.events.cheer).toEqual({ enabled: false, minBits: 100 });
   });

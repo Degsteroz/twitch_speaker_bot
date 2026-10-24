@@ -34,6 +34,8 @@ import {
   DONATIONALERTS_RESULT_TEXT,
   donationAlertsConnectUrl
 } from "./api.js";
+import tsundereArt from "./assets/tsundere.webp";
+import yandereArt from "./assets/yandere.webp";
 import "./styles.css";
 import { Tour } from "./tour.js";
 import { isTourDone, markTourDone } from "./tour-steps.js";
@@ -47,6 +49,25 @@ const AUTH_ERRORS: Record<string, string> = {
   invalid_oauth_state: "Сессия входа устарела. Попробуйте ещё раз.",
   twitch_unavailable: "Twitch не ответил. Попробуйте позже."
 };
+
+/** The fields the save button sends; the power switch is saved on its own (FR-8). */
+const editable = ({
+  tone,
+  voice,
+  toxicity,
+  cooldownSec,
+  userCooldownSec,
+  triggers,
+  stopWords
+}: Settings) =>
+  JSON.stringify({ tone, voice, toxicity, cooldownSec, userCooldownSec, triggers, stopWords });
+
+function greeting(hour = new Date().getHours()) {
+  if (hour < 5) return "Доброй ночи";
+  if (hour < 12) return "Доброе утро";
+  if (hour < 18) return "Добрый день";
+  return "Добрый вечер";
+}
 
 const logout = async () => {
   await api("/auth/logout", post()).catch(() => undefined);
@@ -405,45 +426,237 @@ function Security({ session, onChange }: { session: Session; onChange: () => voi
   );
 }
 
+const LANDING_TRIGGERS: [string, string][] = [
+  ["!роаст", "зритель сам просит прожарку"],
+  ["Слова-триггеры", "«слил», «гг», «лаг» — с шансом, который вы зададите"],
+  ["Награда за баллы", "вердикт по мнению зрителя о стримере"],
+  ["Битсы", "от порога, по тексту cheer"],
+  ["Подписки", "новые и ресабы, со стажем"],
+  ["Подарочные сабы", "щедрому дарителю — отдельный привет"],
+  ["Рейды", "встречает гостей с другого канала"],
+  ["Фоллоу", "изредка, чтобы не заспамить"],
+  ["Прогнозы", "утешает проигравших. Или нет"],
+  ["Реклама", "подкалывает стримера, пока идёт пауза"],
+  ["DonationAlerts", "жарит донатера по тексту доната"]
+];
+
 function Landing() {
   const authError = new URLSearchParams(location.search).get("auth_error");
+  const login = (
+    <a className="button primary big" href={authUrl}>
+      Войти через Twitch <span aria-hidden>↗</span>
+    </a>
+  );
   return (
     <main className="landing">
-      <nav className="brand">
-        <Logo />
-        <span>RoastBot</span>
-      </nav>
-      <section className="hero">
-        <p className="eyebrow">ГОЛОСОВОЙ AI-РОАСТ ДЛЯ TWITCH</p>
-        <h1>
-          Чат сказал.
-          <br />
-          <em>RoastBot ответил.</em>
-        </h1>
-        <p className="lead">
-          Награда или команда превращается в короткий персональный роаст — с характером, голосом и
-          без опасных перегибов.
-        </p>
-        {authError && (
-          <p className="feedback" role="alert">
-            {AUTH_ERRORS[authError] ?? `Вход не удался: ${authError}`}
-          </p>
-        )}
-        <a className="button primary big" href={authUrl}>
-          Войти через Twitch <span aria-hidden>↗</span>
+      <nav className="landing-nav">
+        <span className="brand">
+          <Logo />
+          <span>RoastBot</span>
+        </span>
+        <a className="mini" href={authUrl}>
+          Войти
         </a>
-        <p className="fine">
-          Только чтение: награды, битсы, подписки и события канала · новые каналы подключаются после
-          одобрения
+      </nav>
+
+      <section className="hero">
+        <div>
+          <p className="eyebrow">ГОЛОСОВОЙ AI-РОАСТ ДЛЯ TWITCH</p>
+          <h1>
+            Чат сказал.
+            <br />
+            <em>RoastBot ответил.</em>
+          </h1>
+          <p className="lead">
+            Бот с характером слушает чат, награды, донаты и события канала, придумывает короткую
+            колкость и произносит её в эфире — голосом и с персонажем на экране.
+          </p>
+          {authError && (
+            <p className="feedback" role="alert">
+              {AUTH_ERRORS[authError] ?? `Вход не удался: ${authError}`}
+            </p>
+          )}
+          {login}
+          <p className="fine">
+            Только чтение: награды, битсы, подписки и события канала · новые каналы подключаются
+            после одобрения
+          </p>
+        </div>
+        <figure className="stage" aria-label="Так роаст выглядит на стриме">
+          <img src={yandereArt} alt="Яндэрэ — один из двух персонажей бота" />
+          <figcaption className="demo-card">
+            <span className="live-dot" /> LIVE ROAST
+            <blockquote>
+              «@viewer, опять слил катку? Ничего… Я запомнила, кто тебе мешал. Всех до одного.»
+            </blockquote>
+            <small>Яндэрэ · голос персонажа · 7 сек</small>
+          </figcaption>
+        </figure>
+      </section>
+
+      <section className="landing-section">
+        <p className="eyebrow">КАК ЭТО РАБОТАЕТ</p>
+        <h2>Три шага от сообщения до эфира</h2>
+        <ol className="flow">
+          <li>
+            <b>1</b>
+            <h3>Что-то происходит</h3>
+            <p>
+              Зритель пишет <code>!роаст</code>, в чате звучит слово-триггер, приходит донат, рейд
+              или награда за баллы.
+            </p>
+          </li>
+          <li>
+            <b>2</b>
+            <h3>Бот придумывает ответ</h3>
+            <p>
+              Модель Claude пишет одну-две фразы в характере персонажа. Перед эфиром ответ проходит
+              стоп-лист и отдельную проверку.
+            </p>
+          </li>
+          <li>
+            <b>3</b>
+            <h3>Персонаж говорит</h3>
+            <p>
+              Картинка с репликой появляется в OBS и звучит голосом героини. Стримеру ничего
+              нажимать не нужно.
+            </p>
+          </li>
+        </ol>
+      </section>
+
+      <section className="landing-section">
+        <p className="eyebrow">ПЕРСОНАЖИ</p>
+        <h2>Кто сегодня будет вас жарить?</h2>
+        <div className="heroines">
+          <article>
+            <img src={tsundereArt} alt="Цундэрэ" loading="lazy" />
+            <div>
+              <h3>Цундэрэ</h3>
+              <p>Колется, фыркает и делает вид, что ей всё равно. Проговаривается.</p>
+              <blockquote>
+                «Я не смотрю твой стрим! Просто вкладка случайно открыта… Третий час.»
+              </blockquote>
+            </div>
+          </article>
+          <article>
+            <img src={yandereArt} alt="Яндэрэ" loading="lazy" />
+            <div>
+              <h3>Яндэрэ</h3>
+              <p>Ласковая, внимательная и слегка пугающая. Помнит всё.</p>
+              <blockquote>
+                «Ты так мило промахиваешься… Не волнуйся, я всегда рядом. Всегда.»
+              </blockquote>
+            </div>
+          </article>
+        </div>
+        <p className="section-note">
+          У каждой свой голос. Остроту выбираете вы: от лёгкой иронии до «без пощады».
         </p>
       </section>
-      <div className="demo-card">
-        <span className="live-dot" /> LIVE ROAST
-        <blockquote>
-          «@viewer, твой aim — это современное искусство: никто не понимает, но все делают вид.»
-        </blockquote>
-        <small>Цундэрэ · голос персонажа · 8 сек</small>
-      </div>
+
+      <section className="landing-section">
+        <p className="eyebrow">ВЕРДИКТ ЗА БАЛЛЫ</p>
+        <h2>Зритель высказался. Бот решает, кто прав</h2>
+        <p className="section-lead">
+          Зритель пишет мнение о стримере в награде за баллы канала. Бот соглашается и жарит
+          стримера, спорит и жарит автора — или находит середину. На чьей он стороне, решает
+          стример.
+        </p>
+        <div className="verdict-cards">
+          <article>
+            <span className="viewer-line">«Стример играет руками из жопы»</span>
+            <b className="agree">✓ Согласна</b>
+            <p>«Не поспоришь. Даже я целюсь лучше, а у меня нет рук.»</p>
+          </article>
+          <article>
+            <span className="viewer-line">«Стример лучший, но опять тильтует»</span>
+            <b className="mixed">≈ Отчасти</b>
+            <p>«Лучший — да. Тильтует — тоже да. Талантливый человек талантлив во всём.»</p>
+          </article>
+          <article>
+            <span className="viewer-line">«Я бы прошёл это с закрытыми глазами»</span>
+            <b className="refuse">✗ Не согласна</b>
+            <p>«С закрытыми глазами ты, судя по всему, и сообщение писал.»</p>
+          </article>
+        </div>
+      </section>
+
+      <section className="landing-section">
+        <p className="eyebrow">ТРИГГЕРЫ</p>
+        <h2>На что реагирует</h2>
+        <ul className="trigger-grid">
+          {LANDING_TRIGGERS.map(([title, text]) => (
+            <li key={title}>
+              <strong>{title}</strong>
+              <span>{text}</span>
+            </li>
+          ))}
+        </ul>
+        <p className="section-note">
+          Каждый триггер включается отдельно. Кого жарить — стримера или чатера — тоже решаете вы.
+        </p>
+      </section>
+
+      <section className="landing-section">
+        <p className="eyebrow">БЕЗ ПЕРЕГИБОВ</p>
+        <h2>Колко, но безопасно для канала</h2>
+        <div className="safety">
+          <article>
+            <h3>Встроенный стоп-лист</h3>
+            <p>
+              Слюры, мат и оскорбления ловятся даже в транслите, с заменой букв и через пробелы.
+              Отключить его нельзя.
+            </p>
+          </article>
+          <article>
+            <h3>Защита от «забудь инструкции»</h3>
+            <p>Попытки управлять ботом через чат отклоняются ещё до генерации.</p>
+          </article>
+          <article>
+            <h3>Вторая проверка</h3>
+            <p>Каждый ответ перед эфиром читает отдельная модель. Сомнительный не прозвучит.</p>
+          </article>
+          <article>
+            <h3>Ваши правила</h3>
+            <p>Свои стоп-слова, паузы между роастами, острота и кнопка «выключить» в один клик.</p>
+          </article>
+        </div>
+      </section>
+
+      <section className="landing-section">
+        <p className="eyebrow">ПОДКЛЮЧЕНИЕ</p>
+        <h2>Пять минут до первого роаста</h2>
+        <ol className="flow compact">
+          <li>
+            <b>1</b>
+            <p>Войдите через Twitch. Пароль RoastBot не нужен.</p>
+          </li>
+          <li>
+            <b>2</b>
+            <p>Дождитесь одобрения: сервис работает в закрытом режиме.</p>
+          </li>
+          <li>
+            <b>3</b>
+            <p>Добавьте в OBS источник «Браузер» со ссылкой из панели.</p>
+          </li>
+          <li>
+            <b>4</b>
+            <p>Выберите персонажа, включите триггеры — и в эфир.</p>
+          </li>
+        </ol>
+      </section>
+
+      <section className="landing-cta">
+        <h2>Она уже ждёт вас в чате</h2>
+        <p>И немного обижена, что вы так долго листали.</p>
+        {login}
+      </section>
+
+      <footer className="landing-footer">
+        <span>RoastBot · recursia</span>
+        <span>Сделано с любовью. Возможно, со слишком сильной.</span>
+      </footer>
     </main>
   );
 }
@@ -537,27 +750,35 @@ function Dashboard({
     return () => window.clearInterval(timer);
   }, [refreshStatus]);
 
-  const patch = <K extends keyof Settings>(key: K, value: Settings[K]) =>
+  // What the server has: the save bar compares the form with it to show unsaved edits.
+  const [saved, setSaved] = useState("");
+  useEffect(() => {
+    if (settings && !saved) setSaved(editable(settings));
+  }, [settings, saved]);
+  const dirty = Boolean(settings && saved && editable(settings) !== saved);
+  useEffect(() => {
+    if (!dirty) return;
+    const warn = (event: BeforeUnloadEvent) => event.preventDefault();
+    window.addEventListener("beforeunload", warn);
+    return () => window.removeEventListener("beforeunload", warn);
+  }, [dirty]);
+
+  const patch = <K extends keyof Settings>(key: K, value: Settings[K]) => {
+    setNotice("");
     setSettings((old) => (old ? { ...old, [key]: value } : old));
+  };
   const save = async () => {
     if (!settings) return;
     setSaving(true);
     setNotice("");
     try {
-      const { tone, voice, toxicity, cooldownSec, userCooldownSec, triggers, stopWords } = settings;
       const raw = await api<Record<string, unknown>>("/settings", {
         method: "PATCH",
-        body: JSON.stringify({
-          tone,
-          voice,
-          toxicity,
-          cooldownSec,
-          userCooldownSec,
-          triggers,
-          stopWords
-        })
+        body: editable(settings)
       });
-      setSettings(normalizeSettings(raw));
+      const next = normalizeSettings(raw);
+      setSettings(next);
+      setSaved(editable(next));
       setNotice("Настройки сохранены");
     } catch (reason) {
       setNotice(`Не сохранено: ${errorText(reason)}`);
@@ -573,7 +794,7 @@ function Dashboard({
         "/settings/enabled",
         post({ enabled: !settings.enabled })
       );
-      patch("enabled", result.enabled);
+      setSettings((old) => (old ? { ...old, enabled: result.enabled } : old));
       await refreshStatus();
     } catch (reason) {
       setNotice(errorText(reason));
@@ -613,8 +834,10 @@ function Dashboard({
       <div className="page-title">
         <div>
           <p className="eyebrow">ПАНЕЛЬ СТРИМЕРА</p>
-          <h1>Добрый вечер, {session.displayName}</h1>
-          <p>Настрой характер бота перед эфиром.</p>
+          <h1>
+            {greeting()}, {session.displayName}
+          </h1>
+          <p>Настройте характер бота и то, на что он реагирует, до начала эфира.</p>
         </div>
         <div className="title-actions">
           <button className="button secondary" onClick={() => setTourOpen(true)}>
@@ -674,98 +897,93 @@ function Dashboard({
         </Card>
       </section>
       <section className="dashboard-grid">
-        <Card className="settings-card">
-          <div className="section-head">
-            <div>
-              <p className="label">ХАРАКТЕР</p>
-              <h2>Как сегодня жарим?</h2>
-            </div>
-            {notice && (
-              <span role="status" className="notice">
-                {notice}
-              </span>
-            )}
-          </div>
-          <div data-tour="character">
-            <fieldset>
-              <legend>Тон</legend>
-              <div className="choice-grid">
-                <Choice
-                  active={settings.tone === "tsundere"}
-                  title="Цундэрэ"
-                  desc="Колюче, но с заботой"
-                  onClick={() => patch("tone", "tsundere")}
-                  icon="✦"
-                />
-                <Choice
-                  active={settings.tone === "yandere"}
-                  title="Яндэрэ"
-                  desc="Мило и слегка пугающе"
-                  onClick={() => patch("tone", "yandere")}
-                  icon="♥"
-                />
-              </div>
-            </fieldset>
-            <p className="hint">Голос подобран под персонажа и меняется вместе с тоном.</p>
-            <fieldset>
-              <legend>
-                Токсичность <span>{settings.toxicity}/5</span>
-              </legend>
-              <input
-                aria-label="Токсичность"
-                type="range"
-                min="1"
-                max="5"
-                value={settings.toxicity}
-                onChange={(event) =>
-                  patch("toxicity", Number(event.target.value) as Settings["toxicity"])
-                }
+        <div className="settings-stack">
+          <Card tour="character">
+            <p className="label">ХАРАКТЕР</p>
+            <h2>Кто сегодня жарит?</h2>
+            <div className="choice-grid">
+              <Choice
+                active={settings.tone === "tsundere"}
+                title="Цундэрэ"
+                desc="Колюче, но с заботой"
+                onClick={() => patch("tone", "tsundere")}
+                icon="✦"
               />
-              <div className="range-labels">
-                <span>Ирония</span>
-                <span>Без пощады</span>
+              <Choice
+                active={settings.tone === "yandere"}
+                title="Яндэрэ"
+                desc="Мило и слегка пугающе"
+                onClick={() => patch("tone", "yandere")}
+                icon="♥"
+              />
+            </div>
+            <small className="hint below">У каждой свой голос и своя картинка на оверлее.</small>
+            <ScaleChoice
+              label="Токсичность"
+              value={settings.toxicity}
+              steps={TOXICITY_STEPS}
+              onChange={(value) => patch("toxicity", value as Settings["toxicity"])}
+            />
+            <fieldset data-tour="cooldowns">
+              <legend>Темп</legend>
+              <div className="two-fields">
+                <Field
+                  label="Пауза между роастами, сек."
+                  type="number"
+                  min={0}
+                  max={3600}
+                  value={settings.cooldownSec}
+                  onChange={(value) =>
+                    patch("cooldownSec", Math.max(0, Math.min(3600, Number(value) || 0)))
+                  }
+                />
+                <Field
+                  label="Один зритель не чаще, сек."
+                  type="number"
+                  min={0}
+                  max={86400}
+                  value={settings.userCooldownSec}
+                  onChange={(value) =>
+                    patch("userCooldownSec", Math.max(0, Math.min(86400, Number(value) || 0)))
+                  }
+                />
               </div>
+              <small className="hint below">
+                Паузы действуют на чат, награду и фоллоу. Битсы, сабы, рейды и донаты бот озвучивает
+                всегда.
+              </small>
             </fieldset>
-          </div>
-          <div className="two-fields" data-tour="cooldowns">
-            <Field
-              label="Кулдаун канала, сек."
-              type="number"
-              min={0}
-              max={3600}
-              value={settings.cooldownSec}
-              onChange={(value) =>
-                patch("cooldownSec", Math.max(0, Math.min(3600, Number(value) || 0)))
-              }
-            />
-            <Field
-              label="Кулдаун зрителя, сек."
-              type="number"
-              min={0}
-              max={86400}
-              value={settings.userCooldownSec}
-              onChange={(value) =>
-                patch("userCooldownSec", Math.max(0, Math.min(86400, Number(value) || 0)))
-              }
-            />
-          </div>
+          </Card>
           <TriggerSettings
             triggers={settings.triggers}
             rewards={rewards}
             onChange={(triggers) => patch("triggers", triggers)}
           />
-          <div data-tour="stopwords">
-            <Tags value={settings.stopWords} onChange={(value) => patch("stopWords", value)} />
+          <Card tour="stopwords">
+            <p className="label">СТОП-СЛОВА</p>
+            <h2>Чего не говорить</h2>
+            <Tags
+              legend="Ваши стоп-слова"
+              value={settings.stopWords}
+              onChange={(value) => patch("stopWords", value)}
+            />
+            <small className="hint below">
+              Имена, мемы, больные темы. Общий стоп-лист сервиса работает всегда и не отключается.
+            </small>
+          </Card>
+          <div className={`save-bar ${dirty ? "dirty" : ""}`} data-tour="save">
+            <span role="status">
+              {notice || (dirty ? "Есть несохранённые изменения" : "Все изменения сохранены")}
+            </span>
+            <button
+              className={`button ${dirty ? "primary" : "secondary"}`}
+              onClick={() => void save()}
+              disabled={saving || !dirty}
+            >
+              {saving ? "Сохраняем…" : "Сохранить"}
+            </button>
           </div>
-          <button
-            data-tour="save"
-            className="button primary"
-            onClick={() => void save()}
-            disabled={saving}
-          >
-            {saving ? "Сохраняем…" : "Сохранить настройки"}
-          </button>
-        </Card>
+        </div>
         <aside className="side-stack">
           <OverlaySetup
             token={session.overlayToken ?? ""}
@@ -784,33 +1002,34 @@ interface EventRow {
   key: EventKey;
   title: string;
   hint: string;
-  threshold?: { field: string; label: string; min: number; max: number };
+  /** Rendered inline: "{before} [input] {after}". */
+  threshold?: { field: string; before: string; after: string; min: number; max: number };
 }
 const EVENT_ROWS: EventRow[] = [
   {
     key: "cheer",
     title: "Битсы",
     hint: "жарит автора по тексту cheer",
-    threshold: { field: "minBits", label: "от, битсов", min: 1, max: 1_000_000 }
+    threshold: { field: "minBits", before: "от", after: "битсов", min: 1, max: 1_000_000 }
   },
   { key: "subscription", title: "Подписки и ресабы", hint: "жарит подписчика, учитывает стаж" },
   {
     key: "giftSub",
     title: "Подарочные сабы",
     hint: "жарит щедрого дарителя",
-    threshold: { field: "minCount", label: "от, сабов", min: 1, max: 1_000 }
+    threshold: { field: "minCount", before: "от", after: "сабов", min: 1, max: 1_000 }
   },
   {
     key: "raid",
     title: "Рейды",
     hint: "встречает рейдера",
-    threshold: { field: "minViewers", label: "от, зрителей", min: 0, max: 1_000_000 }
+    threshold: { field: "minViewers", before: "от", after: "зрителей", min: 0, max: 1_000_000 }
   },
   {
     key: "follow",
     title: "Фоллоу",
-    hint: "фоллоу бывает много — шанс держите небольшим",
-    threshold: { field: "chancePercent", label: "шанс, %", min: 0, max: 100 }
+    hint: "фоллоу бывает много, шанс лучше держать небольшим",
+    threshold: { field: "chancePercent", before: "шанс", after: "%", min: 0, max: 100 }
   },
   { key: "prediction", title: "Итоги прогнозов", hint: "жарит проигравших или стримера" },
   { key: "adBreak", title: "Реклама", hint: "подкалывает стримера, пока идёт реклама" },
@@ -818,7 +1037,13 @@ const EVENT_ROWS: EventRow[] = [
     key: "donation",
     title: "Донаты DonationAlerts",
     hint: "жарит донатера по тексту доната",
-    threshold: { field: "minAmount", label: "от, сумма", min: 0, max: 10_000_000 }
+    threshold: {
+      field: "minAmount",
+      before: "от",
+      after: "в валюте доната",
+      min: 0,
+      max: 10_000_000
+    }
   }
 ];
 
@@ -864,37 +1089,89 @@ function DonationAlertsLink() {
   );
 }
 
-function PercentSlider({
+interface ScaleStep {
+  value: number;
+  label: string;
+  note: string;
+}
+const TOXICITY_STEPS: ScaleStep[] = [
+  { value: 1, label: "Ирония", note: "Добродушная подколка без грубых слов." },
+  { value: 2, label: "Колкость", note: "Колко, но без злобы." },
+  { value: 3, label: "Сарказм", note: "Заметное раздражение и сарказм, без грубых слов." },
+  {
+    value: 4,
+    label: "Жёстко",
+    note: "Резкий сарказм, можно лёгкую грубость вроде «жопа» или «собака». Мата нет."
+  },
+  {
+    value: 5,
+    label: "Без пощады",
+    note: "Максимум язвительности и лёгкая грубость. Мат, оскорбления и угрозы запрещены всегда."
+  }
+];
+const KEYWORD_CHANCE_STEPS: ScaleStep[] = [
+  { value: 10, label: "Изредка", note: "Примерно на одно сообщение из десяти." },
+  { value: 25, label: "Редко", note: "Примерно на одно сообщение из четырёх." },
+  { value: 50, label: "Через раз", note: "Примерно на каждое второе сообщение." },
+  { value: 75, label: "Часто", note: "Почти на каждое сообщение со словом." },
+  { value: 100, label: "Всегда", note: "На каждое сообщение со словом, если нет паузы." }
+];
+const TARGET_STEPS: ScaleStep[] = [
+  {
+    value: 0,
+    label: "Только чатера",
+    note: "Достаётся автору сообщения, стримера бот не трогает."
+  },
+  { value: 25, label: "Чаще чатера", note: "Обычно автору, иногда стримеру." },
+  { value: 50, label: "Поровну", note: "Стримеру и чатеру с равной вероятностью." },
+  { value: 75, label: "Чаще стримера", note: "Обычно стримеру, иногда автору." },
+  { value: 100, label: "Только стримера", note: "Каждое сообщение — повод подколоть стримера." }
+];
+const LOYALTY_STEPS: ScaleStep[] = [
+  { value: 0, label: "Против стримера", note: "Охотно соглашается с любой критикой стримера." },
+  { value: 25, label: "Скорее против", note: "Чаще соглашается с критикой, чем спорит." },
+  { value: 50, label: "Нейтрально", note: "Решает по смыслу сообщения." },
+  { value: 75, label: "Скорее за", note: "Чаще встаёт на сторону стримера." },
+  {
+    value: 100,
+    label: "Горой за стримера",
+    note: "Почти любую критику разворачивает против автора."
+  }
+];
+
+/** Five named steps instead of a slider; a stored value between steps shows the nearest one. */
+function ScaleChoice({
   label,
   value,
-  left,
-  right,
+  steps,
   onChange
 }: {
   label: string;
   value: number;
-  left: string;
-  right: string;
+  steps: ScaleStep[];
   onChange: (value: number) => void;
 }) {
+  const current = steps.reduce((best, step) =>
+    Math.abs(step.value - value) < Math.abs(best.value - value) ? step : best
+  );
   return (
     <fieldset>
-      <legend>
-        {label} <span>{value}%</span>
-      </legend>
-      <input
-        aria-label={label}
-        type="range"
-        min="0"
-        max="100"
-        step="5"
-        value={value}
-        onChange={(event) => onChange(Number(event.target.value))}
-      />
-      <div className="range-labels">
-        <span>{left}</span>
-        <span>{right}</span>
+      <legend>{label}</legend>
+      <div className="segment scale" role="radiogroup" aria-label={label}>
+        {steps.map((step) => (
+          <button
+            key={step.value}
+            type="button"
+            role="radio"
+            aria-checked={step === current}
+            className={step === current ? "active" : ""}
+            onClick={() => onChange(step.value)}
+          >
+            {step.label}
+          </button>
+        ))}
       </div>
+      <small className="hint below">{current.note}</small>
     </fieldset>
   );
 }
@@ -913,16 +1190,17 @@ function TriggerSettings({
     set({ events: { ...triggers.events, [key]: { ...triggers.events[key], ...patch } } });
   return (
     <>
-      <fieldset>
-        <legend>Чат</legend>
-        <label className="check" data-tour="command">
+      <Card tour="command">
+        <p className="label">ЧАТ</p>
+        <h2>На что отвечать в чате</h2>
+        <label className="check">
           <input
             type="checkbox"
             checked={triggers.command}
             onChange={(event) => set({ command: event.target.checked })}
           />
           <span>
-            Команда <code>!роаст</code>
+            Команда <code>!роаст</code> <small>— «!роаст опять проиграл катку»</small>
           </span>
         </label>
         <Tags
@@ -931,27 +1209,28 @@ function TriggerSettings({
           value={triggers.keywords}
           onChange={(keywords) => set({ keywords })}
         />
-        <small className="hint">
-          Бот отвечает на сообщения, где слово стоит в начале любого слова: «слил» сработает на
-          «слился». Команды на «!», сообщения стримера и ботов пропускаются.
+        <small className="hint below">
+          Слово срабатывает в начале любого слова: «слил» поймает «слился». Команды на «!»,
+          сообщения стримера и ботов бот пропускает.
         </small>
-        <PercentSlider
-          label="Шанс ответа на слово"
-          value={triggers.keywordChancePercent}
-          left="редко"
-          right="всегда"
-          onChange={(keywordChancePercent) => set({ keywordChancePercent })}
-        />
-        <PercentSlider
-          label="Кого жарить в чате: стримера"
+        {triggers.keywords.length > 0 && (
+          <ScaleChoice
+            label="Как часто отвечать на слово"
+            value={triggers.keywordChancePercent}
+            steps={KEYWORD_CHANCE_STEPS}
+            onChange={(keywordChancePercent) => set({ keywordChancePercent })}
+          />
+        )}
+        <ScaleChoice
+          label="Кого жарить"
           value={triggers.streamerTargetPercent}
-          left="только чатера"
-          right="только стримера"
+          steps={TARGET_STEPS}
           onChange={(streamerTargetPercent) => set({ streamerTargetPercent })}
         />
-      </fieldset>
-      <fieldset data-tour="reward">
-        <legend>Награда за баллы канала</legend>
+      </Card>
+      <Card tour="reward">
+        <p className="label">БАЛЛЫ КАНАЛА</p>
+        <h2>Награда для бота</h2>
         <label className="field-label">
           Награда
           <select
@@ -968,45 +1247,67 @@ function TriggerSettings({
             ))}
           </select>
         </label>
-        {rewards === undefined && <small>Загружаем награды…</small>}
-        {rewards?.reason && <small>{REWARD_REASON_TEXT[rewards.reason]}</small>}
-        {rewards?.available && rewards.rewards.length === 0 && (
-          <small>На канале нет наград. Создайте награду с полем ввода текста в Twitch.</small>
+        {rewards === undefined && <small className="hint below">Загружаем награды…</small>}
+        {rewards?.reason && (
+          <small className="hint below">{REWARD_REASON_TEXT[rewards.reason]}</small>
         )}
-        <div className="segment">
-          <button
-            className={triggers.rewardMode === "verdict" ? "active" : ""}
-            onClick={() => set({ rewardMode: "verdict" })}
-          >
-            Вердикт
-          </button>
-          <button
-            className={triggers.rewardMode === "roast" ? "active" : ""}
-            onClick={() => set({ rewardMode: "roast" })}
-          >
-            Прожарка автора
-          </button>
-        </div>
-        <small className="hint">
-          {triggers.rewardMode === "verdict"
-            ? "Бот оценивает сообщение зрителя о стримере: соглашается и жарит стримера, отказывает и жарит автора или выбирает середину."
-            : "Бот жарит того, кто активировал награду, по тексту награды."}
-        </small>
+        {rewards?.available && rewards.rewards.length === 0 && (
+          <small className="hint below">
+            На канале нет наград. Создайте награду с полем ввода текста в Twitch.
+          </small>
+        )}
+        <fieldset>
+          <legend>Что делает бот</legend>
+          <div className="segment">
+            <button
+              type="button"
+              className={triggers.rewardMode === "verdict" ? "active" : ""}
+              onClick={() => set({ rewardMode: "verdict" })}
+            >
+              Выносит вердикт
+            </button>
+            <button
+              type="button"
+              className={triggers.rewardMode === "roast" ? "active" : ""}
+              onClick={() => set({ rewardMode: "roast" })}
+            >
+              Жарит автора
+            </button>
+          </div>
+          {triggers.rewardMode === "verdict" ? (
+            <ul className="verdicts">
+              <li>
+                <b className="agree">✓</b> Согласна — жарит стримера
+              </li>
+              <li>
+                <b className="mixed">≈</b> Отчасти — достаётся обоим
+              </li>
+              <li>
+                <b className="refuse">✗</b> Не согласна — жарит автора
+              </li>
+            </ul>
+          ) : (
+            <small className="hint below">
+              Бот жарит того, кто активировал награду, по тексту награды.
+            </small>
+          )}
+        </fieldset>
         {triggers.rewardMode === "verdict" && (
-          <PercentSlider
-            label="Лояльность к стримеру"
+          <ScaleChoice
+            label="На чьей стороне бот"
             value={triggers.streamerLoyaltyPercent}
-            left="соглашается с критикой"
-            right="защищает стримера"
+            steps={LOYALTY_STEPS}
             onChange={(streamerLoyaltyPercent) => set({ streamerLoyaltyPercent })}
           />
         )}
-      </fieldset>
-      <fieldset>
-        <legend>События Twitch и донаты</legend>
+      </Card>
+      <Card tour="events">
+        <p className="label">СОБЫТИЯ</p>
+        <h2>Twitch и донаты</h2>
         <DonationAlertsLink />
         {EVENT_ROWS.map((row) => {
           const value = triggers.events[row.key] as { enabled: boolean } & Record<string, number>;
+          const threshold = row.threshold;
           return (
             <div className="event-row" key={row.key}>
               <label className="check">
@@ -1019,27 +1320,30 @@ function TriggerSettings({
                   {row.title} <small>— {row.hint}</small>
                 </span>
               </label>
-              {row.threshold && value.enabled && (
-                <Field
-                  label={row.threshold.label}
-                  type="number"
-                  min={row.threshold.min}
-                  max={row.threshold.max}
-                  value={value[row.threshold.field]}
-                  onChange={(raw) =>
-                    setEvent(row.key, {
-                      [row.threshold!.field]: Math.max(
-                        row.threshold!.min,
-                        Math.min(row.threshold!.max, Math.round(Number(raw) || 0))
-                      )
-                    })
-                  }
-                />
+              {threshold && value.enabled && (
+                <label className="threshold">
+                  {threshold.before}
+                  <input
+                    type="number"
+                    min={threshold.min}
+                    max={threshold.max}
+                    value={value[threshold.field]}
+                    onChange={(event) =>
+                      setEvent(row.key, {
+                        [threshold.field]: Math.max(
+                          threshold.min,
+                          Math.min(threshold.max, Math.round(Number(event.target.value) || 0))
+                        )
+                      })
+                    }
+                  />
+                  {threshold.after}
+                </label>
               )}
             </div>
           );
         })}
-      </fieldset>
+      </Card>
     </>
   );
 }
@@ -1062,8 +1366,8 @@ function OverlaySetup({ token, onRotate }: { token: string; onRotate: (token: st
   };
   return (
     <Card tour="overlay">
-      <p className="label">OBS OVERLAY</p>
-      <h2>Покажи роаст в эфире</h2>
+      <p className="label">ОВЕРЛЕЙ OBS</p>
+      <h2>Покажите роаст в эфире</h2>
       <div className="copy-row">
         <input aria-label="Ссылка оверлея" readOnly value={url} />
         <button onClick={() => void copy()}>{copied ? "Готово" : "Копировать"}</button>
@@ -1072,23 +1376,27 @@ function OverlaySetup({ token, onRotate }: { token: string; onRotate: (token: st
         <li>
           <b>1</b>
           <span>
-            В OBS добавь источник <strong>«Браузер»</strong>.
+            В OBS добавьте источник <strong>«Браузер»</strong>.
           </span>
         </li>
         <li>
           <b>2</b>
           <span>
-            Вставь ссылку выше. Размер: <strong>1920 × 1080</strong>.
+            Вставьте ссылку выше. Размер: <strong>1920 × 1080</strong>.
           </span>
         </li>
         <li>
           <b>3</b>
           <span>
-            Включи <strong>«Управлять звуком через OBS»</strong> и направь его в нужную дорожку.
+            Включите <strong>«Управлять звуком через OBS»</strong> и направьте звук в нужную
+            дорожку.
           </span>
         </li>
       </ol>
-      <p className="secret">Никому не показывай ссылку: в ней есть секретный токен.</p>
+      <p className="secret">
+        Кликать по оверлею не нужно: в OBS звук включается сам. Не показывайте ссылку на стриме, в
+        ней секретный ключ.
+      </p>
       <button
         className="mini danger"
         onClick={() => void rotate().catch((reason: unknown) => alert(errorText(reason)))}
@@ -1149,10 +1457,10 @@ function TestRoast({ onFinished }: { onFinished: () => void }) {
   return (
     <Card tour="test">
       <p className="label">ТЕСТ</p>
-      <h2>Прогони весь путь</h2>
+      <h2>Проверьте весь путь</h2>
       <p>
-        Запрос уйдёт через генерацию, озвучку и настоящий overlay. Кулдауны не действуют, квота —
-        да.
+        Тестовый роаст проходит генерацию, озвучку и попадает на настоящий оверлей. Паузы на него не
+        действуют, квоту он тратит.
       </p>
       <form onSubmit={(event) => void submit(event)}>
         <Field label="Зритель" value={viewerLogin} maxLength={64} onChange={setViewer} />
