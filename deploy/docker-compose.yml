@@ -225,6 +225,7 @@ services:
       - "${HTTPS_BIND:-0.0.0.0}:443:443/udp"
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./caddy-routes.caddy:/etc/caddy/caddy-routes.caddy:ro
       - caddy-data:/data
       - caddy-config:/config
     depends_on:

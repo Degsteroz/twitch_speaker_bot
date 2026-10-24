@@ -3,6 +3,11 @@ set -eu
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 COMPOSE_FILE="$SCRIPT_DIR/docker-compose.yml"
+# Edge mode (docker-compose.edge.yml) is recognised by its fixed Caddy container name.
+EDGE_FILE=""
+if docker container inspect roastbot-edge >/dev/null 2>&1; then
+  EDGE_FILE="$SCRIPT_DIR/docker-compose.edge.yml"
+fi
 ENV_FILE=${ENV_FILE:-"$SCRIPT_DIR/.env"}
 
 if [ ! -f "$ENV_FILE" ]; then
@@ -28,7 +33,7 @@ cleanup() {
 }
 trap cleanup EXIT HUP INT TERM
 
-docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" exec -T postgres \
+docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" ${EDGE_FILE:+-f "$EDGE_FILE"} exec -T postgres \
   pg_dump --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" \
   --format=custom --compress=9 --no-owner --no-acl >"$temporary"
 

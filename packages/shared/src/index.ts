@@ -146,6 +146,9 @@ export const overlayRoastEventSchema = z
     roastId: z.string().uuid(),
     viewerLogin: z.string().min(1).max(64),
     text: z.string().min(1).max(MAX_ROAST_CHARACTERS),
+    // Picks the character shown next to the text. Optional: outbox rows written before it existed
+    // still validate and play without a character.
+    tone: toneSchema.optional(),
     audioUrl: z.string().url(),
     expiresAt: z.string().datetime(),
     sentAt: z.string().datetime()

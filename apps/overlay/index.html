@@ -7,14 +7,17 @@
   </head>
   <body>
     <main id="stage" aria-live="polite">
-      <article id="roast" hidden>
-        <div class="orb">R</div>
-        <div>
-          <p id="viewer"></p>
-          <blockquote id="text"></blockquote>
-        </div>
-        <span class="wave" aria-hidden><i></i><i></i><i></i><i></i></span>
-      </article>
+      <section id="roast" hidden>
+        <img id="character" alt="" hidden />
+        <article class="card">
+          <div class="orb">R</div>
+          <div class="body">
+            <p id="viewer"></p>
+            <blockquote id="text"></blockquote>
+          </div>
+          <span class="wave" aria-hidden><i></i><i></i><i></i><i></i></span>
+        </article>
+      </section>
       <button id="recover" hidden>🔊 Нажми, чтобы включить звук RoastBot</button>
       <p id="connection">Подключение…</p>
     </main>

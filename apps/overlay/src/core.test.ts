@@ -3,6 +3,7 @@ import {
   EventQueue,
   getToken,
   parseEvent,
+  previewTone,
   reconnectDelay,
   websocketUrl,
   type RoastEvent
@@ -25,6 +26,15 @@ describe("overlay protocol", () => {
     expect(parseEvent("{bad")).toBeNull();
     expect(parseEvent(JSON.stringify(event()))?.type).toBe("roast.play");
     expect(parseEvent(JSON.stringify({ ...event(), text: "" }))).toBeNull();
+  });
+  it("carries the character tone and drops an unknown one without losing the roast", () => {
+    const tagged = parseEvent(JSON.stringify({ ...event(), tone: "yandere" })) as RoastEvent;
+    expect(tagged.tone).toBe("yandere");
+    const unknown = parseEvent(JSON.stringify({ ...event(), tone: "kuudere" })) as RoastEvent;
+    expect(unknown.type).toBe("roast.play");
+    expect(unknown).not.toHaveProperty("tone");
+    expect(previewTone("?preview=tsundere")).toBe("tsundere");
+    expect(previewTone("?preview=<script>")).toBeNull();
   });
   it("deduplicates and expires FIFO events", () => {
     const queue = new EventQueue();

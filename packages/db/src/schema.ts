@@ -1,6 +1,7 @@
 import type { StoredOverlayRoast, TriggerSettings } from "@roastbot/shared";
 import { relations, sql } from "drizzle-orm";
 import {
+  bigint,
   boolean,
   check,
   char,
@@ -20,7 +21,7 @@ import {
 const createdAt = () => timestamp("created_at", { withTimezone: true }).notNull().defaultNow();
 
 export const userRoleEnum = pgEnum("user_role", ["owner", "user"]);
-export const userStatusEnum = pgEnum("user_status", ["active", "suspended"]);
+export const userStatusEnum = pgEnum("user_status", ["active", "suspended", "pending"]);
 export const toneEnum = pgEnum("tone", ["tsundere", "yandere"]);
 export const voiceEnum = pgEnum("voice", ["male", "female"]);
 export const planCodeEnum = pgEnum("plan_code", ["free", "basic", "premium"]);
@@ -50,6 +51,17 @@ export const users = pgTable(
     displayName: text("display_name").notNull(),
     role: userRoleEnum("role").notNull().default("user"),
     status: userStatusEnum("status").notNull().default("active"),
+    totpSecretCiphertext: text("totp_secret_ciphertext"),
+    totpSecretIv: text("totp_secret_iv"),
+    totpSecretTag: text("totp_secret_tag"),
+    totpEnabledAt: timestamp("totp_enabled_at", { withTimezone: true }),
+    totpLastStep: bigint("totp_last_step", { mode: "number" }),
+    mfaRecoveryHashes: text("mfa_recovery_hashes")
+      .array()
+      .notNull()
+      .default(sql`ARRAY[]::text[]`),
+    mfaFailedAttempts: integer("mfa_failed_attempts").notNull().default(0),
+    mfaLockedUntil: timestamp("mfa_locked_until", { withTimezone: true }),
     createdAt: createdAt()
   },
   (table) => [
@@ -333,6 +345,20 @@ export const auditLog = pgTable(
     index("audit_log_actor_created_idx").on(table.actorUserId, table.createdAt),
     index("audit_log_action_created_idx").on(table.action, table.createdAt)
   ]
+);
+
+export const invites = pgTable(
+  "invites",
+  {
+    login: text("login").primaryKey(),
+    createdByUserId: uuid("created_by_user_id").references(() => users.id, {
+      onDelete: "set null"
+    }),
+    usedByUserId: uuid("used_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    usedAt: timestamp("used_at", { withTimezone: true }),
+    createdAt: createdAt()
+  },
+  (table) => [check("invites_login_check", sql`${table.login} ~ '^[a-z0-9_]{3,25}$'`)]
 );
 
 export const globalSettings = pgTable("global_settings", {

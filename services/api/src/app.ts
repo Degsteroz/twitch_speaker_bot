@@ -27,6 +27,14 @@ import { z, ZodError } from "zod";
 import type { ApiConfig } from "./config.js";
 import { decryptValue, encryptValue, signAudioPath, verifyAudioSignature } from "./security.js";
 import {
+  generateRecoveryCodes,
+  generateTotpSecret,
+  hashRecoveryCode,
+  normalizeRecoveryCode,
+  otpauthUri,
+  verifyTotp
+} from "./totp.js";
+import {
   TwitchApiError,
   exchangeCode,
   getRewards,
@@ -38,6 +46,8 @@ interface Session {
   userId: string;
   channelId: string;
   role: "owner" | "user";
+  /** Epoch ms when the second factor was confirmed in this session; absent until then. */
+  mfaAt?: number;
 }
 
 interface OverlayConnection {
@@ -67,6 +77,24 @@ const globalSettingSchemas = {
 type GlobalSettingKey = keyof typeof globalSettingSchemas;
 
 const stopWordsSchema = z.array(z.string().trim().min(1).max(100)).max(1000);
+
+// Owner actions need a second factor confirmed within this window, even inside a 7-day session.
+const OWNER_MFA_MAX_AGE_MS = 12 * 60 * 60 * 1000;
+const MFA_MAX_FAILURES = 5;
+const MFA_LOCK_MS = 15 * 60 * 1000;
+const mfaCodeSchema = z.object({ code: z.string().trim().min(6).max(32) });
+const twitchLoginSchema = z
+  .string()
+  .trim()
+  .transform((value) => value.replace(/^@/u, "").toLowerCase())
+  .pipe(z.string().regex(/^[a-z0-9_]{3,25}$/u, "Некорректный логин Twitch"));
+
+type FactorCheck =
+  | { ok: true; via: "totp" | "recovery" }
+  | { ok: false; status: number; code: string; message: string };
+
+const denied = (reply: FastifyReply, status: number, code: string, message: string) =>
+  reply.code(status).send({ error: { code, message } });
 
 export async function buildApp(config: ApiConfig) {
   const app = Fastify({ logger: config.NODE_ENV !== "test", trustProxy: true });
@@ -100,19 +128,41 @@ export async function buildApp(config: ApiConfig) {
     });
   });
 
-  const requireUser = async (request: FastifyRequest) => {
+  // Only proves the Twitch login: for the session probe, the 2FA screens and logout.
+  const requireSession = async (request: FastifyRequest) => {
     await request.jwtVerify();
   };
+  // Approval and 2FA state come from the database on every request, so approving a streamer or
+  // enabling 2FA takes effect without a new login.
+  const requireUser = async (request: FastifyRequest, reply: FastifyReply) => {
+    await request.jwtVerify();
+    const [user] = await sql<{ status: string; mfaEnabled: boolean }[]>`
+      select status, totp_enabled_at is not null "mfaEnabled" from users
+      where id=${session(request).userId}`;
+    if (!user) return denied(reply, 401, "unauthorized", "Сессия устарела");
+    if (user.status === "pending") {
+      return denied(reply, 403, "pending_approval", "Заявка ещё не одобрена владельцем");
+    }
+    if (user.mfaEnabled && !session(request).mfaAt) {
+      return denied(reply, 403, "mfa_required", "Подтвердите вход кодом 2FA");
+    }
+  };
   // Role and status come from the database, not the 7-day JWT, so a demoted or suspended owner
-  // loses /admin immediately.
+  // loses /admin immediately. The owner must have 2FA and a recent confirmation of it.
   const requireOwner = async (request: FastifyRequest, reply: FastifyReply) => {
     await request.jwtVerify();
-    const [user] = await sql<{ role: string; status: string }[]>`
-      select role, status from users where id=${session(request).userId}`;
+    const [user] = await sql<{ role: string; status: string; mfaEnabled: boolean }[]>`
+      select role, status, totp_enabled_at is not null "mfaEnabled" from users
+      where id=${session(request).userId}`;
     if (user?.role !== "owner" || user.status !== "active") {
-      return reply
-        .code(403)
-        .send({ error: { code: "owner_required", message: "Только владелец" } });
+      return denied(reply, 403, "owner_required", "Только владелец");
+    }
+    if (!user.mfaEnabled) {
+      return denied(reply, 403, "mfa_setup_required", "Включите двухфакторную аутентификацию");
+    }
+    const { mfaAt } = session(request);
+    if (!mfaAt || Date.now() - mfaAt > OWNER_MFA_MAX_AGE_MS) {
+      return denied(reply, 403, "mfa_required", "Подтвердите вход кодом 2FA");
     }
   };
 
@@ -270,17 +320,36 @@ export async function buildApp(config: ApiConfig) {
     const access = encryptValue(token.access_token, config.TOKEN_ENCRYPTION_KEY);
     const refresh = encryptValue(token.refresh_token, config.TOKEN_ENCRYPTION_KEY);
     const role = config.ownerIds.has(twitchUser.id) ? "owner" : "user";
+    const login = twitchUser.login.toLowerCase();
 
     const rows = await sql.begin(async (tx) => {
-      const [user] = await tx<{ id: string }[]>`
-        insert into users (twitch_id, login, display_name, role)
-        values (${twitchUser.id}, ${twitchUser.login}, ${twitchUser.display_name}, ${role})
+      // New logins wait for the owner's approval; the owner and invited logins pass at once.
+      // An existing account keeps its status, except that pending is lifted for the owner.
+      const [user] = await tx<{ id: string; status: string; created: boolean }[]>`
+        insert into users (twitch_id, login, display_name, role, status)
+        values (${twitchUser.id}, ${login}, ${twitchUser.display_name}, ${role},
+          ${role === "owner" ? "active" : "pending"})
         on conflict (twitch_id) do update set login=excluded.login,
-          display_name=excluded.display_name, role=excluded.role returning id`;
+          display_name=excluded.display_name, role=excluded.role,
+          status=case when users.status='pending' and excluded.status='active'
+            then 'active'::user_status else users.status end
+        returning id, status, (xmax = 0) created`;
       if (!user) throw new Error("User upsert failed");
+      if (user.status === "pending") {
+        const invited = await tx`update invites set used_at=now(), used_by_user_id=${user.id}
+          where login=${login} and used_at is null returning login`;
+        if (invited.length) {
+          await tx`update users set status='active' where id=${user.id}`;
+          user.status = "active";
+        }
+      }
+      if (user.created) {
+        await tx`insert into audit_log(actor_user_id,action,target,payload)
+          values(${user.id},'user.signup',${login},${sql.json({ status: user.status })})`;
+      }
       const [channel] = await tx<{ id: string }[]>`
         insert into channels (user_id, twitch_login, overlay_token)
-        values (${user.id}, ${twitchUser.login}, ${randomBytes(32).toString("base64url")})
+        values (${user.id}, ${login}, ${randomBytes(32).toString("base64url")})
         on conflict (user_id) do update set twitch_login=excluded.twitch_login returning id`;
       if (!channel) throw new Error("Channel upsert failed");
       await tx`insert into settings (channel_id) values (${channel.id}) on conflict do nothing`;
@@ -300,8 +369,8 @@ export async function buildApp(config: ApiConfig) {
           expires_at=excluded.expires_at, updated_at=now()`;
       return { userId: user.id, channelId: channel.id };
     });
-    const signed = await reply.jwtSign({ ...rows, role }, { expiresIn: "7d" });
-    reply.setCookie(SESSION_COOKIE, signed, { ...cookieOptions, maxAge: 604_800 });
+    // A fresh Twitch login never carries mfaAt: the second factor is asked again every time.
+    await issueSession(reply, { ...rows, role });
     return reply.redirect(config.DASHBOARD_URL);
   });
 
@@ -310,19 +379,225 @@ export async function buildApp(config: ApiConfig) {
     return { ok: true };
   });
 
-  // ---- streamer dashboard -----------------------------------------------------------------
-  app.get("/me/session", { preHandler: requireUser }, async (request, reply) => {
-    const [row] = await sql`
+  // ---- session and second factor ----------------------------------------------------------
+  async function issueSession(reply: FastifyReply, claims: Session) {
+    const { userId, channelId, role, mfaAt } = claims;
+    const signed = await reply.jwtSign(
+      { userId, channelId, role, ...(mfaAt ? { mfaAt } : {}) },
+      { expiresIn: "7d" }
+    );
+    reply.setCookie(SESSION_COOKIE, signed, { ...cookieOptions, maxAge: 604_800 });
+  }
+
+  interface FactorRow {
+    ciphertext: string | null;
+    iv: string | null;
+    tag: string | null;
+    lastStep: number | null;
+    recoveryHashes: string[];
+    failures: number;
+    lockedUntil: Date | null;
+  }
+
+  // Checks a TOTP or recovery code under a row lock, so parallel guesses all count toward the
+  // lockout. Failures are committed even though the caller answers with an error.
+  const checkSecondFactor = (userId: string, rawCode: string) =>
+    sql.begin(async (tx): Promise<FactorCheck> => {
+      const [row] = await tx<FactorRow[]>`
+        select totp_secret_ciphertext ciphertext, totp_secret_iv iv, totp_secret_tag tag,
+          totp_last_step::float8 "lastStep", mfa_recovery_hashes "recoveryHashes",
+          mfa_failed_attempts failures, mfa_locked_until "lockedUntil"
+        from users where id=${userId} for update`;
+      if (!row?.ciphertext || !row.iv || !row.tag) {
+        return { ok: false, status: 409, code: "mfa_not_configured", message: "2FA не настроена" };
+      }
+      if (row.lockedUntil && row.lockedUntil.getTime() > Date.now()) {
+        const minutes = Math.ceil((row.lockedUntil.getTime() - Date.now()) / 60_000);
+        return {
+          ok: false,
+          status: 429,
+          code: "mfa_locked",
+          message: `Слишком много неверных кодов. Повторите через ${String(minutes)} мин.`
+        };
+      }
+      const code = rawCode.replace(/\s/gu, "");
+      const secret = decryptValue(
+        { ciphertext: row.ciphertext, iv: row.iv, tag: row.tag },
+        config.TOKEN_ENCRYPTION_KEY
+      );
+      const step = verifyTotp(secret, code, row.lastStep);
+      if (step !== null) {
+        await tx`update users set totp_last_step=${step}, mfa_failed_attempts=0,
+          mfa_locked_until=null where id=${userId}`;
+        return { ok: true, via: "totp" };
+      }
+      const hash = hashRecoveryCode(code);
+      if (normalizeRecoveryCode(code).length === 10 && row.recoveryHashes.includes(hash)) {
+        await tx`update users set mfa_recovery_hashes=array_remove(mfa_recovery_hashes, ${hash}),
+          mfa_failed_attempts=0, mfa_locked_until=null where id=${userId}`;
+        return { ok: true, via: "recovery" };
+      }
+      const failures = row.failures + 1;
+      const lock = failures >= MFA_MAX_FAILURES;
+      await tx`update users set mfa_failed_attempts=${lock ? 0 : failures},
+        mfa_locked_until=${lock ? new Date(Date.now() + MFA_LOCK_MS) : null} where id=${userId}`;
+      return lock
+        ? {
+            ok: false,
+            status: 429,
+            code: "mfa_locked",
+            message: "Слишком много неверных кодов. Вход по 2FA заблокирован на 15 минут."
+          }
+        : { ok: false, status: 400, code: "mfa_invalid", message: "Неверный код" };
+    });
+
+  interface MfaState {
+    login: string;
+    role: string;
+    status: string;
+    enabled: boolean;
+    started: boolean;
+  }
+  const mfaState = async (userId: string) => {
+    const [row] = await sql<MfaState[]>`
+      select login, role, status, totp_enabled_at is not null enabled,
+        totp_secret_ciphertext is not null started from users where id=${userId}`;
+    return row;
+  };
+
+  app.get("/me/session", { preHandler: requireSession }, async (request, reply) => {
+    const { userId, channelId, mfaAt } = session(request);
+    const [row] = await sql<
+      {
+        status: string;
+        mfaEnabled: boolean;
+        overlayToken: string;
+        recoveryCodesLeft: number;
+      }[]
+    >`
       select u.id "userId", c.id "channelId", u.login, u.display_name "displayName",
-        u.role, u.status, c.twitch_login "channelLogin", c.overlay_token "overlayToken"
+        u.role, u.status, c.twitch_login "channelLogin", c.overlay_token "overlayToken",
+        u.totp_enabled_at is not null "mfaEnabled",
+        cardinality(u.mfa_recovery_hashes)::int "recoveryCodesLeft"
       from users u join channels c on c.user_id=u.id
-      where u.id=${session(request).userId} and c.id=${session(request).channelId}`;
+      where u.id=${userId} and c.id=${channelId}`;
     if (!row) {
       reply.clearCookie(SESSION_COOKIE, { path: "/" });
-      return reply.code(401).send({ error: { code: "unauthorized", message: "Сессия устарела" } });
+      return denied(reply, 401, "unauthorized", "Сессия устарела");
     }
-    return row;
+    const mfaRequired = row.mfaEnabled && !mfaAt;
+    const adminMfa = !row.mfaEnabled
+      ? "setup"
+      : !mfaAt || Date.now() - mfaAt > OWNER_MFA_MAX_AGE_MS
+        ? "verify"
+        : "ok";
+    // The overlay token is a credential: not before approval and the second factor.
+    const restricted = row.status === "pending" || mfaRequired;
+    return {
+      ...row,
+      overlayToken: restricted ? null : row.overlayToken,
+      mfaRequired,
+      adminMfa
+    };
   });
+
+  app.post("/me/mfa/setup", { preHandler: requireSession }, async (request, reply) => {
+    const { userId } = session(request);
+    const state = await mfaState(userId);
+    if (!state) return denied(reply, 401, "unauthorized", "Сессия устарела");
+    if (state.status === "pending") {
+      return denied(reply, 403, "pending_approval", "Заявка ещё не одобрена владельцем");
+    }
+    if (state.enabled) return denied(reply, 409, "mfa_already_enabled", "2FA уже включена");
+    const secret = generateTotpSecret();
+    const encrypted = encryptValue(secret, config.TOKEN_ENCRYPTION_KEY);
+    await sql`update users set totp_secret_ciphertext=${encrypted.ciphertext},
+      totp_secret_iv=${encrypted.iv}, totp_secret_tag=${encrypted.tag}, totp_last_step=null
+      where id=${userId} and totp_enabled_at is null`;
+    return { secret, otpauthUri: otpauthUri(secret, state.login) };
+  });
+
+  app.post("/me/mfa/enable", { preHandler: requireSession }, async (request, reply) => {
+    const { code } = mfaCodeSchema.parse(request.body);
+    const claims = session(request);
+    const state = await mfaState(claims.userId);
+    if (!state) return denied(reply, 401, "unauthorized", "Сессия устарела");
+    if (state.status === "pending") {
+      return denied(reply, 403, "pending_approval", "Заявка ещё не одобрена владельцем");
+    }
+    if (state.enabled) return denied(reply, 409, "mfa_already_enabled", "2FA уже включена");
+    if (!state.started)
+      return denied(reply, 409, "mfa_setup_required", "Сначала начните настройку");
+    const result = await checkSecondFactor(claims.userId, code);
+    if (!result.ok) return denied(reply, result.status, result.code, result.message);
+    const recoveryCodes = generateRecoveryCodes();
+    await sql.begin(async (tx) => {
+      await tx`update users set totp_enabled_at=now(),
+        mfa_recovery_hashes=${recoveryCodes.map(hashRecoveryCode)} where id=${claims.userId}`;
+      await audit(tx, request, "mfa.enable", claims.userId, {});
+    });
+    await issueSession(reply, { ...claims, mfaAt: Date.now() });
+    return { recoveryCodes };
+  });
+
+  app.post("/me/mfa/verify", { preHandler: requireSession }, async (request, reply) => {
+    const { code } = mfaCodeSchema.parse(request.body);
+    const claims = session(request);
+    const state = await mfaState(claims.userId);
+    if (!state) return denied(reply, 401, "unauthorized", "Сессия устарела");
+    if (!state.enabled) return denied(reply, 409, "mfa_not_enabled", "2FA не включена");
+    const result = await checkSecondFactor(claims.userId, code);
+    if (!result.ok) return denied(reply, result.status, result.code, result.message);
+    if (result.via === "recovery") {
+      await sql.begin((tx) => audit(tx, request, "mfa.recovery_code_used", claims.userId, {}));
+    }
+    await issueSession(reply, { ...claims, mfaAt: Date.now() });
+    const [left] = await sql<{ count: number }[]>`
+      select cardinality(mfa_recovery_hashes)::int count from users where id=${claims.userId}`;
+    return { ok: true, via: result.via, recoveryCodesLeft: left?.count ?? 0 };
+  });
+
+  app.post("/me/mfa/recovery-codes", { preHandler: requireUser }, async (request, reply) => {
+    const { code } = mfaCodeSchema.parse(request.body);
+    const { userId } = session(request);
+    const state = await mfaState(userId);
+    if (!state?.enabled) return denied(reply, 409, "mfa_not_enabled", "2FA не включена");
+    const result = await checkSecondFactor(userId, code);
+    if (!result.ok) return denied(reply, result.status, result.code, result.message);
+    const recoveryCodes = generateRecoveryCodes();
+    await sql.begin(async (tx) => {
+      await tx`update users set mfa_recovery_hashes=${recoveryCodes.map(hashRecoveryCode)}
+        where id=${userId}`;
+      await audit(tx, request, "mfa.recovery_codes_regenerated", userId, {});
+    });
+    return { recoveryCodes };
+  });
+
+  app.post("/me/mfa/disable", { preHandler: requireUser }, async (request, reply) => {
+    const { code } = mfaCodeSchema.parse(request.body);
+    const claims = session(request);
+    const state = await mfaState(claims.userId);
+    if (!state?.enabled) return denied(reply, 409, "mfa_not_enabled", "2FA не включена");
+    if (state.role === "owner") {
+      return denied(reply, 403, "mfa_mandatory", "Владельцу сервиса 2FA отключать нельзя");
+    }
+    const result = await checkSecondFactor(claims.userId, code);
+    if (!result.ok) return denied(reply, result.status, result.code, result.message);
+    await sql.begin(async (tx) => {
+      await tx`update users set totp_secret_ciphertext=null, totp_secret_iv=null,
+        totp_secret_tag=null, totp_enabled_at=null, totp_last_step=null,
+        mfa_recovery_hashes=ARRAY[]::text[] where id=${claims.userId}`;
+      await audit(tx, request, "mfa.disable", claims.userId, {});
+    });
+    await issueSession(reply, {
+      userId: claims.userId,
+      channelId: claims.channelId,
+      role: claims.role
+    });
+    return { ok: true };
+  });
+
+  // ---- streamer dashboard -----------------------------------------------------------------
 
   app.post("/me/overlay-token/rotate", { preHandler: requireUser }, async (request) => {
     const { channelId } = session(request);
@@ -608,6 +883,7 @@ export async function buildApp(config: ApiConfig) {
       {
         usersTotal: number;
         usersActive: number;
+        usersPending: number;
         activeChannelsHour: number;
         roastsToday: number;
         errorsToday: number;
@@ -624,6 +900,7 @@ export async function buildApp(config: ApiConfig) {
       select
         (select count(*) from users)::int "usersTotal",
         (select count(*) from users where status='active')::int "usersActive",
+        (select count(*) from users where status='pending')::int "usersPending",
         (select count(distinct channel_id) from roasts where created_at>now()-interval '1 hour')::int
           "activeChannelsHour",
         (select count(*) from roasts where created_at>=date_trunc('day',now())
@@ -657,7 +934,7 @@ export async function buildApp(config: ApiConfig) {
     const month = currentMonth();
     return sql`
       select u.id, u.twitch_id, u.login, u.display_name, u.role, u.status, u.created_at,
-        c.id channel_id, c.twitch_login, s.enabled,
+        u.totp_enabled_at is not null mfa_enabled, c.id channel_id, c.twitch_login, s.enabled,
         coalesce(p.code::text,'none') plan, sub.valid_until,
         coalesce(um.roasts,0)::int used, coalesce(p.monthly_roast_limit,0)::int "limit",
         coalesce(um.cost_usd,0)::float8 cost_usd,
@@ -671,7 +948,8 @@ export async function buildApp(config: ApiConfig) {
       ) sub on true
       left join plans p on p.id=sub.plan_id
       left join usage_monthly um on um.channel_id=c.id and um.month=${month}
-      where u.login ilike ${`%${q.search}%`} order by u.created_at desc limit ${q.limit}`;
+      where u.login ilike ${`%${q.search}%`}
+      order by u.status='pending' desc, u.created_at desc limit ${q.limit}`;
   });
 
   const userIdParams = z.object({ id: z.string().uuid() });
@@ -691,6 +969,60 @@ export async function buildApp(config: ApiConfig) {
     });
     return { id, status: "active" };
   });
+  // Support case: a streamer lost the phone and the recovery codes. The owner's own factor is
+  // never reset from the UI: a stolen owner session must not be able to drop the owner's 2FA.
+  app.post("/admin/users/:id/mfa/reset", { preHandler: requireOwner }, async (request, reply) => {
+    const { id } = userIdParams.parse(request.params);
+    if (id === session(request).userId) {
+      return denied(reply, 400, "mfa_self_reset", "Свою 2FA сбросить нельзя");
+    }
+    await sql.begin(async (tx) => {
+      await tx`update users set totp_secret_ciphertext=null, totp_secret_iv=null,
+        totp_secret_tag=null, totp_enabled_at=null, totp_last_step=null,
+        mfa_recovery_hashes=ARRAY[]::text[], mfa_failed_attempts=0, mfa_locked_until=null
+        where id=${id}`;
+      await audit(tx, request, "mfa.reset", id, {});
+    });
+    return { id, mfaEnabled: false };
+  });
+
+  // Pre-approval by Twitch login: whoever signs in with it skips the review queue once.
+  app.get(
+    "/admin/invites",
+    { preHandler: requireOwner },
+    async () =>
+      sql`select i.login, i.created_at, i.used_at, u.login used_by_login
+      from invites i left join users u on u.id=i.used_by_user_id
+      order by i.used_at is not null, i.created_at desc limit 200`
+  );
+  app.post("/admin/invites", { preHandler: requireOwner }, async (request) => {
+    const { login } = z.object({ login: twitchLoginSchema }).parse(request.body);
+    const approvedExisting = await sql.begin(async (tx) => {
+      await tx`insert into invites(login,created_by_user_id)
+        values(${login},${session(request).userId}) on conflict (login) do nothing`;
+      // Someone with this login already signed in and waits for review: approve right away.
+      const [waiting] = await tx<{ id: string }[]>`
+        update users set status='active' where login=${login} and status='pending' returning id`;
+      if (waiting) {
+        await tx`update invites set used_at=now(), used_by_user_id=${waiting.id}
+          where login=${login} and used_at is null`;
+      }
+      await audit(tx, request, "invite.create", login, { approvedExisting: Boolean(waiting) });
+      return Boolean(waiting);
+    });
+    return { login, approvedExisting };
+  });
+  app.delete("/admin/invites/:login", { preHandler: requireOwner }, async (request) => {
+    const { login } = z.object({ login: twitchLoginSchema }).parse(request.params);
+    const deleted = await sql.begin(async (tx) => {
+      const rows = await tx`delete from invites where login=${login} and used_at is null
+        returning login`;
+      await audit(tx, request, "invite.delete", login, {});
+      return rows.length > 0;
+    });
+    return { login, deleted };
+  });
+
   app.post("/admin/users/:id/subscription", { preHandler: requireOwner }, async (request) => {
     const { id } = userIdParams.parse(request.params);
     const body = z

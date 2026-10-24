@@ -7,9 +7,11 @@ import type { createDatabase } from "@roastbot/db";
 import {
   CLASSIFIER_SYSTEM_PROMPT,
   calculateHaikuCostUsd,
+  classifierInput,
   composeRoastPrompt,
   enforceOutputLimit,
-  moderateText,
+  inspectInput,
+  inspectOutput,
   parseClassifierVerdict,
   pricingForModel
 } from "@roastbot/prompts";
@@ -259,10 +261,9 @@ export async function processRoast(
 
     const globalWords = await globalValue<string[]>(deps.sql, "global_stop_words", []);
     const stopWords = [...globalWords, ...context.stopWords];
-    const inputModeration = moderateText(job.inputText, stopWords);
-    if (!inputModeration.allowed) {
-      return await settle("blocked_input", `stop_word:${inputModeration.match.term}`);
-    }
+    // Nickname, message and injection checks: a rejected request costs neither quota nor money.
+    const inputVerdict = inspectInput(job.viewerLogin, job.inputText, stopWords);
+    if (!inputVerdict.allowed) return await settle("blocked_input", inputVerdict.reason);
 
     const reservation = await reserve(deps, job, context.monthlyLimit!, context);
     if (reservation) return await settle("skipped", reservation);
@@ -271,21 +272,19 @@ export async function processRoast(
     const classifierModel = await globalValue(deps.sql, "classifier_model", model);
     // Haiku 5.5 thinks by default and counts thinking against max_tokens; a one-line roast does
     // not need it, and disabling keeps latency inside the 4-second budget.
+    // Instructions go in `system`, the viewer's data alone in the user turn.
+    const prompt = composeRoastPrompt({
+      viewer: job.viewerLogin,
+      message: job.inputText,
+      tone: context.tone,
+      toxicity: context.toxicity
+    });
     const generated = await deps.anthropic.messages.create({
       model,
       max_tokens: GENERATION_MAX_TOKENS,
       thinking: { type: "disabled" },
-      messages: [
-        {
-          role: "user",
-          content: composeRoastPrompt({
-            viewer: job.viewerLogin,
-            message: job.inputText,
-            tone: context.tone,
-            toxicity: context.toxicity
-          })
-        }
-      ]
+      system: prompt.system,
+      messages: [{ role: "user", content: prompt.user }]
     });
     spends.push({
       model,
@@ -297,15 +296,15 @@ export async function processRoast(
     if (generated.stop_reason === "refusal") blockReason = "model_refusal";
     else if (!output) blockReason = "empty_output";
     else {
-      const stopMatch = moderateText(output, stopWords);
-      if (!stopMatch.allowed) blockReason = `stop_word:${stopMatch.match.term}`;
+      const outputVerdict = inspectOutput(output, job.inputText, stopWords);
+      if (!outputVerdict.allowed) blockReason = outputVerdict.reason;
       else {
         const classified = await deps.anthropic.messages.create({
           model: classifierModel,
           max_tokens: CLASSIFIER_MAX_TOKENS,
           thinking: { type: "disabled" },
           system: CLASSIFIER_SYSTEM_PROMPT,
-          messages: [{ role: "user", content: output }]
+          messages: [{ role: "user", content: classifierInput(output) }]
         });
         spends.push({
           model: classifierModel,
@@ -348,6 +347,7 @@ export async function processRoast(
         roastId: currentRoastId,
         viewerLogin: job.viewerLogin,
         text: output,
+        tone: context.tone,
         audioFile,
         expiresAt: expiresAt.toISOString(),
         sentAt: now.toISOString()

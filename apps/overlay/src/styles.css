@@ -23,13 +23,50 @@ body {
   justify-content: center;
   padding: 7vh 4vw;
 }
+/* Scene: the character and the card enter together. */
 #roast {
   position: relative;
+  display: flex;
+  align-items: flex-end;
+  opacity: 0;
+  transform: translateY(35px) scale(0.97);
+  transition:
+    opacity 0.35s ease,
+    transform 0.45s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+#roast.visible {
+  opacity: 1;
+  transform: none;
+}
+/* Cut at the hips: the bottom fades out and the card overlaps it, visual-novel style. */
+#character {
+  position: relative;
+  z-index: 0;
+  height: min(58vh, 640px);
+  width: auto;
+  margin-right: -40px;
+  /* No drop-shadow here: combined with the mask, Chromium (and so OBS) shades the whole box. */
+  -webkit-mask-image: linear-gradient(to bottom, #000 76%, transparent 100%);
+  mask-image: linear-gradient(to bottom, #000 76%, transparent 100%);
+  transform-origin: 50% 100%;
+  opacity: 0;
+  transform: translateX(-24px);
+  transition:
+    opacity 0.4s ease 0.08s,
+    transform 0.55s cubic-bezier(0.2, 0.8, 0.2, 1) 0.08s;
+}
+#roast.visible #character {
+  opacity: 1;
+  transform: none;
+}
+.card {
+  position: relative;
+  z-index: 1;
   display: grid;
   grid-template-columns: auto 1fr auto;
   align-items: center;
   gap: 22px;
-  width: min(780px, 88vw);
+  width: min(780px, 80vw);
   min-height: 130px;
   padding: 24px 27px;
   border: 1px solid #be9cff55;
@@ -39,23 +76,53 @@ body {
     0 22px 75px #0009,
     0 0 50px #8c53dd22;
   backdrop-filter: blur(15px);
-  opacity: 0;
-  transform: translateY(35px) scale(0.97);
-  transition:
-    opacity 0.35s ease,
-    transform 0.45s cubic-bezier(0.2, 0.8, 0.2, 1);
   overflow: hidden;
 }
-#roast:before {
+.card:before {
   content: "";
   position: absolute;
   inset: 0;
   background: linear-gradient(90deg, #9c6cff11, #ff5d9d13);
   pointer-events: none;
 }
-#roast.visible {
-  opacity: 1;
-  transform: none;
+/* With a character on screen the "R" badge is redundant. */
+#roast[data-tone] .orb {
+  display: none;
+}
+#roast[data-tone] .card {
+  grid-template-columns: 1fr auto;
+}
+#roast[data-tone="tsundere"] .card {
+  border-color: #ff8fb055;
+  box-shadow:
+    0 22px 75px #0009,
+    0 0 50px #ff6f9a26;
+}
+#roast[data-tone="tsundere"] #viewer {
+  color: #ff9dbb;
+}
+#roast[data-tone="tsundere"] .wave i {
+  background: #ff9dbb;
+}
+#roast[data-tone="yandere"] .card {
+  border-color: #e0315055;
+  background: linear-gradient(125deg, #170f15ee, #2a1019ed);
+  box-shadow:
+    0 22px 75px #0009,
+    0 0 50px #c4143a2e;
+}
+#roast[data-tone="yandere"] #viewer {
+  color: #ff6b81;
+}
+#roast[data-tone="yandere"] .wave i {
+  background: #ff6b81;
+}
+/* While the voice plays: the tsundere huffs, the yandere sways. */
+#roast.speaking[data-tone="tsundere"] #character {
+  animation: huff 0.55s ease-in-out infinite alternate;
+}
+#roast.speaking[data-tone="yandere"] #character {
+  animation: sway 2.4s ease-in-out infinite alternate;
 }
 .orb {
   display: grid;
@@ -133,6 +200,24 @@ blockquote {
   color: #ff9aa8;
   background: #30151ddd;
 }
+@keyframes huff {
+  to {
+    transform: translateY(-7px) scale(1.01);
+  }
+}
+@keyframes sway {
+  from {
+    transform: rotate(-1.2deg);
+  }
+  to {
+    transform: rotate(1.2deg);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  #roast.speaking #character {
+    animation: none;
+  }
+}
 @keyframes wave {
   to {
     transform: scaleY(0.35);
@@ -140,7 +225,10 @@ blockquote {
   }
 }
 @media (max-width: 600px) {
-  #roast {
+  #character {
+    height: 30vh;
+  }
+  .card {
     grid-template-columns: auto 1fr;
     padding: 18px;
     gap: 15px;

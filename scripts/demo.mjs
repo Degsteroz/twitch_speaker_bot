@@ -119,11 +119,13 @@ if (!useRealAnthropic) {
     request.on("data", (chunk) => (body += chunk));
     request.on("end", () => {
       const payload = JSON.parse(body);
-      const prompt = String(payload.messages?.[0]?.content ?? "");
-      const viewer = /<viewer>([^<]*)<\/viewer>/u.exec(prompt)?.[1] ?? "зритель";
-      const tone = prompt.includes("яндэрэ") ? "yandere" : "tsundere";
+      const data = String(payload.messages?.[0]?.content ?? "");
+      const system = String(payload.system ?? "");
+      const viewer = /<viewer>([^<]*)<\/viewer>/u.exec(data)?.[1] ?? "зритель";
+      const tone = system.includes("яндэрэ") ? "yandere" : "tsundere";
       const pool = lines[tone];
-      const text = payload.system
+      // Both calls carry a system prompt now; the classifier is the one that checks a <reply>.
+      const text = data.startsWith("<reply>")
         ? "ALLOW"
         : pool[Math.floor(Math.random() * pool.length)].replace("{v}", viewer);
       response.setHeader("content-type", "application/json");

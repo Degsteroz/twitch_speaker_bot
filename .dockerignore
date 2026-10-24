@@ -1,12 +1,21 @@
 .git
 .github
 .cursor
+.idea
+.vscode
 **/.DS_Store
 **/node_modules
 **/dist
 **/.vite
 **/coverage
 **/*.log
+# Local build state: with dist/ excluded, a stale tsbuildinfo makes `tsc -b` skip the build.
+**/*.tsbuildinfo
+# Secrets must never reach an image layer (`COPY . .` copies the whole context).
+.env
+.env.*
+!.env.example
+**/.env
 deploy/.env
 deploy/backups
 backups
@@ -15,3 +24,4 @@ models
 RoastBot-PLAN.md
 **/__pycache__
 .pycache
+**/.venv

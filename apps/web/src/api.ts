@@ -3,11 +3,16 @@ const API = (import.meta.env.VITE_API_URL as string | undefined)?.replace(/\/$/u
 export class ApiError extends Error {
   constructor(
     public status: number,
-    message: string
+    message: string,
+    public code?: string
   ) {
     super(message);
   }
 }
+
+// Answers that mean "the session changed under you": the app re-reads /me/session and shows
+// the matching screen (2FA prompt, pending approval) instead of a broken page.
+const SESSION_CHANGED_CODES = new Set(["mfa_required", "mfa_setup_required", "pending_approval"]);
 
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const headers = new Headers(init?.headers);
@@ -18,13 +23,20 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
       window.dispatchEvent(new Event("roastbot:session-expired"));
     }
     let message = `Ошибка API (${String(response.status)})`;
+    let code: string | undefined;
     try {
-      const body = (await response.json()) as { error?: string | { message?: string } };
+      const body = (await response.json()) as {
+        error?: string | { code?: string; message?: string };
+      };
       message = typeof body.error === "string" ? body.error : (body.error?.message ?? message);
+      code = typeof body.error === "string" ? undefined : body.error?.code;
     } catch {
       /* response is not JSON */
     }
-    throw new ApiError(response.status, message);
+    if (code && SESSION_CHANGED_CODES.has(code) && typeof window !== "undefined") {
+      window.dispatchEvent(new Event("roastbot:session-changed"));
+    }
+    throw new ApiError(response.status, message, code);
   }
   return response.json() as Promise<T>;
 }
@@ -35,6 +47,7 @@ export const post = (body: unknown = {}): RequestInit => ({
   method: "POST"
 });
 export const put = (body: unknown): RequestInit => ({ body: JSON.stringify(body), method: "PUT" });
+export const del = (): RequestInit => ({ method: "DELETE" });
 
 export interface Session {
   userId: string;
@@ -42,9 +55,16 @@ export interface Session {
   login: string;
   displayName: string;
   role: "owner" | "user";
-  status: "active" | "suspended";
+  status: "active" | "suspended" | "pending";
   channelLogin: string;
-  overlayToken: string;
+  /** Withheld by the API until the account is approved and the second factor is confirmed. */
+  overlayToken: string | null;
+  mfaEnabled: boolean;
+  /** 2FA is on but this login has not confirmed it yet. */
+  mfaRequired: boolean;
+  /** What /admin needs from the owner: enroll, confirm again (every 12 h) or nothing. */
+  adminMfa: "ok" | "setup" | "verify";
+  recoveryCodesLeft: number;
 }
 export interface Settings {
   tone: "tsundere" | "yandere";

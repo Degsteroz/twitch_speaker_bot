@@ -1,3 +1,8 @@
+export type Tone = "tsundere" | "yandere";
+const TONES: readonly Tone[] = ["tsundere", "yandere"];
+export const isTone = (value: unknown): value is Tone =>
+  typeof value === "string" && (TONES as readonly string[]).includes(value);
+
 export interface RoastEvent {
   version: 1;
   type: "roast.play";
@@ -5,6 +10,8 @@ export interface RoastEvent {
   roastId: string;
   viewerLogin: string;
   text: string;
+  /** Character to show; absent on events from before characters existed. */
+  tone?: Tone;
   audioUrl: string;
   expiresAt: string;
   sentAt: string;
@@ -53,7 +60,18 @@ export function parseEvent(raw: string): ServerEvent | null {
   } catch {
     return null;
   }
-  return value as unknown as RoastEvent;
+  // An unknown tone only loses the character, never the roast itself.
+  const { tone, ...rest } = value;
+  return { ...(rest as unknown as RoastEvent), ...(isTone(tone) ? { tone } : {}) };
+}
+
+/**
+ * `?preview=tsundere` (or yandere) shows a sample card without a token or a connection, so the
+ * streamer can place and size the Browser Source in OBS before going live.
+ */
+export function previewTone(search: string): Tone | null {
+  const value = new URLSearchParams(search).get("preview");
+  return isTone(value) ? value : null;
 }
 
 export function getToken(location: Pick<Location, "search" | "pathname">): string | null {

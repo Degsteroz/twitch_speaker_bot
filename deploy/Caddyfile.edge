@@ -1,0 +1,14 @@
+# Edge mode: another project's Caddy owns ports 80/443 and TLS, and forwards this app's domain
+# to `roastbot-edge:8080` over the shared Docker network `edge`. This Caddy only routes.
+{
+	auto_https off
+	admin off
+	servers {
+		# Keep the client IP and scheme set by the front Caddy.
+		trusted_proxies static private_ranges
+	}
+}
+
+:8080 {
+	import caddy-routes.caddy
+}

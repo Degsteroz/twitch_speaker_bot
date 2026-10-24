@@ -17,8 +17,10 @@ import type { WebSocket } from "@fastify/websocket";
 import { buildApp } from "./app.js";
 import type { ApiConfig } from "./config.js";
 import { encryptValue } from "./security.js";
+import { currentStep, generateTotpSecret, totpCode } from "./totp.js";
 
 const KEY = "ab".repeat(32);
+const OWNER_TWITCH_ID = "900000001";
 let db: TestDatabase;
 let app: Awaited<ReturnType<typeof buildApp>>;
 let audioDir: string;
@@ -39,12 +41,12 @@ beforeAll(async () => {
     TWITCH_CLIENT_ID: "client",
     TWITCH_CLIENT_SECRET: "secret",
     TWITCH_REDIRECT_URI: "https://app.test/api/auth/twitch/callback",
-    TWITCH_OWNER_IDS: "",
+    TWITCH_OWNER_IDS: OWNER_TWITCH_ID,
     SESSION_SECRET: "s".repeat(48),
     TOKEN_ENCRYPTION_KEY: KEY,
     AUDIO_SIGNING_SECRET: "a".repeat(48),
     AUDIO_DIR: audioDir,
-    ownerIds: new Set()
+    ownerIds: new Set([OWNER_TWITCH_ID])
   };
   app = await buildApp(config);
   await app.ready();
@@ -61,23 +63,53 @@ beforeEach(async () => {
   globalThis.fetch = realFetch;
   streamer = await createTestChannel(db.sql);
   owner = await createTestChannel(db.sql, { role: "owner" });
+  await enrollMfa(owner);
   await db.sql`update global_settings set value='false'::jsonb where key='kill_switch'`;
 });
 
-const cookieFor = (channel: TestChannel, role: "owner" | "user" = "user") =>
-  `roastbot_session=${app.jwt.sign({ userId: channel.userId, channelId: channel.channelId, role })}`;
+/** Default cookies carry a fresh second-factor confirmation; pass `mfaAt: null` to omit it. */
+const cookieFor = (
+  channel: TestChannel,
+  claims: { role?: "owner" | "user"; mfaAt?: number | null } = {}
+) => {
+  const mfaAt = claims.mfaAt === undefined ? Date.now() : claims.mfaAt;
+  const token = app.jwt.sign({
+    userId: channel.userId,
+    channelId: channel.channelId,
+    role: claims.role ?? "user",
+    ...(mfaAt === null ? {} : { mfaAt })
+  });
+  return `roastbot_session=${token}`;
+};
+
+/** Stores an enabled TOTP secret directly, as if the user had finished enrollment. */
+async function enrollMfa(channel: TestChannel) {
+  const secret = generateTotpSecret();
+  const encrypted = encryptValue(secret, KEY);
+  await db.sql`update users set totp_secret_ciphertext=${encrypted.ciphertext},
+    totp_secret_iv=${encrypted.iv}, totp_secret_tag=${encrypted.tag}, totp_enabled_at=now()
+    where id=${channel.userId}`;
+  return secret;
+}
+
+const sessionCookie = (response: { cookies: { name: string; value: string }[] }) => {
+  const cookie = response.cookies.find((item) => item.name === "roastbot_session");
+  if (!cookie) throw new Error("no session cookie");
+  return `roastbot_session=${cookie.value}`;
+};
 
 async function call(
-  method: "GET" | "POST" | "PATCH" | "PUT",
+  method: "GET" | "POST" | "PATCH" | "PUT" | "DELETE",
   url: string,
-  channel?: TestChannel,
+  channel?: TestChannel | string,
   payload?: unknown
 ) {
+  const cookie = typeof channel === "string" ? channel : channel && cookieFor(channel);
   return app.inject({
     method,
     url,
     headers: {
-      ...(channel ? { cookie: cookieFor(channel) } : {}),
+      ...(cookie ? { cookie } : {}),
       ...(payload === undefined ? {} : { "content-type": "application/json" })
     },
     ...(payload === undefined ? {} : { payload: JSON.stringify(payload) })
@@ -361,11 +393,7 @@ describe("overlay websocket", () => {
 describe("back-office", () => {
   it("is owner-only, checked against the database role", async () => {
     expect((await call("GET", "/admin/overview", streamer)).statusCode).toBe(403);
-    const forged = await app.inject({
-      method: "GET",
-      url: "/admin/overview",
-      headers: { cookie: cookieFor(streamer, "owner") }
-    });
+    const forged = await call("GET", "/admin/overview", cookieFor(streamer, { role: "owner" }));
     expect(forged.statusCode).toBe(403);
     const overview = await call("GET", "/admin/overview", owner);
     expect(overview.statusCode).toBe(200);
@@ -422,6 +450,200 @@ describe("back-office", () => {
     expect(after.json<{ id: string }[]>().map((row) => row.id)).not.toContain(blocked!.id);
     expect((await call("POST", `/admin/roasts/${blocked!.id}/review`, owner, {})).statusCode).toBe(
       404
+    );
+  });
+});
+
+/** Runs the OAuth callback with Twitch mocked and returns the issued session cookie. */
+async function twitchLogin(user: { id: string; login: string }) {
+  globalThis.fetch = vi.fn((url: string | URL | Request) =>
+    Promise.resolve(
+      (url instanceof Request ? url.url : url.toString()).includes("oauth2/token")
+        ? Response.json({
+            access_token: "access",
+            refresh_token: "refresh",
+            expires_in: 3600,
+            scope: ["channel:read:redemptions"]
+          })
+        : Response.json({ data: [{ id: user.id, login: user.login, display_name: user.login }] })
+    )
+  );
+  const response = await app.inject({
+    method: "GET",
+    url: "/auth/twitch/callback?code=code&state=state",
+    headers: { cookie: "oauth_state=state" }
+  });
+  expect(response.headers.location).toBe("https://app.test");
+  return sessionCookie(response);
+}
+
+const randomTwitchId = () => `7${String(Math.floor(Math.random() * 1e8))}`;
+
+describe("registration", () => {
+  it("keeps new Twitch logins pending until the owner approves them", async () => {
+    const id = randomTwitchId();
+    const login = `newbie_${id}`;
+    const cookie = await twitchLogin({ id, login });
+    expect((await call("GET", "/me/session", cookie)).json()).toMatchObject({
+      status: "pending",
+      role: "user",
+      overlayToken: null
+    });
+    const blocked = await call("GET", "/settings", cookie);
+    expect(blocked.statusCode).toBe(403);
+    expect(blocked.json()).toMatchObject({ error: { code: "pending_approval" } });
+    expect((await call("POST", "/roasts/test", cookie, { viewerLogin: "x" })).statusCode).toBe(403);
+    const [signup] = await db.sql<{ action: string; payload: unknown }[]>`
+      select action, payload from audit_log where target=${login}`;
+    expect(signup).toEqual({ action: "user.signup", payload: { status: "pending" } });
+
+    const [listed] = (await call("GET", `/admin/users?search=${login}`, owner)).json<
+      { id: string; status: string }[]
+    >();
+    expect(listed).toMatchObject({ status: "pending" });
+    await call("POST", `/admin/users/${listed!.id}/activate`, owner);
+    expect((await call("GET", "/settings", cookie)).statusCode).toBe(200);
+    const again = await twitchLogin({ id, login });
+    expect((await call("GET", "/me/session", again)).json()).toMatchObject({ status: "active" });
+  });
+
+  it("lets invited logins and the configured owner in without review", async () => {
+    const id = randomTwitchId();
+    const login = `invited_${id}`;
+    const created = await call("POST", "/admin/invites", owner, {
+      login: `@${login.toUpperCase()}`
+    });
+    expect(created.json()).toEqual({ login, approvedExisting: false });
+    expect((await call("POST", "/admin/invites", owner, { login: "no spaces!" })).statusCode).toBe(
+      400
+    );
+    const cookie = await twitchLogin({ id, login });
+    const me = (await call("GET", "/me/session", cookie)).json<{ overlayToken: unknown }>();
+    expect(me).toMatchObject({ status: "active" });
+    expect(typeof me.overlayToken).toBe("string");
+    const invites = (await call("GET", "/admin/invites", owner)).json<AnyInvite[]>();
+    expect(invites.find((row) => row.login === login)).toMatchObject({ used_by_login: login });
+    expect((await call("DELETE", `/admin/invites/${login}`, owner)).json()).toEqual({
+      login,
+      deleted: false
+    });
+
+    const ownerCookie = await twitchLogin({ id: OWNER_TWITCH_ID, login: `boss_${id}` });
+    expect((await call("GET", "/me/session", ownerCookie)).json()).toMatchObject({
+      status: "active",
+      role: "owner",
+      adminMfa: "setup"
+    });
+  });
+
+  it("approves a waiting streamer as soon as the owner invites the login", async () => {
+    const id = randomTwitchId();
+    const login = `waiting_${id}`;
+    const cookie = await twitchLogin({ id, login });
+    expect((await call("GET", "/settings", cookie)).statusCode).toBe(403);
+    expect((await call("POST", "/admin/invites", owner, { login })).json()).toEqual({
+      login,
+      approvedExisting: true
+    });
+    expect((await call("GET", "/settings", cookie)).statusCode).toBe(200);
+  });
+});
+
+interface AnyInvite {
+  login: string;
+  used_by_login: string | null;
+}
+
+describe("two-factor authentication", () => {
+  it("enrolls with an authenticator code, refuses replays and accepts recovery codes", async () => {
+    const setup = await call("POST", "/me/mfa/setup", streamer);
+    const { secret, otpauthUri } = setup.json<{ secret: string; otpauthUri: string }>();
+    expect(otpauthUri).toContain(`secret=${secret}`);
+    const wrong = await call("POST", "/me/mfa/enable", streamer, { code: "000000" });
+    expect(wrong.json()).toMatchObject({ error: { code: "mfa_invalid" } });
+
+    const step = currentStep();
+    const code = totpCode(secret, step);
+    const enabled = await call("POST", "/me/mfa/enable", streamer, { code });
+    expect(enabled.statusCode).toBe(200);
+    const { recoveryCodes } = enabled.json<{ recoveryCodes: string[] }>();
+    expect(recoveryCodes).toHaveLength(8);
+    expect((await call("GET", "/settings", sessionCookie(enabled))).statusCode).toBe(200);
+
+    const fresh = cookieFor(streamer, { mfaAt: null });
+    const gated = await call("GET", "/settings", fresh);
+    expect(gated.statusCode).toBe(403);
+    expect(gated.json()).toMatchObject({ error: { code: "mfa_required" } });
+    expect((await call("GET", "/me/session", fresh)).json()).toMatchObject({
+      mfaRequired: true,
+      overlayToken: null
+    });
+
+    expect((await call("POST", "/me/mfa/verify", fresh, { code })).statusCode).toBe(400);
+    const verified = await call("POST", "/me/mfa/verify", fresh, {
+      code: totpCode(secret, step + 1)
+    });
+    expect(verified.json()).toMatchObject({ ok: true, via: "totp" });
+    expect((await call("GET", "/settings", sessionCookie(verified))).statusCode).toBe(200);
+
+    const recovery = recoveryCodes[0]!.toUpperCase();
+    const recovered = await call("POST", "/me/mfa/verify", fresh, { code: recovery });
+    expect(recovered.json()).toMatchObject({ via: "recovery", recoveryCodesLeft: 7 });
+    expect((await call("POST", "/me/mfa/verify", fresh, { code: recovery })).statusCode).toBe(400);
+  });
+
+  it("locks the second factor after five wrong codes", async () => {
+    const secret = await enrollMfa(streamer);
+    const fresh = cookieFor(streamer, { mfaAt: null });
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      expect((await call("POST", "/me/mfa/verify", fresh, { code: "000000" })).statusCode).toBe(
+        400
+      );
+    }
+    const locked = await call("POST", "/me/mfa/verify", fresh, { code: "000000" });
+    expect(locked.statusCode).toBe(429);
+    const correct = await call("POST", "/me/mfa/verify", fresh, {
+      code: totpCode(secret, currentStep())
+    });
+    expect(correct.json()).toMatchObject({ error: { code: "mfa_locked" } });
+  });
+
+  it("lets a streamer turn 2FA off with a valid code", async () => {
+    const secret = await enrollMfa(streamer);
+    const disabled = await call("POST", "/me/mfa/disable", streamer, {
+      code: totpCode(secret, currentStep())
+    });
+    expect(disabled.json()).toEqual({ ok: true });
+    expect((await call("GET", "/settings", cookieFor(streamer, { mfaAt: null }))).statusCode).toBe(
+      200
+    );
+  });
+
+  it("guards the back-office with the owner's second factor", async () => {
+    const newcomer = await createTestChannel(db.sql, { role: "owner" });
+    expect((await call("GET", "/admin/overview", newcomer)).json()).toMatchObject({
+      error: { code: "mfa_setup_required" }
+    });
+    const stale = cookieFor(owner, { mfaAt: Date.now() - 13 * 60 * 60 * 1000 });
+    for (const cookie of [cookieFor(owner, { mfaAt: null }), stale]) {
+      const response = await call("GET", "/admin/overview", cookie);
+      expect(response.statusCode).toBe(403);
+      expect(response.json()).toMatchObject({ error: { code: "mfa_required" } });
+    }
+    expect((await call("GET", "/admin/overview", owner)).statusCode).toBe(200);
+    expect((await call("POST", "/me/mfa/disable", owner, { code: "000000" })).json()).toMatchObject(
+      { error: { code: "mfa_mandatory" } }
+    );
+
+    await enrollMfa(streamer);
+    expect(
+      (await call("POST", `/admin/users/${streamer.userId}/mfa/reset`, owner)).statusCode
+    ).toBe(200);
+    expect((await call("GET", "/settings", cookieFor(streamer, { mfaAt: null }))).statusCode).toBe(
+      200
+    );
+    expect((await call("POST", `/admin/users/${owner.userId}/mfa/reset`, owner)).statusCode).toBe(
+      400
     );
   });
 });

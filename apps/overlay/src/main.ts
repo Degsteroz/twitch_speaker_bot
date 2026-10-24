@@ -1,12 +1,20 @@
+import tsundereUrl from "./assets/tsundere.webp";
+import yandereUrl from "./assets/yandere.webp";
 import {
   EventQueue,
   getToken,
   parseEvent,
+  previewTone,
   reconnectDelay,
   websocketUrl,
-  type RoastEvent
+  type RoastEvent,
+  type Tone
 } from "./core.js";
 import "./styles.css";
+
+const CHARACTERS: Readonly<Record<Tone, string>> = { tsundere: tsundereUrl, yandere: yandereUrl };
+// Decode both up front so the first roast does not pop in without its character.
+for (const url of Object.values(CHARACTERS)) new Image().src = url;
 
 function element(selector: string): Element {
   const found = document.querySelector(selector);
@@ -14,6 +22,7 @@ function element(selector: string): Element {
   return found;
 }
 const card = element("#roast") as HTMLElement;
+const character = element("#character") as HTMLImageElement;
 const viewer = element("#viewer") as HTMLElement;
 const roastText = element("#text") as HTMLElement;
 const audio = element("#audio") as HTMLAudioElement;
@@ -33,8 +42,19 @@ function send(value: unknown) {
 }
 function hideCard() {
   card.hidden = true;
-  card.classList.remove("visible");
+  card.classList.remove("visible", "speaking");
   active = undefined;
+}
+function showCharacter(tone: Tone | undefined) {
+  if (tone) {
+    card.dataset.tone = tone;
+    character.src = CHARACTERS[tone];
+    character.hidden = false;
+  } else {
+    delete card.dataset.tone;
+    character.removeAttribute("src");
+    character.hidden = true;
+  }
 }
 function next() {
   if (active) return;
@@ -43,6 +63,7 @@ function next() {
   active = event;
   viewer.textContent = `@${event.viewerLogin}`;
   roastText.textContent = event.text;
+  showCharacter(event.tone);
   audio.src = event.audioUrl;
   card.hidden = false;
   requestAnimationFrame(() => card.classList.add("visible"));
@@ -63,6 +84,8 @@ function finish() {
   recover.hidden = true;
   next();
 }
+audio.addEventListener("playing", () => card.classList.add("speaking"));
+audio.addEventListener("pause", () => card.classList.remove("speaking"));
 audio.addEventListener("ended", finish);
 audio.addEventListener("error", finish);
 recover.addEventListener("click", () => {
@@ -139,9 +162,23 @@ function connect() {
   });
 }
 
+function showPreview(tone: Tone) {
+  connection.hidden = true;
+  viewer.textContent = "@viewer";
+  roastText.textContent =
+    tone === "tsundere"
+      ? "Хм, это была игра? Не то чтобы мне было интересно, но… ладно, чуть-чуть."
+      : "Я видела каждый твой промах… и запомнила их все. Навсегда.";
+  showCharacter(tone);
+  card.hidden = false;
+  requestAnimationFrame(() => card.classList.add("visible", "speaking"));
+}
+
 window.addEventListener("beforeunload", () => {
   stopped = true;
   if (reconnectTimer !== undefined) clearTimeout(reconnectTimer);
   socket?.close();
 });
-connect();
+const preview = previewTone(location.search);
+if (preview) showPreview(preview);
+else connect();
