@@ -245,13 +245,15 @@ services:
       - ./caddy-routes.caddy:/etc/caddy/caddy-routes.caddy:ro
       - caddy-data:/data
       - caddy-config:/config
+    # Started, not healthy: Caddy answers 502 for a few seconds while an upstream warms up, which
+    # beats `compose up` aborting the whole deploy over one slow health probe.
     depends_on:
       api:
-        condition: service_healthy
+        condition: service_started
       web:
-        condition: service_healthy
+        condition: service_started
       overlay:
-        condition: service_healthy
+        condition: service_started
     networks: [internal, public]
     mem_limit: 128m
     cpus: 0.20
