@@ -28,6 +28,14 @@ export function matchKeyword(message: string, keywords: readonly string[]): stri
   return null;
 }
 
+/** The message talks about the streamer: "стример" in any form, or the channel login. */
+export function aboutStreamer(message: string, streamerLogin = ""): boolean {
+  const text = fold(message);
+  const login = fold(streamerLogin.trim());
+  if (/(?:^|[^\p{L}\p{N}])стример/u.test(text)) return true;
+  return login.length > 0 && new RegExp(`(?:^|[^\\p{L}\\p{N}_])@?${escapeRegExp(login)}(?![\\p{L}\\p{N}_])`, "u").test(text);
+}
+
 /** `random` is in [0, 1): below the percentage means "yes". */
 export const rollPercent = (percent: number, random: number) => random * 100 < percent;
 
@@ -39,6 +47,8 @@ export interface ChatMessage {
   username: string;
   displayName: string;
   isBroadcaster: boolean;
+  /** The channel login, to notice "@streamer" in the message. */
+  streamerLogin?: string;
 }
 
 export interface ChatRoast {
@@ -49,8 +59,9 @@ export interface ChatRoast {
 
 /**
  * Decides whether a chat message triggers a roast. `!роаст` works when enabled; otherwise other
- * commands, the streamer's own messages and known bots are ignored, and a keyword fires with
- * `keywordChancePercent`. The target is then the streamer with `streamerTargetPercent`.
+ * commands and known bots are ignored, and a keyword fires with `keywordChancePercent`. The
+ * target is then the streamer with `streamerTargetPercent`; the streamer's own message always
+ * roasts the streamer (there is nobody else to pick, and it is how a streamer tests the bot alone).
  */
 export function chatTrigger(
   chat: ChatMessage,
@@ -58,24 +69,23 @@ export function chatTrigger(
   random: () => number = Math.random
 ): ChatRoast | null {
   if (KNOWN_BOTS.has(chat.username.toLowerCase())) return null;
+  const target = (text: string): RoastTarget => {
+    if (chat.isBroadcaster) return "streamer";
+    // "скажи стримеру, что он мажет" is about the streamer: a coin flip would answer the
+    // viewer instead. A channel that chose "only the chatter" (0%) keeps its streamer safe.
+    if (triggers.streamerTargetPercent > 0 && aboutStreamer(text, chat.streamerLogin)) {
+      return "streamer";
+    }
+    return pickTarget(triggers.streamerTargetPercent, random());
+  };
   if (triggers.command) {
     const inputText = parseRoastCommand(chat.message, chat.displayName);
-    if (inputText !== null) {
-      return {
-        source: "chat_command",
-        inputText,
-        target: pickTarget(triggers.streamerTargetPercent, random())
-      };
-    }
+    if (inputText !== null) return { source: "chat_command", inputText, target: target(inputText) };
   }
-  if (chat.isBroadcaster || chat.message.trimStart().startsWith("!")) return null;
+  if (chat.message.trimStart().startsWith("!")) return null;
   if (!triggers.keywords.length || !matchKeyword(chat.message, triggers.keywords)) return null;
   if (!rollPercent(triggers.keywordChancePercent, random())) return null;
-  return {
-    source: "chat_keyword",
-    inputText: chat.message,
-    target: pickTarget(triggers.streamerTargetPercent, random())
-  };
+  return { source: "chat_keyword", inputText: chat.message, target: target(chat.message) };
 }
 
 // ---- EventSub --------------------------------------------------------------------------------

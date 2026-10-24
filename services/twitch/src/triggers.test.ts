@@ -57,11 +57,28 @@ describe("chat triggers", () => {
     expect(chatTrigger(chat("!роаст"), triggers({ command: false }), always)).toBeNull();
   });
 
-  it("ignores bots, other commands and the streamer's own messages", () => {
+  it("ignores bots and other commands", () => {
     const settings = triggers({ keywords: ["слил"], keywordChancePercent: 100 });
     expect(chatTrigger(chat("слил", { username: "Nightbot" }), settings, always)).toBeNull();
     expect(chatTrigger(chat("!слил"), settings, always)).toBeNull();
-    expect(chatTrigger(chat("слил", { isBroadcaster: true }), settings, always)).toBeNull();
+  });
+
+  it("answers the streamer's own keyword by roasting the streamer", () => {
+    const settings = triggers({
+      keywords: ["слил"],
+      keywordChancePercent: 100,
+      streamerTargetPercent: 0
+    });
+    expect(chatTrigger(chat("опять слил", { isBroadcaster: true }), settings, never)).toEqual({
+      source: "chat_keyword",
+      inputText: "опять слил",
+      target: "streamer"
+    });
+    expect(chatTrigger(chat("!роаст мой aim", { isBroadcaster: true }), settings, never)).toEqual({
+      source: "chat_command",
+      inputText: "мой aim",
+      target: "streamer"
+    });
   });
 });
 

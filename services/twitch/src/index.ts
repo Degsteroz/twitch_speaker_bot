@@ -121,7 +121,8 @@ chat.on("message", (channelName, tags, message, self) => {
       message,
       username: viewerLogin,
       displayName: tags["display-name"] ?? viewerLogin,
-      isBroadcaster: tags["user-id"] === channel.twitchId
+      isBroadcaster: tags["user-id"] === channel.twitchId,
+      streamerLogin: channel.twitchLogin
     },
     channel.triggers
   );
@@ -456,5 +457,28 @@ async function reconcileDonations(channels: Channel[]): Promise<void> {
   }
 }
 
+// One reconcile at a time: a settings change during a run queues exactly one more run, so a
+// burst of saves never joins a channel twice or opens two EventSub sessions.
+let running: Promise<void> | undefined;
+let again = false;
+function scheduleReconcile(): void {
+  if (running) {
+    again = true;
+    return;
+  }
+  running = reconcile()
+    .catch(console.error)
+    .finally(() => {
+      running = undefined;
+      if (again) {
+        again = false;
+        scheduleReconcile();
+      }
+    });
+}
+
 await reconcile();
-timers.reconciliation = setInterval(() => void reconcile().catch(console.error), 60_000);
+// The database notifies on settings, approvals, new scopes and DonationAlerts links
+// (migration 0008); the poll stays as a safety net for a missed notification.
+await sql.listen("channels_changed", scheduleReconcile);
+timers.reconciliation = setInterval(scheduleReconcile, 60_000);
