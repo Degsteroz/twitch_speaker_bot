@@ -195,9 +195,13 @@ services:
     networks: [internal]
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1/"]
-      interval: 30s
+      interval: 10s
       timeout: 5s
       retries: 3
+      # Caddy waits for this to turn healthy; without a quick first probe the status stays
+      # "starting" for a whole interval and `compose up` gives up on the dependency.
+      start_period: 10s
+      start_interval: 2s
     mem_limit: 64m
     cpus: 0.10
     logging: *default-logging
@@ -214,9 +218,13 @@ services:
     networks: [internal]
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1/"]
-      interval: 30s
+      interval: 10s
       timeout: 5s
       retries: 3
+      # Caddy waits for this to turn healthy; without a quick first probe the status stays
+      # "starting" for a whole interval and `compose up` gives up on the dependency.
+      start_period: 10s
+      start_interval: 2s
     mem_limit: 64m
     cpus: 0.10
     logging: *default-logging
