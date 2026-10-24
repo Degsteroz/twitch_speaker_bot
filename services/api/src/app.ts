@@ -11,6 +11,7 @@ import {
   COMMAND_PLANS,
   DEFAULT_GLOBAL_MONTHLY_ROAST_CAP,
   DEFAULT_MONTHLY_BUDGET_USD,
+  DEFAULT_ELEVENLABS_MONTHLY_CHAR_LIMIT,
   DEFAULT_YANDEX_TTS_MONTHLY_LIMIT_RUB,
   ROAST_REQUESTED_QUEUE,
   ROAST_REQUESTED_QUEUE_OPTIONS,
@@ -84,7 +85,8 @@ const globalSettingSchemas = {
   model: z.string().regex(/^claude-[a-z0-9-]+$/u),
   classifier_model: z.string().regex(/^claude-[a-z0-9-]+$/u),
   input_retention_days: z.number().int().min(1).max(30),
-  yandex_tts_monthly_limit_rub: z.number().min(0).max(100_000)
+  yandex_tts_monthly_limit_rub: z.number().min(0).max(100_000),
+  elevenlabs_monthly_char_limit: z.number().int().min(0).max(10_000_000)
 } as const;
 type GlobalSettingKey = keyof typeof globalSettingSchemas;
 
@@ -851,9 +853,27 @@ export async function buildApp(config: ApiConfig) {
           : remaining === 0 || globalLimitReached
             ? "limit"
             : "working";
+    const channelId = session(request).channelId;
+    const [eventsub] = await sql<{ connected: boolean; subscriptions: Record<string, string> }[]>`
+      select connected, subscriptions from eventsub_state where channel_id=${channelId}`;
     return {
       month,
       plan: row.plan,
+      // Is it actually on air: the overlay page is open somewhere (OBS), and Twitch accepted our
+      // EventSub subscriptions (null when the channel needs none).
+      overlayConnected: [...overlayConnections].some(
+        (connection) =>
+          connection.channelId === channelId &&
+          connection.socket.readyState === connection.socket.OPEN
+      ),
+      twitchEvents: eventsub
+        ? {
+            connected: eventsub.connected,
+            failed: Object.entries(eventsub.subscriptions)
+              .filter(([, result]) => result !== "ok")
+              .map(([type]) => type)
+          }
+        : null,
       // `!роаст` is a paid feature; the panel shows the switch disabled on the free plan.
       commandAvailable: COMMAND_PLANS.has(row.plan ?? ""),
       enabled: row.enabled,
@@ -895,6 +915,22 @@ export async function buildApp(config: ApiConfig) {
       requestedAt: new Date().toISOString()
     });
     return { roastId, status: "queued" };
+  });
+
+  // What reached the bot lately and how it ended, plus Twitch's answer to our subscriptions: a
+  // streamer whose reward "does nothing" sees here whether the redemption arrived at all.
+  app.get("/activity", { preHandler: requireUser }, async (request) => {
+    const { channelId } = session(request);
+    const roasts = await sql`
+      select r.id, r.created_at "createdAt", r.source, r.viewer_login "viewerLogin",
+        left(r.input_text, 120) "inputText", r.output_text "outputText", r.status, r.error,
+        o.status "overlayStatus"
+      from roasts r left join overlay_events o on o.roast_id=r.id
+      where r.channel_id=${channelId} order by r.created_at desc limit 15`;
+    const [eventsub] = await sql`
+      select connected, subscriptions, updated_at "updatedAt" from eventsub_state
+      where channel_id=${channelId}`;
+    return { roasts, eventsub: eventsub ?? null };
   });
 
   app.get("/roasts/:id", { preHandler: requireUser }, async (request, reply) => {
@@ -1054,15 +1090,25 @@ export async function buildApp(config: ApiConfig) {
           "killSwitch",
         (select count(*) from roasts where moderation_reviewed_at is null
           and status in ('blocked_input','blocked_output'))::int "pendingModeration"`;
-    const [tts] = await sql<{ requests: number; limitRub: number }[]>`
+    const [tts] = await sql<
+      { requests: number; limitRub: number; elevenLabsChars: number; elevenLabsLimit: number }[]
+    >`
       select coalesce((select requests from tts_usage_monthly
           where provider='yandex' and month=${yandexBillingMonth(new Date())}),0)::int requests,
         coalesce((select (value #>> '{}')::float8 from global_settings
-          where key='yandex_tts_monthly_limit_rub'), ${DEFAULT_YANDEX_TTS_MONTHLY_LIMIT_RUB})::float8 "limitRub"`;
+          where key='yandex_tts_monthly_limit_rub'), ${DEFAULT_YANDEX_TTS_MONTHLY_LIMIT_RUB})::float8 "limitRub",
+        coalesce((select requests from tts_usage_monthly
+          where provider='elevenlabs' and month=${new Date().toISOString().slice(0, 7)}),0)::int
+          "elevenLabsChars",
+        coalesce((select (value #>> '{}')::int from global_settings
+          where key='elevenlabs_monthly_char_limit'), ${DEFAULT_ELEVENLABS_MONTHLY_CHAR_LIMIT})::int
+          "elevenLabsLimit"`;
     return {
       ...row,
       yandexTtsSpentRub: Math.round((tts?.requests ?? 0) * YANDEX_TTS_RUB_PER_REQUEST * 100) / 100,
-      yandexTtsLimitRub: tts?.limitRub ?? DEFAULT_YANDEX_TTS_MONTHLY_LIMIT_RUB
+      yandexTtsLimitRub: tts?.limitRub ?? DEFAULT_YANDEX_TTS_MONTHLY_LIMIT_RUB,
+      elevenLabsChars: tts?.elevenLabsChars ?? 0,
+      elevenLabsLimit: tts?.elevenLabsLimit ?? DEFAULT_ELEVENLABS_MONTHLY_CHAR_LIMIT
     };
   });
 

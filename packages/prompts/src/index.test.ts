@@ -248,6 +248,29 @@ describe("input inspection", () => {
   });
 });
 
+describe("what the bot answers and what it says", () => {
+  it("answers swearing and coarse words from chat, but never hate or self-harm", () => {
+    for (const message of ["бля, опять слил", "сука, лаг", "ну ты дебил", "минет за сабку"]) {
+      expect(inspectInput("viewer", message)).toEqual({ allowed: true });
+    }
+    for (const message of ["ну ты pidor", "все хохлы такие", "убейся об стену", "хайль гитлер"]) {
+      expect(inspectInput("viewer", message)).toMatchObject({ allowed: false });
+    }
+  });
+
+  it("lets a reply swear only at toxicity 5 and use coarse insults from 4", () => {
+    const mat = "Бля, ну и катка";
+    const insult = "Ты играешь как дебил";
+    expect(inspectOutput(mat, "x", [], 4)).toMatchObject({ reason: "stop_word:бля" });
+    expect(inspectOutput(mat, "x", [], 5)).toEqual({ allowed: true });
+    expect(inspectOutput(insult, "x", [], 3)).toMatchObject({ allowed: false });
+    expect(inspectOutput(insult, "x", [], 4)).toEqual({ allowed: true });
+    for (const reply of ["Ну ты и пидор", "Сдохни уже", "Шлюха ты, а не игрок"]) {
+      expect(inspectOutput(reply, "x", [], 5)).toMatchObject({ allowed: false });
+    }
+  });
+});
+
 describe("output inspection", () => {
   it("blocks links, contacts, prompt leaks and verbatim echoes of the viewer's text", () => {
     expect(inspectOutput("Зайди на mysite.ru, зритель", "x")).toMatchObject({
@@ -351,11 +374,12 @@ describe("targets and answering by meaning", () => {
     expect(prompt.system).not.toContain("VERDICT");
   });
 
-  it("allows mild coarse words only from toxicity 4, never mat", () => {
-    expect(classifierSystemPrompt(2)).not.toContain("жопа");
-    expect(classifierSystemPrompt(2)).toContain("coarse or obscene");
-    expect(classifierSystemPrompt(5)).toContain("mild coarse words such as жопа");
-    expect(classifierSystemPrompt(5)).toContain("Russian mat");
+  it("asks the classifier for harm, not rudeness, and allows mat only at toxicity 5", () => {
+    expect(classifierSystemPrompt(2)).toContain("Coarse words such as жопа");
+    expect(classifierSystemPrompt(2)).toContain("Russian mat (хуй");
+    expect(classifierSystemPrompt(5)).toContain("This channel allows Russian mat");
+    expect(classifierSystemPrompt(5)).not.toContain("Russian mat (хуй");
+    expect(classifierSystemPrompt(5)).not.toMatch(/ [.;]/u);
     expect(findStopListMatch("руки у него из жопы")).toBeNull();
   });
 });

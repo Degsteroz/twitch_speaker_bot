@@ -243,6 +243,7 @@ class EventSubConnection {
     );
     socket.on("close", () => {
       if (this.socket !== socket || this.stopped) return;
+      void saveEventSubState(this.channel.id, false).catch(console.error);
       const delay = reconnectDelayMs(this.failures++);
       this.reconnectTimer = setTimeout(() => this.start(), delay);
     });
@@ -281,7 +282,11 @@ class EventSubConnection {
       this.keepaliveSeconds = session.keepalive_timeout_seconds;
       this.armWatchdog(this.keepaliveSeconds);
       if (subscribeOnWelcome) {
-        for (const spec of this.channel.specs) await this.subscribe(session.id, spec);
+        const results: Record<string, string> = {};
+        for (const spec of this.channel.specs) {
+          results[spec.type] = await this.subscribe(session.id, spec);
+        }
+        await saveEventSubState(this.channel.id, true, results);
       }
       this.failures = 0;
       return;
@@ -331,11 +336,12 @@ class EventSubConnection {
     });
   }
 
+  /** "ok", or Twitch's status and message, for the panel. */
   private async subscribe(
     sessionId: string,
     spec: SubscriptionSpec,
     retryUnauthorized = true
-  ): Promise<void> {
+  ): Promise<string> {
     const token = await accessToken(this.channel);
     const response = await fetch("https://api.twitch.tv/helix/eventsub/subscriptions", {
       method: "POST",
@@ -353,16 +359,31 @@ class EventSubConnection {
     });
     if (response.status === 401 && retryUnauthorized) {
       this.channel.expiresAt = new Date(0);
-      await this.subscribe(sessionId, spec, false);
-      return;
+      return this.subscribe(sessionId, spec, false);
     }
+    if (response.ok) return "ok";
     // One rejected event type (e.g. a scope revoked on Twitch's side) must not take down the
     // others on this connection.
-    if (!response.ok) {
-      console.error(
-        `EventSub ${this.channel.twitchLogin}: ${spec.type} rejected (${String(response.status)})`
-      );
-    }
+    const body = (await response.json().catch(() => ({}))) as { message?: unknown };
+    const reason = `${String(response.status)}${typeof body.message === "string" ? ` ${body.message}` : ""}`;
+    console.error(`EventSub ${this.channel.twitchLogin}: ${spec.type} rejected (${reason})`);
+    return reason.slice(0, 200);
+  }
+}
+
+async function saveEventSubState(
+  channelId: string,
+  connected: boolean,
+  subscriptions?: Record<string, string>
+): Promise<void> {
+  if (subscriptions) {
+    await sql`insert into eventsub_state(channel_id,connected,subscriptions)
+      values(${channelId},${connected},${sql.json(subscriptions)})
+      on conflict(channel_id) do update set connected=excluded.connected,
+        subscriptions=excluded.subscriptions, updated_at=now()`;
+  } else {
+    await sql`update eventsub_state set connected=${connected}, updated_at=now()
+      where channel_id=${channelId}`;
   }
 }
 
@@ -384,6 +405,7 @@ async function reconcile(): Promise<void> {
       if (current) {
         current.stop();
         eventSubs.delete(channel.id);
+        await sql`delete from eventsub_state where channel_id=${channel.id}`;
       }
       continue;
     }

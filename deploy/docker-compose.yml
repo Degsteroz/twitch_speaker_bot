@@ -42,7 +42,8 @@ services:
     restart: "no"
     environment:
       DATABASE_URL: ${DATABASE_URL}
-      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-haiku-5-5}
+      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-opus-5-5}
+      CLASSIFIER_MODEL: ${CLASSIFIER_MODEL:-claude-sonnet-5-5}
     command:
       - /bin/sh
       - -ec
@@ -115,6 +116,10 @@ services:
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
       # Character voices; empty means every roast is voiced by the local Piper service.
       YANDEX_TTS_API_KEY: ${YANDEX_TTS_API_KEY:-}
+      ELEVENLABS_API_KEY: ${ELEVENLABS_API_KEY:-}
+      ELEVENLABS_MODEL: ${ELEVENLABS_MODEL:-eleven_v4}
+      ELEVENLABS_VOICE_TSUNDERE: ${ELEVENLABS_VOICE_TSUNDERE:-}
+      ELEVENLABS_VOICE_YANDERE: ${ELEVENLABS_VOICE_YANDERE:-}
       TTS_URL: http://tts:8000
       AUDIO_DIR: /data/audio
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}

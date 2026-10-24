@@ -162,6 +162,10 @@ export interface Status {
   plan: string | null;
   /** `!роаст` is a paid feature. */
   commandAvailable: boolean;
+  /** The overlay page is open right now (in OBS or a browser tab). */
+  overlayConnected: boolean;
+  /** Twitch's answer to our EventSub subscriptions; null when the channel needs none. */
+  twitchEvents: { connected: boolean; failed: string[] } | null;
   enabled: boolean;
   used: number;
   limit: number;
@@ -190,6 +194,78 @@ export interface RoastResult {
   error: string | null;
   latencyMs: number | null;
   overlayStatus: "pending" | "delivered" | "expired" | null;
+}
+
+export interface ActivityRoast {
+  id: string;
+  createdAt: string;
+  source: string;
+  viewerLogin: string | null;
+  inputText: string | null;
+  outputText: string | null;
+  status: RoastResult["status"];
+  error: string | null;
+  overlayStatus: RoastResult["overlayStatus"];
+}
+export interface Activity {
+  roasts: ActivityRoast[];
+  /** Twitch's answer per EventSub subscription: "ok" or the error; null when none are needed. */
+  eventsub: { connected: boolean; subscriptions: Record<string, string>; updatedAt: string } | null;
+}
+
+export const SOURCE_TEXT: Record<string, string> = {
+  chat_command: "!роаст",
+  chat_keyword: "Слово в чате",
+  reward: "Награда",
+  cheer: "Битсы",
+  subscription: "Подписка",
+  gift_sub: "Гифт-сабы",
+  raid: "Рейд",
+  follow: "Фоллоу",
+  prediction: "Прогноз",
+  ad_break: "Реклама",
+  donation: "Донат",
+  dashboard_test: "Тест"
+};
+
+export const SUBSCRIPTION_TEXT: Record<string, string> = {
+  "channel.channel_points_custom_reward_redemption.add": "Награда за баллы",
+  "channel.cheer": "Битсы",
+  "channel.subscribe": "Подписки",
+  "channel.subscription.message": "Ресабы",
+  "channel.subscription.gift": "Гифт-сабы",
+  "channel.raid": "Рейды",
+  "channel.follow": "Фоллоу",
+  "channel.prediction.end": "Прогнозы",
+  "channel.ad_break.begin": "Реклама"
+};
+
+/** Why a roast ended the way it did, in the streamer's words. */
+export function activityOutcome(roast: ActivityRoast): { ok: boolean; text: string } {
+  const reason = roast.error ?? "";
+  switch (roast.status) {
+    case "queued":
+      return { ok: true, text: "в очереди" };
+    case "done":
+      if (roast.overlayStatus === "expired") {
+        return { ok: false, text: "оверлей не был открыт, роаст истёк" };
+      }
+      if (roast.overlayStatus === "pending") return { ok: true, text: "ждёт оверлей" };
+      return { ok: true, text: "прозвучало" };
+    case "blocked_output":
+      return { ok: false, text: "ответ не прошёл модерацию, прозвучала заглушка" };
+    case "blocked_input":
+      if (reason.startsWith("nickname:")) return { ok: false, text: "ник зрителя в стоп-листе" };
+      if (reason === "prompt_injection") {
+        return { ok: false, text: "похоже на попытку управлять ботом, промолчала" };
+      }
+      if (reason.startsWith("event:")) return { ok: false, text: "в событии слово из стоп-листа" };
+      return { ok: false, text: "в сообщении слово из стоп-листа, промолчала" };
+    case "failed":
+      return { ok: false, text: "ошибка генерации, попробуйте ещё раз" };
+    case "skipped":
+      return { ok: false, text: SKIP_REASON_TEXT[reason] ?? `пропущено: ${reason}` };
+  }
 }
 
 export function normalizeSettings(row: Record<string, unknown>): Settings {
@@ -249,7 +325,7 @@ export const SKIP_REASON_TEXT: Record<string, string> = {
   global_quota_exceeded: "исчерпан общий лимит сервиса",
   global_budget_exceeded: "исчерпан месячный бюджет сервиса",
   channel_quota_exceeded: "квота канала закончилась",
-  cooldown_active: "действует кулдаун",
+  cooldown_active: "действует пауза из «Тонкой настройки»",
   command_not_in_plan: "!роаст недоступен на бесплатном тарифе",
   stale_job: "задача устарела"
 };

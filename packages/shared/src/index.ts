@@ -10,10 +10,13 @@ export const DEFAULT_GLOBAL_MONTHLY_ROAST_CAP = 4_000;
 export const MAX_ROAST_CHARACTERS = 200;
 export const OVERLAY_EVENT_TTL_SECONDS = 120;
 export const AUDIO_URL_TTL_SECONDS = 60;
-export const DEFAULT_MONTHLY_BUDGET_USD = 5;
+export const DEFAULT_MONTHLY_BUDGET_USD = 10;
 
 // Yandex SpeechKit hard cap. API v3 `general` voices bill 0.1626 ₽ with VAT per request of up to
 // 250 characters (pricing page, 2026-10); the cap converts roubles into a request count.
+// ElevenLabs Starter includes 75,000 characters a month; stay under it so the plan never bills
+// overage. The owner changes it in /admin.
+export const DEFAULT_ELEVENLABS_MONTHLY_CHAR_LIMIT = 70_000;
 export const DEFAULT_YANDEX_TTS_MONTHLY_LIMIT_RUB = 300;
 export const YANDEX_TTS_RUB_PER_REQUEST = 0.1626;
 export const YANDEX_TTS_CHARS_PER_REQUEST = 250;
@@ -26,7 +29,9 @@ export const yandexBillingMonth = (date: Date) =>
   new Intl.DateTimeFormat("sv-SE", { timeZone: "Europe/Moscow", year: "numeric", month: "2-digit" })
     .format(date)
     .slice(0, 7);
-export const DEFAULT_ANTHROPIC_MODEL = "claude-haiku-5-5";
+// Opus writes the roast (it has to understand what the viewer meant); Sonnet checks the reply.
+export const DEFAULT_ANTHROPIC_MODEL = "claude-opus-5-5";
+export const DEFAULT_CLASSIFIER_MODEL = "claude-sonnet-5-5";
 export const BLOCKED_OUTPUT_FALLBACK = "Даже мне за такое стыдно";
 export const ROAST_REQUESTED_QUEUE = "roast.requested";
 // A roast older than the overlay TTL is useless on stream, so jobs are never retried or kept long.

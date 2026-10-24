@@ -11,7 +11,7 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.68.0",
+    "@anthropic-ai/sdk": "^0.137.0",
     "@roastbot/db": "workspace:*",
     "@roastbot/prompts": "workspace:*",
     "@roastbot/shared": "workspace:*",

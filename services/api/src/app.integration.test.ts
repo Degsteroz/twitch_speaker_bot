@@ -225,6 +225,30 @@ describe("auth and settings", () => {
     expect((await call("PATCH", "/settings", streamer, { unknown: true })).statusCode).toBe(400);
   });
 
+  it("shows the channel's recent activity and Twitch's answer to its subscriptions", async () => {
+    type Activity = { roasts: unknown[]; eventsub: unknown };
+    const empty = (await call("GET", "/activity", streamer)).json<Activity>();
+    expect(empty).toEqual({ roasts: [], eventsub: null });
+    await call("POST", "/roasts/test", streamer, { viewerLogin: "tester", inputText: "привет" });
+    await db.sql`insert into eventsub_state(channel_id,connected,subscriptions)
+      values(${streamer.channelId},true,${db.sql.json({
+        "channel.channel_points_custom_reward_redemption.add":
+          "403 subscription missing proper authorization"
+      })})`;
+    const activity = (await call("GET", "/activity", streamer)).json<Activity>();
+    expect(activity.roasts).toEqual([
+      expect.objectContaining({ source: "dashboard_test", viewerLogin: "tester", status: "queued" })
+    ]);
+    expect(activity.eventsub).toMatchObject({
+      connected: true,
+      subscriptions: {
+        "channel.channel_points_custom_reward_redemption.add":
+          "403 subscription missing proper authorization"
+      }
+    });
+    expect((await call("GET", "/activity", owner)).json<Activity>().roasts).toEqual([]);
+  });
+
   it("reports working, paused and limit states", async () => {
     expect((await call("GET", "/status", streamer)).json()).toMatchObject({
       state: "working",
@@ -416,7 +440,7 @@ describe("back-office", () => {
     expect(forged.statusCode).toBe(403);
     const overview = await call("GET", "/admin/overview", owner);
     expect(overview.statusCode).toBe(200);
-    expect(overview.json()).toMatchObject({ budget: 5, roastCap: 4000, killSwitch: false });
+    expect(overview.json()).toMatchObject({ budget: 10, roastCap: 4000, killSwitch: false });
   });
 
   it("validates global settings and writes the audit log", async () => {

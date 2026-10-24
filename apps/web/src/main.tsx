@@ -31,7 +31,11 @@ import {
   type DonationAlertsStatus,
   type EventTriggers,
   type Triggers,
+  type Activity,
   CHARACTER_NAMES,
+  SOURCE_TEXT,
+  SUBSCRIPTION_TEXT,
+  activityOutcome,
   DONATIONALERTS_RESULT_TEXT,
   donationAlertsConnectUrl
 } from "./api.js";
@@ -717,6 +721,7 @@ function Dashboard({
   const [notice, setNotice] = useState("");
   const [saving, setSaving] = useState(false);
   const [tourOpen, setTourOpen] = useState(false);
+  const [activityReload, setActivityReload] = useState(0);
   const refreshStatus = useCallback(async () => setStatus(await api<Status>("/status")), []);
   const load = useCallback(async () => {
     setLoadError("");
@@ -874,6 +879,37 @@ function Dashboard({
           </span>
           <h2>{stateText.title}</h2>
           <p>{statusDetail}</p>
+          <ul className="readiness">
+            <li className={status.overlayConnected ? "good" : "bad"}>
+              {status.overlayConnected ? "✓ Оверлей открыт" : "✗ Оверлей не открыт"}
+              {!status.overlayConnected && (
+                <small>
+                  {" "}
+                  — добавьте ссылку из карточки «Оверлей OBS» в OBS, иначе роасты не прозвучат
+                </small>
+              )}
+            </li>
+            {status.twitchEvents && (
+              <li
+                className={
+                  status.twitchEvents.connected && !status.twitchEvents.failed.length
+                    ? "good"
+                    : "bad"
+                }
+              >
+                {!status.twitchEvents.connected
+                  ? "✗ Нет связи с Twitch, переподключаемся"
+                  : status.twitchEvents.failed.length
+                    ? `✗ Twitch отказал: ${status.twitchEvents.failed
+                        .map((type) => SUBSCRIPTION_TEXT[type] ?? type)
+                        .join(", ")}`
+                    : "✓ Twitch присылает награду и события"}
+                {status.twitchEvents.failed.length > 0 && (
+                  <small> — перезайдите через Twitch</small>
+                )}
+              </li>
+            )}
+          </ul>
         </Card>
         <Card tour="quota">
           <p className="label">КВОТА · {status.month}</p>
@@ -933,8 +969,23 @@ function Dashboard({
               steps={TOXICITY_STEPS}
               onChange={(value) => patch("toxicity", value as Settings["toxicity"])}
             />
+          </Card>
+          <TriggerSettings
+            triggers={settings.triggers}
+            rewards={rewards}
+            commandAvailable={status.commandAvailable}
+            onChange={(triggers) => patch("triggers", triggers)}
+          />
+          <details className="card fine-tuning">
+            <summary>
+              <span>
+                <span className="label">ТОНКАЯ НАСТРОЙКА</span>
+                <strong>Паузы и стоп-слова</strong>
+              </span>
+              <small>по умолчанию всё уже настроено</small>
+            </summary>
             <fieldset data-tour="cooldowns">
-              <legend>Темп</legend>
+              <legend>Паузы</legend>
               <div className="two-fields">
                 <Field
                   label="Пауза между роастами, сек."
@@ -962,25 +1013,17 @@ function Dashboard({
                 всегда.
               </small>
             </fieldset>
-          </Card>
-          <TriggerSettings
-            triggers={settings.triggers}
-            rewards={rewards}
-            commandAvailable={status.commandAvailable}
-            onChange={(triggers) => patch("triggers", triggers)}
-          />
-          <Card tour="stopwords">
-            <p className="label">СТОП-СЛОВА</p>
-            <h2>Чего не говорить</h2>
-            <Tags
-              legend="Ваши стоп-слова"
-              value={settings.stopWords}
-              onChange={(value) => patch("stopWords", value)}
-            />
-            <small className="hint below">
-              Имена, мемы, больные темы. Общий стоп-лист сервиса работает всегда и не отключается.
-            </small>
-          </Card>
+            <div data-tour="stopwords">
+              <Tags
+                legend="Ваши стоп-слова"
+                value={settings.stopWords}
+                onChange={(value) => patch("stopWords", value)}
+              />
+              <small className="hint below">
+                Имена, мемы, больные темы. Общий стоп-лист сервиса работает всегда и не отключается.
+              </small>
+            </div>
+          </details>
           <div className={`save-bar ${dirty ? "dirty" : ""}`} data-tour="save">
             <span role="status">
               {notice || (dirty ? "Есть несохранённые изменения" : "Все изменения сохранены")}
@@ -999,7 +1042,13 @@ function Dashboard({
             token={session.overlayToken ?? ""}
             onRotate={(overlayToken) => onSession({ ...session, overlayToken })}
           />
-          <TestRoast onFinished={() => void refreshStatus().catch(() => undefined)} />
+          <TestRoast
+            onFinished={() => {
+              void refreshStatus().catch(() => undefined);
+              setActivityReload((value) => value + 1);
+            }}
+          />
+          <ActivityLog reload={activityReload} />
         </aside>
       </section>
       <Tour open={tourOpen} onClose={closeTour} />
@@ -1019,14 +1068,14 @@ const EVENT_ROWS: EventRow[] = [
   {
     key: "cheer",
     title: "Битсы",
-    hint: "жарит автора по тексту cheer",
+    hint: "по тексту cheer",
     threshold: { field: "minBits", before: "от", after: "битсов", min: 1, max: 1_000_000 }
   },
-  { key: "subscription", title: "Подписки и ресабы", hint: "жарит подписчика, учитывает стаж" },
+  { key: "subscription", title: "Подписки и ресабы", hint: "учитывает стаж" },
   {
     key: "giftSub",
     title: "Подарочные сабы",
-    hint: "жарит щедрого дарителя",
+    hint: "привет щедрому дарителю",
     threshold: { field: "minCount", before: "от", after: "сабов", min: 1, max: 1_000 }
   },
   {
@@ -1041,12 +1090,12 @@ const EVENT_ROWS: EventRow[] = [
     hint: "фоллоу бывает много, шанс лучше держать небольшим",
     threshold: { field: "chancePercent", before: "шанс", after: "%", min: 0, max: 100 }
   },
-  { key: "prediction", title: "Итоги прогнозов", hint: "жарит проигравших или стримера" },
-  { key: "adBreak", title: "Реклама", hint: "подкалывает стримера, пока идёт реклама" },
+  { key: "prediction", title: "Итоги прогнозов", hint: "про главного проигравшего" },
+  { key: "adBreak", title: "Реклама", hint: "пока идёт реклама" },
   {
     key: "donation",
     title: "Донаты DonationAlerts",
-    hint: "жарит донатера по тексту доната",
+    hint: "по тексту доната",
     threshold: {
       field: "minAmount",
       before: "от",
@@ -1202,45 +1251,6 @@ function TriggerSettings({
     set({ events: { ...triggers.events, [key]: { ...triggers.events[key], ...patch } } });
   return (
     <>
-      <Card tour="command">
-        <p className="label">ЧАТ</p>
-        <h2>На что отвечать в чате</h2>
-        <label className={`check ${commandAvailable ? "" : "locked"}`}>
-          <input
-            type="checkbox"
-            checked={commandAvailable && triggers.command}
-            disabled={!commandAvailable}
-            onChange={(event) => set({ command: event.target.checked })}
-          />
-          <span>
-            Команда <code>!роаст</code>{" "}
-            <small>
-              {commandAvailable
-                ? "— «!роаст опять проиграл катку»"
-                : "— доступна на тарифах Basic и Premium"}
-            </small>
-          </span>
-        </label>
-        <Tags
-          legend="Слова-триггеры"
-          placeholder="Например: слился ↵"
-          value={triggers.keywords}
-          onChange={(keywords) => set({ keywords })}
-        />
-        <small className="hint below">
-          Слово срабатывает в начале любого слова: «слил» поймает «слился». Команды на «!» и
-          сообщения ботов пропускаются, на сообщение самого стримера достаётся стримеру. Проверяете
-          сами — поставьте «Всегда» и учтите паузы из «Темпа».
-        </small>
-        {triggers.keywords.length > 0 && (
-          <ScaleChoice
-            label="Как часто отвечать на слово"
-            value={triggers.keywordChancePercent}
-            steps={KEYWORD_CHANCE_STEPS}
-            onChange={(keywordChancePercent) => set({ keywordChancePercent })}
-          />
-        )}
-      </Card>
       <Card tour="reward">
         <p className="label">БАЛЛЫ КАНАЛА</p>
         <h2>Награда с текстом</h2>
@@ -1273,6 +1283,45 @@ function TriggerSettings({
           Зритель пишет текст в награде, героиня читает его и отвечает по смыслу. Кого она при этом
           жарит, решает переключатель «Кого жарить» в карточке персонажа.
         </small>
+      </Card>
+      <Card tour="command">
+        <p className="label">ЧАТ</p>
+        <h2>На что отвечать в чате</h2>
+        <label className={`check ${commandAvailable ? "" : "locked"}`}>
+          <input
+            type="checkbox"
+            checked={commandAvailable && triggers.command}
+            disabled={!commandAvailable}
+            onChange={(event) => set({ command: event.target.checked })}
+          />
+          <span>
+            Команда <code>!роаст</code>{" "}
+            <small>
+              {commandAvailable
+                ? "— «!роаст опять проиграл катку»"
+                : "— доступна на тарифах Basic и Premium"}
+            </small>
+          </span>
+        </label>
+        <Tags
+          legend="Слова-триггеры"
+          placeholder="Например: слился ↵"
+          value={triggers.keywords}
+          onChange={(keywords) => set({ keywords })}
+        />
+        <small className="hint below">
+          Слово срабатывает в начале любого слова: «слил» поймает «слился». Команды на «!» и
+          сообщения ботов пропускаются, на сообщение самого стримера достаётся стримеру. Проверяете
+          сами — поставьте «Всегда» и учтите паузы из «Тонкой настройки».
+        </small>
+        {triggers.keywords.length > 0 && (
+          <ScaleChoice
+            label="Как часто отвечать на слово"
+            value={triggers.keywordChancePercent}
+            steps={KEYWORD_CHANCE_STEPS}
+            onChange={(keywordChancePercent) => set({ keywordChancePercent })}
+          />
+        )}
       </Card>
       <Card tour="events">
         <p className="label">СОБЫТИЯ</p>
@@ -1459,6 +1508,71 @@ function TestRoast({ onFinished }: { onFinished: () => void }) {
   );
 }
 
+function ActivityLog({ reload }: { reload: number }) {
+  const [activity, setActivity] = useState<Activity>();
+  const [error, setError] = useState("");
+  const load = useCallback(() => {
+    api<Activity>("/activity")
+      .then((value) => {
+        setActivity(value);
+        setError("");
+      })
+      .catch((reason: unknown) => setError(errorText(reason)));
+  }, []);
+  useEffect(() => {
+    load();
+    const timer = window.setInterval(load, 15_000);
+    return () => window.clearInterval(timer);
+  }, [load, reload]);
+  const subscriptions = Object.entries(activity?.eventsub?.subscriptions ?? {});
+  return (
+    <Card tour="activity">
+      <p className="label">ЖУРНАЛ</p>
+      <h2>Что происходило</h2>
+      {activity?.eventsub && (
+        <ul className="twitch-links">
+          {!activity.eventsub.connected && (
+            <li className="bad">Нет связи с Twitch, переподключаемся…</li>
+          )}
+          {subscriptions.map(([type, result]) => (
+            <li key={type} className={result === "ok" ? "good" : "bad"}>
+              {result === "ok" ? "✓" : "✗"} {SUBSCRIPTION_TEXT[type] ?? type}
+              {result !== "ok" && (
+                <small> — Twitch отказал ({result}). Перезайдите через Twitch.</small>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+      {error && <p className="feedback">{error}</p>}
+      {activity?.roasts.length === 0 && (
+        <p>Пока ничего не приходило. Запустите тест или активируйте награду на канале.</p>
+      )}
+      <ol className="activity">
+        {activity?.roasts.map((roast) => {
+          const outcome = activityOutcome(roast);
+          return (
+            <li key={roast.id}>
+              <div>
+                <b>{SOURCE_TEXT[roast.source] ?? roast.source}</b>
+                {roast.viewerLogin && <span> · {roast.viewerLogin}</span>}
+                <time>
+                  {new Date(roast.createdAt).toLocaleTimeString("ru-RU", {
+                    hour: "2-digit",
+                    minute: "2-digit"
+                  })}
+                </time>
+              </div>
+              {roast.inputText && <q>{roast.inputText}</q>}
+              <small className={outcome.ok ? "good" : "bad"}>{outcome.text}</small>
+            </li>
+          );
+        })}
+      </ol>
+    </Card>
+  );
+}
+
 // ---- back-office --------------------------------------------------------------------------
 
 interface UserRow {
@@ -1507,6 +1621,8 @@ interface Overview {
   pendingModeration: number;
   yandexTtsSpentRub: number;
   yandexTtsLimitRub: number;
+  elevenLabsChars: number;
+  elevenLabsLimit: number;
 }
 type AnyRow = Record<string, unknown>;
 
@@ -1616,6 +1732,12 @@ function AdminOverview() {
         value={`${data.yandexTtsSpentRub.toFixed(0)} ₽`}
         note={`жёсткий лимит ${String(data.yandexTtsLimitRub)} ₽, дальше озвучивает Piper`}
         warn={data.yandexTtsSpentRub / Math.max(1, data.yandexTtsLimitRub) > 0.8}
+      />
+      <Metric
+        label="ElevenLabs за месяц"
+        value={data.elevenLabsChars.toLocaleString("ru-RU")}
+        note={`символов из ${data.elevenLabsLimit.toLocaleString("ru-RU")}, дальше Яндекс и Piper`}
+        warn={data.elevenLabsChars / Math.max(1, data.elevenLabsLimit) > 0.8}
       />
       <Metric
         label="Роасты за месяц"
@@ -2096,10 +2218,11 @@ function GlobalSettingsForm({
   const [notice, setNotice] = useState("");
   const [form, setForm] = useState({
     global_monthly_limit: String(Number(values.global_monthly_limit ?? 4000)),
-    monthly_budget_usd: String(Number(values.monthly_budget_usd ?? 5)),
+    monthly_budget_usd: String(Number(values.monthly_budget_usd ?? 10)),
     model: typeof values.model === "string" ? values.model : "",
     classifier_model: typeof values.classifier_model === "string" ? values.classifier_model : "",
-    yandex_tts_monthly_limit_rub: String(Number(values.yandex_tts_monthly_limit_rub ?? 300))
+    yandex_tts_monthly_limit_rub: String(Number(values.yandex_tts_monthly_limit_rub ?? 300)),
+    elevenlabs_monthly_char_limit: String(Number(values.elevenlabs_monthly_char_limit ?? 70000))
   });
   const set = async (key: string, value: unknown) => {
     try {
@@ -2156,6 +2279,14 @@ function GlobalSettingsForm({
           onChange={(value) => setForm({ ...form, yandex_tts_monthly_limit_rub: value })}
         />
         <Field
+          label="Жёсткий лимит ElevenLabs в месяц, символов"
+          type="number"
+          min={0}
+          step="1000"
+          value={form.elevenlabs_monthly_char_limit}
+          onChange={(value) => setForm({ ...form, elevenlabs_monthly_char_limit: value })}
+        />
+        <Field
           label="Модель генерации"
           value={form.model}
           onChange={(value) => setForm({ ...form, model: value.trim() })}
@@ -2172,6 +2303,10 @@ function GlobalSettingsForm({
               await set("global_monthly_limit", Number(form.global_monthly_limit));
               await set("monthly_budget_usd", Number(form.monthly_budget_usd));
               await set("yandex_tts_monthly_limit_rub", Number(form.yandex_tts_monthly_limit_rub));
+              await set(
+                "elevenlabs_monthly_char_limit",
+                Number(form.elevenlabs_monthly_char_limit)
+              );
               await set("model", form.model);
               await set("classifier_model", form.classifier_model);
             })()

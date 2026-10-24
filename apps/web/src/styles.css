@@ -1325,3 +1325,101 @@ td small {
 .save-bar .button:disabled {
   cursor: default;
 }
+.activity {
+  list-style: none;
+  padding: 0;
+  margin: 14px 0 0;
+  display: grid;
+  gap: 10px;
+}
+.activity li {
+  display: grid;
+  gap: 4px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+  font-size: 13px;
+}
+.activity li div {
+  display: flex;
+  gap: 4px;
+  align-items: baseline;
+}
+.activity time {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 12px;
+}
+.activity q {
+  color: #bcb7c8;
+  overflow-wrap: anywhere;
+}
+.good {
+  color: #5beb92;
+}
+.bad {
+  color: #ff929d;
+}
+.twitch-links {
+  list-style: none;
+  padding: 10px 12px;
+  margin: 0 0 6px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #0e0d13;
+  display: grid;
+  gap: 4px;
+  font-size: 13px;
+}
+.twitch-links small {
+  color: var(--muted);
+}
+.readiness {
+  list-style: none;
+  padding: 0;
+  margin: 14px 0 0;
+  display: grid;
+  gap: 6px;
+  font-size: 14px;
+  font-weight: 600;
+}
+.readiness small {
+  color: var(--muted);
+  font-weight: 400;
+}
+.fine-tuning summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  cursor: pointer;
+  list-style: none;
+}
+.fine-tuning summary::-webkit-details-marker {
+  display: none;
+}
+.fine-tuning summary > span {
+  display: grid;
+  gap: 4px;
+}
+.fine-tuning summary .label {
+  margin: 0;
+}
+.fine-tuning summary strong {
+  font-size: 18px;
+}
+.fine-tuning summary small {
+  color: var(--muted);
+}
+.fine-tuning summary:after {
+  content: "▾";
+  color: var(--muted);
+  transition: transform 0.2s ease;
+}
+.fine-tuning[open] summary:after {
+  transform: rotate(180deg);
+}
+@media (max-width: 600px) {
+  .fine-tuning summary small {
+    display: none;
+  }
+}

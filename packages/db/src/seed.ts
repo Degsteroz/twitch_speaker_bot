@@ -1,5 +1,7 @@
 import {
   DEFAULT_ANTHROPIC_MODEL,
+  DEFAULT_CLASSIFIER_MODEL,
+  DEFAULT_ELEVENLABS_MONTHLY_CHAR_LIMIT,
   DEFAULT_CHANNEL_MONTHLY_ROASTS,
   DEFAULT_GLOBAL_MONTHLY_ROAST_CAP,
   DEFAULT_MONTHLY_BUDGET_USD,
@@ -41,10 +43,14 @@ export async function seedDatabase(
       { key: "kill_switch", value: false },
       { key: "monthly_budget_usd", value: DEFAULT_MONTHLY_BUDGET_USD },
       { key: "model", value: model },
-      { key: "classifier_model", value: model },
+      {
+        key: "classifier_model",
+        value: process.env["CLASSIFIER_MODEL"] || DEFAULT_CLASSIFIER_MODEL
+      },
       { key: "global_stop_words", value: [] },
       { key: "input_retention_days", value: 30 },
-      { key: "yandex_tts_monthly_limit_rub", value: DEFAULT_YANDEX_TTS_MONTHLY_LIMIT_RUB }
+      { key: "yandex_tts_monthly_limit_rub", value: DEFAULT_YANDEX_TTS_MONTHLY_LIMIT_RUB },
+      { key: "elevenlabs_monthly_char_limit", value: DEFAULT_ELEVENLABS_MONTHLY_CHAR_LIMIT }
     ];
 
     for (const setting of defaults) {

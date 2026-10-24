@@ -55,6 +55,9 @@ export function Tour({ open, onClose }: { open: boolean; onClose: () => void }) 
   useEffect(() => {
     if (!open) return;
     const element = document.querySelector(`[data-tour="${step.target}"]`);
+    // A step inside a collapsed section ("Тонкая настройка") opens it first.
+    const details = element?.closest("details");
+    if (details) details.open = true;
     element?.scrollIntoView({ block: "center", behavior: "smooth" });
     let frame = 0;
     const update = () => {

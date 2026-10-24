@@ -204,6 +204,16 @@ export const donationAlertsAccounts = pgTable("donationalerts_accounts", {
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow()
 });
 
+// Twitch's answer to each EventSub subscription ("ok" or the error), shown in the panel.
+export const eventSubState = pgTable("eventsub_state", {
+  channelId: uuid("channel_id")
+    .primaryKey()
+    .references(() => channels.id, { onDelete: "cascade" }),
+  connected: boolean("connected").notNull().default(false),
+  subscriptions: jsonb("subscriptions").$type<Record<string, string>>().notNull().default({}),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow()
+});
+
 export const events = pgTable(
   "events",
   {

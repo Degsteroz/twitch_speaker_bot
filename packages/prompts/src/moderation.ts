@@ -323,16 +323,34 @@ export interface ModerationMatch {
   readonly category?: BlockCategory;
 }
 
+// What the bot never engages with or says, whatever the channel chose.
+export const ALWAYS_BLOCKED: ReadonlySet<BlockCategory> = new Set([
+  "slur_ethnic",
+  "slur_lgbt",
+  "slur_disability",
+  "extremism",
+  "self_harm"
+]);
+
+/**
+ * The first stop-list hit. `categories` limits the built-in list (the 14/88 code and swastikas
+ * count as extremism); admin and channel words always apply.
+ */
 export function findStopListMatch(
   input: string,
-  extraTerms: readonly string[] = []
+  extraTerms: readonly string[] = [],
+  categories?: ReadonlySet<BlockCategory>
 ): ModerationMatch | null {
   const views = viewsOf(input);
   const raw = input.normalize("NFKC");
-  if (EXTREMIST_PATTERNS.some((pattern) => pattern.test(raw))) {
+  if (
+    (!categories || categories.has("extremism")) &&
+    EXTREMIST_PATTERNS.some((pattern) => pattern.test(raw))
+  ) {
     return { source: "global", term: "1488", normalizedTerm: "1488", category: "extremism" };
   }
   for (const entry of PREPARED_BLOCKLIST) {
+    if (categories && !categories.has(entry.category)) continue;
     const hit =
       entry.script === "latin"
         ? matchesView(views.latin, entry)
@@ -415,7 +433,11 @@ export function detectPromptInjection(input: string): boolean {
 export type InputVerdict =
   { readonly allowed: true } | { readonly allowed: false; readonly reason: string };
 
-/** Nickname and message checks that run before any quota or API spend. */
+/**
+ * Nickname and message checks that run before any quota or API spend. The nickname is read
+ * aloud, so it passes the whole list. The message is only data for the model: swearing or a
+ * coarse word from a viewer is answered, not ignored; hate, extremism and self-harm are not.
+ */
 export function inspectInput(
   viewerLogin: string,
   message: string,
@@ -423,7 +445,7 @@ export function inspectInput(
 ): InputVerdict {
   const nickname = findStopListMatch(viewerLogin, extraTerms);
   if (nickname) return { allowed: false, reason: `nickname:${nickname.term}` };
-  const text = findStopListMatch(message, extraTerms);
+  const text = findStopListMatch(message, extraTerms, ALWAYS_BLOCKED);
   if (text) return { allowed: false, reason: `stop_word:${text.term}` };
   if (detectPromptInjection(message) || detectPromptInjection(viewerLogin)) {
     return { allowed: false, reason: "prompt_injection" };
@@ -450,17 +472,31 @@ function echoesInput(output: string, input: string): boolean {
   return false;
 }
 
+// From which toxicity a reply may contain each loosened category; the rest is always blocked.
+export const MAT_MIN_TOXICITY = 5;
+export const INSULT_MIN_TOXICITY = 4;
+
+/** Built-in categories a reply may not contain at this toxicity. */
+export function outputBlockedCategories(toxicity: number): ReadonlySet<BlockCategory> {
+  const blocked = new Set<BlockCategory>([...ALWAYS_BLOCKED, "sexual"]);
+  if (toxicity < MAT_MIN_TOXICITY) blocked.add("profanity");
+  if (toxicity < INSULT_MIN_TOXICITY) blocked.add("insult");
+  return blocked;
+}
+
 /**
  * Deterministic checks on the model's reply, run before the classifier. Besides the stop list
  * they catch what a successful injection usually produces: links and contacts, a leaked prompt,
- * or the viewer's own text read out verbatim.
+ * or the viewer's own text read out verbatim. Mat is allowed only at toxicity 5, coarse insults
+ * from 4; slurs, extremism, self-harm and sexual humiliation never.
  */
 export function inspectOutput(
   output: string,
   input: string,
-  extraTerms: readonly string[] = []
+  extraTerms: readonly string[] = [],
+  toxicity = 1
 ): InputVerdict {
-  const match = findStopListMatch(output, extraTerms);
+  const match = findStopListMatch(output, extraTerms, outputBlockedCategories(toxicity));
   if (match) return { allowed: false, reason: `stop_word:${match.term}` };
   if (LINK_OR_CONTACT.test(output)) return { allowed: false, reason: "link_or_contact" };
   if (PROMPT_LEAK.test(fold(output))) return { allowed: false, reason: "prompt_leak" };

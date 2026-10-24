@@ -50,6 +50,9 @@ beforeEach(async () => {
   await db.sql`delete from usage_monthly`;
 });
 
+// Opus generation + Sonnet classifier at 400 tokens in / 60 out each (the fake names no model).
+const MODEL_COST_USD = (400 * 4 + 60 * 20 + 400 * 2 + 60 * 10) / 1e6;
+
 function fakeAnthropic(generate: FakeReply | Error, classify: FakeReply = { text: "ALLOW" }) {
   const create = vi.fn((request: Anthropic.MessageCreateParamsNonStreaming) => {
     // Both calls carry a system prompt; the classifier is the one checking a <reply>.
@@ -63,7 +66,7 @@ function fakeAnthropic(generate: FakeReply | Error, classify: FakeReply = { text
       usage: { input_tokens: 400, output_tokens: 60 }
     });
   });
-  return { client: { messages: { create } } as unknown as Anthropic, create };
+  return { client: { beta: { messages: { create } } } as unknown as Anthropic, create };
 }
 
 function deps(
@@ -78,6 +81,7 @@ function deps(
       DATABASE_URL: db.url,
       ANTHROPIC_API_KEY: "test",
       TTS_URL: "http://tts.test",
+      ELEVENLABS_MODEL: "eleven_v4",
       AUDIO_DIR: audioDir
     },
     fetch: vi.fn(fetchImpl)
@@ -147,14 +151,21 @@ describe("processRoast against PostgreSQL", () => {
     expect(outcome.status).toBe("done");
     expect(anthropic.create).toHaveBeenCalledTimes(2);
     const [generation, classifier] = anthropic.create.mock.calls.map(([request]) => request);
-    expect(generation).toMatchObject({ model: "claude-haiku-5-5", thinking: { type: "disabled" } });
+    // Opus 5.5 cannot switch thinking off: low effort, and the refusal fallback on.
+    expect(generation).toMatchObject({
+      model: "claude-opus-5-5",
+      output_config: { effort: "low" },
+      fallbacks: "default"
+    });
+    expect(generation).not.toHaveProperty("thinking");
+    expect(classifier).toMatchObject({ model: "claude-sonnet-5-5" });
     expect(generation).not.toHaveProperty("temperature");
     expect(classifier).not.toHaveProperty("temperature");
     expect(pipeline.fetch).toHaveBeenCalledOnce();
 
     const row = await roast(outcome.roastId);
     expect(row.output_text).toBe("Ну и катка, зритель. Не то чтобы мне было интересно.");
-    expect(Number(row.cost_usd)).toBeCloseTo((800 * 0.1 + 120 * 0.5) / 1e6, 9);
+    expect(Number(row.cost_usd)).toBeCloseTo(MODEL_COST_USD, 9);
     expect(await usage()).toMatchObject({ roasts: 1, tts_chars: row.output_text!.length });
 
     const [event] = await db.sql<{ payload: unknown; expires_at: Date }[]>`
@@ -371,10 +382,54 @@ describe("character voices", () => {
       hints: [{ voice: "jane" }, { role: "good" }]
     });
     expect(pipeline.fetch).toHaveBeenCalledOnce();
+    expect(Number((await roast(outcome.roastId)).cost_usd)).toBeCloseTo(MODEL_COST_USD + 0.0015, 6);
+  });
+
+  it("prefers the character's ElevenLabs voice, within the monthly character cap", async () => {
+    await db.sql`update settings set tone='yandere' where channel_id=${channel.channelId}`;
+    await db.sql`delete from tts_usage_monthly where provider='elevenlabs'`;
+    const text = "Я всё запомнила.";
+    const anthropic = fakeAnthropic({ text });
+    const pipeline = deps(anthropic.client, (url) =>
+      Promise.resolve(
+        (url as string).includes("elevenlabs")
+          ? new Response(new Uint8Array([82, 73, 70, 70, 1]))
+          : yandexAudio()
+      )
+    );
+    pipeline.config = {
+      ...pipeline.config,
+      YANDEX_TTS_API_KEY: "test-key",
+      ELEVENLABS_API_KEY: "el-key",
+      ELEVENLABS_VOICE_YANDERE: "voice-ai"
+    };
+
+    const outcome = await processRoast(await job({ source: "dashboard_test" }), pipeline);
+
+    expect(outcome.status).toBe("done");
+    const [url, init] = pipeline.fetch.mock.calls[0]! as [string, RequestInit];
+    expect(url).toBe(
+      "https://api.elevenlabs.io/v1/text-to-speech/voice-ai?output_format=wav_24000"
+    );
+    expect(init.headers).toMatchObject({ "xi-api-key": "el-key" });
+    expect(JSON.parse(init.body as string)).toEqual({ text, model_id: "eleven_v4" });
+    expect(pipeline.fetch).toHaveBeenCalledOnce();
     expect(Number((await roast(outcome.roastId)).cost_usd)).toBeCloseTo(
-      (800 * 0.1 + 120 * 0.5) / 1e6 + 0.0015,
+      MODEL_COST_USD + (text.length * 0.08) / 1000,
       6
     );
+    const [usage] = await db.sql<{ requests: number }[]>`
+      select requests from tts_usage_monthly where provider='elevenlabs'`;
+    expect(usage!.requests).toBe(text.length);
+
+    // Over the cap the next voice takes over without calling ElevenLabs.
+    await db.sql`update global_settings set value='1'::jsonb
+      where key='elevenlabs_monthly_char_limit'`;
+    pipeline.fetch.mockClear();
+    await processRoast(await job({ source: "dashboard_test" }), pipeline);
+    expect(String(pipeline.fetch.mock.calls[0]![0])).toContain("yandex");
+    await db.sql`update global_settings set value='70000'::jsonb
+      where key='elevenlabs_monthly_char_limit'`;
   });
 
   it("falls back to Piper when Yandex fails, without charging for the cloud voice", async () => {
@@ -396,10 +451,7 @@ describe("character voices", () => {
       "https://tts.api.cloud.yandex.net/tts/v3/utteranceSynthesis",
       "http://tts.test/synth"
     ]);
-    expect(Number((await roast(outcome.roastId)).cost_usd)).toBeCloseTo(
-      (800 * 0.1 + 120 * 0.5) / 1e6,
-      6
-    );
+    expect(Number((await roast(outcome.roastId)).cost_usd)).toBeCloseTo(MODEL_COST_USD, 6);
   });
 
   it("enforces the monthly rouble cap atomically, even for parallel roasts", async () => {

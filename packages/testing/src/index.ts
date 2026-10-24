@@ -47,7 +47,7 @@ export async function startTestDatabase(): Promise<TestDatabase> {
   await cluster.createDatabase("roast");
   const url = `postgres://roast:roast@127.0.0.1:${String(port)}/roast`;
   await runMigrations(url);
-  await seedDatabase(url, "claude-haiku-5-5");
+  await seedDatabase(url);
   const sql = postgres(url, { max: 4, onnotice: () => undefined });
   return {
     url,

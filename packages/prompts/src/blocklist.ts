@@ -20,6 +20,7 @@ export type BlockCategory =
   | "slur_ethnic"
   | "slur_lgbt"
   | "slur_disability"
+  | "insult"
   | "profanity"
   | "sexual"
   | "self_harm"
@@ -141,17 +142,12 @@ export const BLOCKLIST: readonly BlockTerm[] = Object.freeze([
     ["даун"],
     ["даунгрейд", "даунтайм", "даунлоад", "дауншифт", "даунхил", "даунтаун", "даунтл"]
   ),
-  ...group("ru", "slur_disability", "word", [
-    "дебил",
-    "имбецил",
-    "олигофрен",
-    "аутист",
-    "инвалид",
-    "калек",
-    "спастик",
-    "ретард"
-  ]),
+  ...group("ru", "slur_disability", "word", ["аутист", "инвалид", "калек", "спастик", "ретард"]),
   ...group("ru", "slur_disability", "exact", ["дцп", "дцпшник"]),
+
+  // Coarse insults that are not about a real condition: fine in chat, in a reply only from
+  // toxicity 4 (see moderation.ts).
+  ...group("ru", "insult", "word", ["дебил", "имбецил", "олигофрен"]),
 
   // Russian mat.
   ...group("ru", "profanity", "prefixed", ["хуй", "хуе", "хуя", "хую", "хуи"]),

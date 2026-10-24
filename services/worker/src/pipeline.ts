@@ -22,6 +22,7 @@ import {
   DEFAULT_ANTHROPIC_MODEL,
   DEFAULT_GLOBAL_MONTHLY_ROAST_CAP,
   DEFAULT_MONTHLY_BUDGET_USD,
+  DEFAULT_ELEVENLABS_MONTHLY_CHAR_LIMIT,
   DEFAULT_YANDEX_TTS_MONTHLY_LIMIT_RUB,
   OVERLAY_EVENT_TTL_SECONDS,
   roastRequestedJobSchema,
@@ -38,6 +39,7 @@ import {
 } from "@roastbot/shared";
 
 import type { WorkerConfig } from "./config.js";
+import { modelRequest } from "./models.js";
 import { speak } from "./tts.js";
 
 type Sql = ReturnType<typeof createDatabase>["client"];
@@ -79,10 +81,7 @@ interface Spend {
   fixedUsd?: number;
 }
 
-const GENERATION_MAX_TOKENS = 300;
-const CLASSIFIER_MAX_TOKENS = 16;
-
-function textFrom(message: Anthropic.Message): string {
+function textFrom(message: Anthropic.Beta.BetaMessage): string {
   return message.content
     .flatMap((block) => (block.type === "text" ? [block.text] : []))
     .join(" ")
@@ -213,6 +212,20 @@ async function reserveYandexRequests(sql: Sql, now: Date, requests: number, limi
   return reserved.length > 0;
 }
 
+// ElevenLabs counts characters per calendar month; same atomic upsert as Yandex, the row
+// stores characters in `requests`.
+async function reserveElevenLabsCharacters(sql: Sql, now: Date, characters: number, limit: number) {
+  if (characters > limit) return false;
+  const reserved = await sql`
+    insert into tts_usage_monthly(provider,month,requests)
+    values('elevenlabs',${now.toISOString().slice(0, 7)},${characters})
+    on conflict(provider,month) do update
+      set requests=tts_usage_monthly.requests+excluded.requests, updated_at=now()
+      where tts_usage_monthly.requests+excluded.requests <= ${limit}
+    returning requests`;
+  return reserved.length > 0;
+}
+
 async function storeAudio(bytes: Uint8Array, audioDir: string): Promise<string> {
   const filename = `${randomUUID()}.wav`;
   await mkdir(audioDir, { recursive: true });
@@ -296,9 +309,8 @@ export async function processRoast(
 
     const model = await globalValue(deps.sql, "model", DEFAULT_ANTHROPIC_MODEL);
     const classifierModel = await globalValue(deps.sql, "classifier_model", model);
-    // Haiku 5.5 thinks by default and counts thinking against max_tokens; a one-line roast does
-    // not need it, and disabling keeps latency inside the 4-second budget.
-    // Instructions go in `system`, the viewer's data alone in the user turn.
+    // Instructions go in `system`, the viewer's data alone in the user turn. Thinking and effort
+    // per model live in modelRequest().
     // The channel's switch picks the target; a job without an author (anonymous gift, ad break,
     // the streamer's own message) always roasts the streamer.
     const { targetMode } = triggerSettingsSchema.parse(context.triggers ?? {});
@@ -317,15 +329,12 @@ export async function processRoast(
       streamer: context.streamerLogin,
       ...(job.eventSummary ? { event: job.eventSummary } : {})
     });
-    const generated = await deps.anthropic.messages.create({
-      model,
-      max_tokens: GENERATION_MAX_TOKENS,
-      thinking: { type: "disabled" },
-      system: prompt.system,
-      messages: [{ role: "user", content: prompt.user }]
-    });
+    const generated = await deps.anthropic.beta.messages.create(
+      modelRequest(model, "generate", prompt.system, prompt.user)
+    );
+    // After a refusal fallback the reply comes from another model: bill at its rate.
     spends.push({
-      model,
+      model: generated.model || model,
       tokensIn: generated.usage.input_tokens,
       tokensOut: generated.usage.output_tokens
     });
@@ -334,18 +343,19 @@ export async function processRoast(
     if (generated.stop_reason === "refusal") blockReason = "model_refusal";
     else if (!output) blockReason = "empty_output";
     else {
-      const outputVerdict = inspectOutput(output, job.inputText, stopWords);
+      const outputVerdict = inspectOutput(output, job.inputText, stopWords, context.toxicity);
       if (!outputVerdict.allowed) blockReason = outputVerdict.reason;
       else {
-        const classified = await deps.anthropic.messages.create({
-          model: classifierModel,
-          max_tokens: CLASSIFIER_MAX_TOKENS,
-          thinking: { type: "disabled" },
-          system: classifierSystemPrompt(context.toxicity),
-          messages: [{ role: "user", content: classifierInput(output) }]
-        });
+        const classified = await deps.anthropic.beta.messages.create(
+          modelRequest(
+            classifierModel,
+            "classify",
+            classifierSystemPrompt(context.toxicity),
+            classifierInput(output)
+          )
+        );
         spends.push({
-          model: classifierModel,
+          model: classified.model || classifierModel,
           tokensIn: classified.usage.input_tokens,
           tokensOut: classified.usage.output_tokens
         });
@@ -364,13 +374,16 @@ export async function processRoast(
       "yandex_tts_monthly_limit_rub",
       DEFAULT_YANDEX_TTS_MONTHLY_LIMIT_RUB
     );
-    const speech = await speak(
-      output,
-      context.tone,
-      deps.config,
-      deps.fetch ?? globalThis.fetch,
-      (requests) => reserveYandexRequests(deps.sql, clock(), requests, yandexLimitRub)
+    const elevenLabsLimit = await globalValue<number>(
+      deps.sql,
+      "elevenlabs_monthly_char_limit",
+      DEFAULT_ELEVENLABS_MONTHLY_CHAR_LIMIT
     );
+    const speech = await speak(output, context.tone, deps.config, deps.fetch ?? globalThis.fetch, {
+      yandex: (requests) => reserveYandexRequests(deps.sql, clock(), requests, yandexLimitRub),
+      elevenlabs: (characters) =>
+        reserveElevenLabsCharacters(deps.sql, clock(), characters, elevenLabsLimit)
+    });
     if (speech.costUsd > 0) {
       spends.push({
         model: `tts:${speech.provider}`,
