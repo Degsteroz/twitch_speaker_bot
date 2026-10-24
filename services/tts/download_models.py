@@ -28,9 +28,8 @@ def download(name: str, url_env: str, sha_env: str) -> None:
 
 
 MODEL_DIR.mkdir(parents=True, exist_ok=True)
+# Only Irina: the characters speak through Yandex SpeechKit, Piper is the female fallback.
 for voice, filename in (
-    ("DENIS", "ru_RU-denis-medium.onnx"),
-    ("DENIS_CONFIG", "ru_RU-denis-medium.onnx.json"),
     ("IRINA", "ru_RU-irina-medium.onnx"),
     ("IRINA_CONFIG", "ru_RU-irina-medium.onnx.json"),
 ):

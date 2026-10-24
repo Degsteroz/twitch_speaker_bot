@@ -163,7 +163,6 @@ services:
     environment:
       MODEL_DIR: /models
       CACHE_DIR: /cache
-      MALE_MODEL: ${MALE_MODEL:-ru_RU-denis-medium.onnx}
       FEMALE_MODEL: ${FEMALE_MODEL:-ru_RU-irina-medium.onnx}
       CACHE_MAX_AGE_SECONDS: ${TTS_CACHE_MAX_AGE_SECONDS:-86400}
     volumes:

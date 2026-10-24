@@ -40,17 +40,22 @@ class SynthTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         models = _root / "models"
         models.mkdir(parents=True, exist_ok=True)
-        for voice in ("denis", "irina"):
-            (models / f"ru_RU-{voice}-medium.onnx").write_bytes(b"onnx")
-            (models / f"ru_RU-{voice}-medium.onnx.json").write_text("{}")
+        (models / "ru_RU-irina-medium.onnx").write_bytes(b"onnx")
+        (models / "ru_RU-irina-medium.onnx.json").write_text("{}")
         cls.voice = FakeVoice()
-        main._voices.update({"male": cls.voice, "female": cls.voice})
+        main._voices.update({"female": cls.voice})
         cls.client = TestClient(main.app)
 
-    def test_health_reports_both_models(self) -> None:
+    def test_health_needs_only_the_female_voice(self) -> None:
         body = self.client.get("/health").json()
         self.assertTrue(body["ok"])
-        self.assertEqual(body["models"], {"male": True, "female": True})
+        self.assertEqual(body["models"], {"female": True})
+
+    def test_male_requests_from_older_workers_use_the_same_voice(self) -> None:
+        response = self.client.post("/synth", json={"text": "Старый воркер", "voice": "male"})
+        self.assertEqual(response.status_code, 200)
+        no_voice = self.client.post("/synth", json={"text": "Без поля voice"})
+        self.assertEqual(no_voice.status_code, 200)
 
     def test_synth_returns_wav_and_caches(self) -> None:
         before = self.voice.calls
@@ -75,7 +80,7 @@ class SynthTests(unittest.TestCase):
         self.assertEqual(self.client.post("/synth", json={"text": "hi", "voice": "robot"}).status_code, 422)
 
     def test_missing_model_is_503(self) -> None:
-        model = _root / "models" / "ru_RU-denis-medium.onnx"
+        model = _root / "models" / "ru_RU-irina-medium.onnx"
         model.rename(model.with_suffix(".bak"))
         try:
             response = self.client.post("/synth", json={"text": "Привет", "voice": "male"})

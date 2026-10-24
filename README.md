@@ -42,7 +42,7 @@ Python 3.12 и PostgreSQL 16. Проверка хоста ничего не ме
 ## Быстрый запуск production
 
 1. Скопируйте `deploy/.env.example` в `deploy/.env` и замените все заглушки.
-2. Создайте Docker volume моделей и поместите четыре файла Piper, описанные ниже.
+2. Создайте Docker volume моделей и поместите два файла голоса Piper, описанные ниже.
 3. Настройте Twitch-приложение и DNS.
 4. Запустите:
 
@@ -157,24 +157,21 @@ RoastBot запрашивает только чтение: `channel:read:redempt
 московскому времени, как в биллинге Яндекса. Расход виден на «Обзоре». Стоимость озвучки
 также входит в долларовый бюджет сервиса.
 
-TTS-образ содержит `piper-tts`, но модели намеренно не скачиваются при сборке.
-Нужны файлы модели и конфигурации:
+TTS-образ содержит `piper-tts`, но модели намеренно не скачиваются при сборке. Piper — только
+запасной голос, и оба персонажа женские, поэтому нужен один голос, Irina:
 
-- `ru_RU-denis-medium.onnx`
-- `ru_RU-denis-medium.onnx.json`
 - `ru_RU-irina-medium.onnx`
 - `ru_RU-irina-medium.onnx.json`
 
-Скачивайте только из доверенного источника и сверяйте SHA-256. В репозитории
-есть `services/tts/download_models.py`: он требует `DENIS_URL`,
-`DENIS_SHA256`, `DENIS_CONFIG_URL`, `DENIS_CONFIG_SHA256`, а также аналогичные
-`IRINA_*`, и отказывается принимать файл с неверной суммой. В `.env.example`
-уже прописаны ссылки на тег `v1.0.0` репозитория `rhasspy/piper-voices` и их
-SHA-256 (сняты 2026-10-23).
+Скачивайте только из доверенного источника и сверяйте SHA-256. В репозитории есть
+`services/tts/download_models.py`: он требует `IRINA_URL`, `IRINA_SHA256`, `IRINA_CONFIG_URL`,
+`IRINA_CONFIG_SHA256` и отказывается принимать файл с неверной суммой. В `.env.example` уже
+прописаны ссылки на тег `v1.0.0` репозитория `rhasspy/piper-voices` и их SHA-256 (сняты
+2026-10-23). `edge-deploy.sh` скачивает голос сам при первом запуске.
 
-TTS загружает обе модели один раз при старте и держит их в памяти (~1 с экономии
-на каждом запросе). Кэш WAV чистится от файлов старше
-`TTS_CACHE_MAX_AGE_SECONDS`.
+Поле `voice` в запросе к TTS принимается для совместимости, но звучит всегда Irina. Голос
+загружается один раз (в edge-режиме — при первом запросе) и держится в памяти. Кэш WAV чистится
+от файлов старше `TTS_CACHE_MAX_AGE_SECONDS`.
 
 Колёса `piper-tts` для macOS arm64 (проверены 1.3.0–1.8.0) не находят данные
 espeak-ng — падает даже штатный CLI `piper`. Локально на Mac используйте
@@ -192,8 +189,7 @@ docker run --rm --env-file deploy/.env \
 Важно: лицензия голоса Irina не подтверждена для этого проекта. До
 коммерческого использования самостоятельно найдите и сохраните условия лицензии
 конкретных `.onnx` и `.onnx.json`; при сомнении не разворачивайте Irina и
-замените `FEMALE_MODEL` на модель с проверенной лицензией. То же подтверждение
-рекомендуется сохранить для Denis.
+замените `FEMALE_MODEL` на модель с проверенной лицензией.
 
 ## Триггеры: на что бот реагирует
 
@@ -318,7 +314,7 @@ docker compose --env-file deploy/.env -f deploy/docker-compose.yml exec postgres
 - Секреты: `SESSION_SECRET`, `AUDIO_SIGNING_SECRET`,
   `TOKEN_ENCRYPTION_KEY`.
 - Anthropic: `ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL`.
-- Piper: `MALE_MODEL`, `FEMALE_MODEL`, `TTS_CACHE_MAX_AGE_SECONDS`.
+- Piper: `FEMALE_MODEL`, `TTS_CACHE_MAX_AGE_SECONDS`.
 - Backup: `BACKUP_DIR`, `BACKUP_RETENTION_DAYS`, `BACKUP_EXTERNAL_HOOK`.
 - Existing proxy: `API_HOST_PORT`, `WEB_HOST_PORT`, `OVERLAY_HOST_PORT`.
 
@@ -534,7 +530,7 @@ Restore требует явного guard, проверяет каталог а�
 - `migrate` завершился с ошибкой: смотрите `docker compose ... logs migrate`;
   проверьте `DATABASE_URL`, доступность PostgreSQL и SQL миграции.
 - TTS unhealthy: в volume нет `.onnx` или соседнего `.onnx.json`, имя не
-  совпадает с `MALE_MODEL`/`FEMALE_MODEL`, либо volume недоступен для чтения.
+  совпадает с `FEMALE_MODEL`, либо volume недоступен для чтения.
 - OAuth `redirect_mismatch`: callback в Twitch Console и
   `TWITCH_REDIRECT_URI` отличаются хотя бы одним символом.
 - Бесконечный OAuth/нет cookie: проверьте HTTPS, `APP_DOMAIN`, системное время и
