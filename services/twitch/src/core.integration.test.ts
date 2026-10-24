@@ -29,6 +29,7 @@ describe("chat intake", () => {
       providerEventId: "irc-msg-1",
       viewerLogin: "viewer",
       inputText: "мой aim",
+      target: "viewer" as const,
       raw: { message: "!роаст мой aim" }
     };
     expect(await enqueueEvent(db.sql, boss, input)).toBe(true);

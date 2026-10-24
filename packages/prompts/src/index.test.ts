@@ -6,6 +6,7 @@ import {
   SAFETY_BLOCK,
   calculateHaikuCostUsd,
   classifierInput,
+  classifierSystemPrompt,
   composeRoastPrompt,
   detectPromptInjection,
   enforceOutputLimit,
@@ -14,7 +15,8 @@ import {
   inspectOutput,
   moderateText,
   normalizeForModeration,
-  parseClassifierVerdict
+  parseClassifierVerdict,
+  parseVerdictReply
 } from "./index.js";
 
 // Every way of writing these must be caught: spelling tricks, transliteration, leetspeak,
@@ -307,6 +309,62 @@ describe("prompt composition", () => {
   it("limits normalized output without splitting Unicode code points", () => {
     expect(enforceOutputLimit("  Раз\u0000 два   😀 три  ", 11)).toBe("Раз два 😀 т");
     expect(() => enforceOutputLimit("text", 0)).toThrow(RangeError);
+  });
+});
+
+describe("targets and channel-points verdicts", () => {
+  const base = {
+    viewer: "viewer",
+    message: "стример не умеет стрелять",
+    tone: "tsundere",
+    toxicity: 4
+  } as const;
+
+  it("aims at the streamer when the trigger picked them, with the event as data", () => {
+    const prompt = composeRoastPrompt({
+      ...base,
+      target: "streamer",
+      streamer: "boss",
+      event: "Рейд с канала <x>: 40 зрителей"
+    });
+    expect(prompt.system).toContain("подколов стримера из <streamer>");
+    expect(prompt.user).toContain("<streamer>boss</streamer>");
+    expect(prompt.user).toContain("<event>Рейд с канала &lt;x&gt;: 40 зрителей</event>");
+  });
+
+  it("asks for a verdict line and passes the loyalty to the system prompt", () => {
+    const prompt = composeRoastPrompt({
+      ...base,
+      streamer: "boss",
+      mode: "verdict",
+      streamerLoyaltyPercent: 80
+    });
+    expect(prompt.system).toContain("[ВЕРДИКТ]");
+    expect(prompt.system).toContain("Лояльность к стримеру: 80/100");
+    expect(prompt.system).toContain("VERDICT: refuse");
+  });
+
+  it("parses the verdict and never leaves the service line in the spoken text", () => {
+    expect(parseVerdictReply("VERDICT: agree\nАга, руки у него из жопы.")).toEqual({
+      verdict: "agree",
+      text: "Ага, руки у него из жопы."
+    });
+    expect(parseVerdictReply("verdict: REFUSE\nОн таких как ты на завтрак ест!")).toMatchObject({
+      verdict: "refuse"
+    });
+    expect(parseVerdictReply("Без служебной строки.")).toEqual({
+      verdict: "mixed",
+      text: "Без служебной строки."
+    });
+    expect(parseVerdictReply("VERDICT: maybe\nТекст").text).toBe("Текст");
+  });
+
+  it("allows mild coarse words only from toxicity 4, never mat", () => {
+    expect(classifierSystemPrompt(2)).not.toContain("жопа");
+    expect(classifierSystemPrompt(2)).toContain("coarse or obscene");
+    expect(classifierSystemPrompt(5)).toContain("mild coarse words such as жопа");
+    expect(classifierSystemPrompt(5)).toContain("Russian mat");
+    expect(findStopListMatch("руки у него из жопы")).toBeNull();
   });
 });
 

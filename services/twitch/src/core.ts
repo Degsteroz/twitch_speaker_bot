@@ -1,7 +1,7 @@
 import { createDecipheriv, createCipheriv, randomBytes } from "node:crypto";
 
 import type { createDatabase } from "@roastbot/db";
-import { ROAST_REQUESTED_QUEUE } from "@roastbot/shared";
+import { ROAST_REQUESTED_QUEUE, type RoastSource, type RoastTarget } from "@roastbot/shared";
 import type { PgBoss } from "pg-boss";
 import type { JSONValue } from "postgres";
 
@@ -34,11 +34,13 @@ export async function enqueueEvent(
   boss: PgBoss,
   input: {
     channelId: string;
-    source: "chat_command" | "reward";
+    source: RoastSource;
     providerEventId: string;
     viewerId?: string;
     viewerLogin: string;
     inputText: string;
+    target: RoastTarget;
+    eventSummary?: string;
     raw: JSONValue;
   }
 ): Promise<boolean> {
@@ -55,6 +57,8 @@ export async function enqueueEvent(
     ...(input.viewerId ? { viewerId: input.viewerId } : {}),
     viewerLogin: input.viewerLogin,
     inputText: input.inputText.slice(0, 2_000),
+    target: input.target,
+    ...(input.eventSummary ? { eventSummary: input.eventSummary.slice(0, 500) } : {}),
     requestedAt: new Date().toISOString()
   });
   return true;

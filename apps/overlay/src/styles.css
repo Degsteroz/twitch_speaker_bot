@@ -98,7 +98,32 @@ body {
     0 22px 75px #0009,
     0 0 50px #ff6f9a26;
 }
-#roast[data-tone="tsundere"] #viewer {
+#roast[data-tone="tsundere"] .meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 7px;
+}
+#verdict {
+  padding: 2px 9px;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 800;
+  background: #ffffff1a;
+}
+#verdict[data-verdict="agree"] {
+  color: #7ee2a8;
+  background: #1f6b4433;
+}
+#verdict[data-verdict="mixed"] {
+  color: #f5d37a;
+  background: #6b5a1f33;
+}
+#verdict[data-verdict="refuse"] {
+  color: #ff8c9e;
+  background: #6b1f2b33;
+}
+#viewer {
   color: #ff9dbb;
 }
 #roast[data-tone="tsundere"] .wave i {
@@ -111,7 +136,32 @@ body {
     0 22px 75px #0009,
     0 0 50px #c4143a2e;
 }
-#roast[data-tone="yandere"] #viewer {
+#roast[data-tone="yandere"] .meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 7px;
+}
+#verdict {
+  padding: 2px 9px;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 800;
+  background: #ffffff1a;
+}
+#verdict[data-verdict="agree"] {
+  color: #7ee2a8;
+  background: #1f6b4433;
+}
+#verdict[data-verdict="mixed"] {
+  color: #f5d37a;
+  background: #6b5a1f33;
+}
+#verdict[data-verdict="refuse"] {
+  color: #ff8c9e;
+  background: #6b1f2b33;
+}
+#viewer {
   color: #ff6b81;
 }
 #roast[data-tone="yandere"] .wave i {
@@ -135,8 +185,33 @@ body {
   font-size: 28px;
   font-weight: 800;
 }
-#viewer {
+.meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
   margin: 0 0 7px;
+}
+#verdict {
+  padding: 2px 9px;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 800;
+  background: #ffffff1a;
+}
+#verdict[data-verdict="agree"] {
+  color: #7ee2a8;
+  background: #1f6b4433;
+}
+#verdict[data-verdict="mixed"] {
+  color: #f5d37a;
+  background: #6b5a1f33;
+}
+#verdict[data-verdict="refuse"] {
+  color: #ff8c9e;
+  background: #6b1f2b33;
+}
+#viewer {
+  margin: 0;
   color: #bd94ff;
   font-size: 15px;
   font-weight: 800;

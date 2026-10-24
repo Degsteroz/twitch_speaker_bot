@@ -5,37 +5,47 @@ import { join } from "node:path";
 import type Anthropic from "@anthropic-ai/sdk";
 import type { createDatabase } from "@roastbot/db";
 import {
-  CLASSIFIER_SYSTEM_PROMPT,
   calculateHaikuCostUsd,
   classifierInput,
+  classifierSystemPrompt,
   composeRoastPrompt,
   enforceOutputLimit,
+  findStopListMatch,
   inspectInput,
   inspectOutput,
   parseClassifierVerdict,
+  parseVerdictReply,
   pricingForModel
 } from "@roastbot/prompts";
 import {
   BLOCKED_OUTPUT_FALLBACK,
+  COOLDOWN_SOURCES,
   DEFAULT_ANTHROPIC_MODEL,
   DEFAULT_GLOBAL_MONTHLY_ROAST_CAP,
   DEFAULT_MONTHLY_BUDGET_USD,
+  DEFAULT_YANDEX_TTS_MONTHLY_LIMIT_RUB,
   OVERLAY_EVENT_TTL_SECONDS,
   roastRequestedJobSchema,
+  triggerSettingsSchema,
   type RoastRequestedJob,
   type RoastStatus,
   type StoredOverlayRoast,
   type Tone,
   type Toxicity,
-  type Voice
+  type Verdict,
+  type Voice,
+  yandexBillingMonth,
+  yandexTtsRequestLimit
 } from "@roastbot/shared";
 
 import type { WorkerConfig } from "./config.js";
+import { speak } from "./tts.js";
 
 type Sql = ReturnType<typeof createDatabase>["client"];
 
 interface ChannelContext {
   userStatus: string;
+  streamerLogin: string;
   enabled: boolean;
   tone: Tone;
   voice: Voice;
@@ -43,6 +53,7 @@ interface ChannelContext {
   cooldownSec: number;
   userCooldownSec: number;
   stopWords: string[];
+  triggers: unknown;
   monthlyLimit: number | null;
 }
 
@@ -64,11 +75,12 @@ interface Spend {
   model: string;
   tokensIn: number;
   tokensOut: number;
+  /** Flat cost on top of tokens, e.g. a paid speech synthesis request. */
+  fixedUsd?: number;
 }
 
 const GENERATION_MAX_TOKENS = 300;
 const CLASSIFIER_MAX_TOKENS = 16;
-const TTS_TIMEOUT_MS = 15_000;
 
 function textFrom(message: Anthropic.Message): string {
   return message.content
@@ -78,7 +90,10 @@ function textFrom(message: Anthropic.Message): string {
 }
 
 function costOf(spend: Spend): number {
-  return calculateHaikuCostUsd(spend.tokensIn, spend.tokensOut, pricingForModel(spend.model));
+  return (
+    calculateHaikuCostUsd(spend.tokensIn, spend.tokensOut, pricingForModel(spend.model)) +
+    (spend.fixedUsd ?? 0)
+  );
 }
 
 async function globalValue<T>(sql: Sql, key: string, fallback: T): Promise<T> {
@@ -88,9 +103,10 @@ async function globalValue<T>(sql: Sql, key: string, fallback: T): Promise<T> {
 
 async function loadContext(sql: Sql, channelId: string): Promise<ChannelContext | undefined> {
   const [context] = await sql<ChannelContext[]>`
-    select u.status "userStatus", s.enabled, s.tone, s.voice, s.toxicity,
+    select u.status "userStatus", c.twitch_login "streamerLogin", s.enabled, s.tone, s.voice,
+      s.toxicity,
       s.cooldown_sec "cooldownSec", s.user_cooldown_sec "userCooldownSec",
-      s.stop_words "stopWords", p.monthly_roast_limit "monthlyLimit"
+      s.stop_words "stopWords", s.triggers, p.monthly_roast_limit "monthlyLimit"
     from channels c join users u on u.id=c.user_id join settings s on s.channel_id=c.id
     left join lateral (
       select sub.plan_id from subscriptions sub
@@ -151,7 +167,7 @@ async function reserve(
     const used = usage?.roasts ?? 0;
     if (used >= monthlyLimit + (usage?.gifted ?? 0)) return "channel_quota_exceeded";
 
-    if (job.source !== "dashboard_test") {
+    if (COOLDOWN_SOURCES.has(job.source)) {
       const cooldowns = await tx<{ scope: string }[]>`
         select scope from cooldown_state where channel_id=${job.channelId} and next_allowed_at>now()
         and ((scope='channel' and subject_key='*') or (scope='viewer' and subject_key=${job.viewerLogin}))`;
@@ -179,20 +195,21 @@ async function reserve(
   });
 }
 
-async function synthesize(
-  text: string,
-  voice: Voice,
-  config: WorkerConfig,
-  fetcher: typeof globalThis.fetch
-): Promise<Uint8Array> {
-  const response = await fetcher(`${config.TTS_URL}/synth`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ text, voice }),
-    signal: AbortSignal.timeout(TTS_TIMEOUT_MS)
-  });
-  if (!response.ok) throw new Error(`tts_failed_${response.status}`);
-  return new Uint8Array(await response.arrayBuffer());
+/**
+ * Atomically reserves Yandex requests for the Moscow-time billing month. The upsert only grows
+ * the counter while it stays within the cap, so parallel roasts cannot overshoot it together.
+ */
+async function reserveYandexRequests(sql: Sql, now: Date, requests: number, limitRub: number) {
+  const limit = yandexTtsRequestLimit(limitRub);
+  if (requests > limit) return false;
+  const reserved = await sql`
+    insert into tts_usage_monthly(provider,month,requests)
+    values('yandex',${yandexBillingMonth(now)},${requests})
+    on conflict(provider,month) do update
+      set requests=tts_usage_monthly.requests+excluded.requests, updated_at=now()
+      where tts_usage_monthly.requests+excluded.requests <= ${limit}
+    returning requests`;
+  return reserved.length > 0;
 }
 
 async function storeAudio(bytes: Uint8Array, audioDir: string): Promise<string> {
@@ -264,6 +281,9 @@ export async function processRoast(
     // Nickname, message and injection checks: a rejected request costs neither quota nor money.
     const inputVerdict = inspectInput(job.viewerLogin, job.inputText, stopWords);
     if (!inputVerdict.allowed) return await settle("blocked_input", inputVerdict.reason);
+    // Event summaries carry third-party names and titles (raiders, prediction outcomes).
+    const eventMatch = job.eventSummary ? findStopListMatch(job.eventSummary, stopWords) : null;
+    if (eventMatch) return await settle("blocked_input", `event:${eventMatch.term}`);
 
     const reservation = await reserve(deps, job, context.monthlyLimit!, context);
     if (reservation) return await settle("skipped", reservation);
@@ -273,11 +293,21 @@ export async function processRoast(
     // Haiku 5.5 thinks by default and counts thinking against max_tokens; a one-line roast does
     // not need it, and disabling keeps latency inside the 4-second budget.
     // Instructions go in `system`, the viewer's data alone in the user turn.
+    // A channel-points message is judged rather than roasted (rewardMode "verdict").
+    const triggers = triggerSettingsSchema.parse(context.triggers ?? {});
+    const verdictMode =
+      job.source === "reward" && triggers.rewardMode === "verdict" && job.inputText.trim() !== "";
     const prompt = composeRoastPrompt({
       viewer: job.viewerLogin,
       message: job.inputText,
       tone: context.tone,
-      toxicity: context.toxicity
+      toxicity: context.toxicity,
+      target: job.target,
+      streamer: context.streamerLogin,
+      ...(job.eventSummary ? { event: job.eventSummary } : {}),
+      ...(verdictMode
+        ? { mode: "verdict" as const, streamerLoyaltyPercent: triggers.streamerLoyaltyPercent }
+        : {})
     });
     const generated = await deps.anthropic.messages.create({
       model,
@@ -291,7 +321,11 @@ export async function processRoast(
       tokensIn: generated.usage.input_tokens,
       tokensOut: generated.usage.output_tokens
     });
-    let output = enforceOutputLimit(textFrom(generated));
+    const reply = verdictMode
+      ? parseVerdictReply(textFrom(generated))
+      : { verdict: undefined, text: textFrom(generated) };
+    const verdict: Verdict | undefined = reply.verdict;
+    let output = enforceOutputLimit(reply.text);
     let blockReason: string | undefined;
     if (generated.stop_reason === "refusal") blockReason = "model_refusal";
     else if (!output) blockReason = "empty_output";
@@ -303,7 +337,7 @@ export async function processRoast(
           model: classifierModel,
           max_tokens: CLASSIFIER_MAX_TOKENS,
           thinking: { type: "disabled" },
-          system: CLASSIFIER_SYSTEM_PROMPT,
+          system: classifierSystemPrompt(context.toxicity),
           messages: [{ role: "user", content: classifierInput(output) }]
         });
         spends.push({
@@ -321,10 +355,27 @@ export async function processRoast(
     }
     if (blockReason) output = BLOCKED_OUTPUT_FALLBACK;
 
-    const audioFile = await storeAudio(
-      await synthesize(output, context.voice, deps.config, deps.fetch ?? globalThis.fetch),
-      deps.config.AUDIO_DIR
+    const yandexLimitRub = await globalValue<number>(
+      deps.sql,
+      "yandex_tts_monthly_limit_rub",
+      DEFAULT_YANDEX_TTS_MONTHLY_LIMIT_RUB
     );
+    const speech = await speak(
+      output,
+      context.tone,
+      deps.config,
+      deps.fetch ?? globalThis.fetch,
+      (requests) => reserveYandexRequests(deps.sql, clock(), requests, yandexLimitRub)
+    );
+    if (speech.costUsd > 0) {
+      spends.push({
+        model: `tts:${speech.provider}`,
+        tokensIn: 0,
+        tokensOut: 0,
+        fixedUsd: speech.costUsd
+      });
+    }
+    const audioFile = await storeAudio(speech.audio, deps.config.AUDIO_DIR);
     const now = clock();
     const expiresAt = new Date(now.getTime() + OVERLAY_EVENT_TTL_SECONDS * 1000);
     const ttsChars = Array.from(output).length;
@@ -336,7 +387,8 @@ export async function processRoast(
       await tx`update usage_monthly set tts_chars=tts_chars+${ttsChars}
         where channel_id=${job.channelId} and month=${month}`;
       await tx`update roasts set status=${blockReason ? "blocked_output" : "done"}, output_text=${output},
-        error=${blockReason ?? null}, tokens_in=${spent.tokensIn},tokens_out=${spent.tokensOut},
+        error=${blockReason ?? null}, verdict=${verdict ?? null},
+        tokens_in=${spent.tokensIn},tokens_out=${spent.tokensOut},
         tts_chars=${ttsChars}, cost_usd=${spent.cost},latency_ms=${Date.now() - started}
         where id=${currentRoastId}`;
       const overlayId = randomUUID();
@@ -348,6 +400,7 @@ export async function processRoast(
         viewerLogin: job.viewerLogin,
         text: output,
         tone: context.tone,
+        ...(verdict && !blockReason ? { verdict } : {}),
         audioFile,
         expiresAt: expiresAt.toISOString(),
         sentAt: now.toISOString()

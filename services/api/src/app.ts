@@ -10,14 +10,18 @@ import { createDatabase } from "@roastbot/db";
 import {
   DEFAULT_GLOBAL_MONTHLY_ROAST_CAP,
   DEFAULT_MONTHLY_BUDGET_USD,
+  DEFAULT_YANDEX_TTS_MONTHLY_LIMIT_RUB,
   ROAST_REQUESTED_QUEUE,
   ROAST_REQUESTED_QUEUE_OPTIONS,
+  TWITCH_SCOPES,
   channelSettingsSchema,
   overlayClientEventSchema,
   roastStatusSchema,
   storedOverlayRoastSchema,
   testRoastRequestSchema,
-  updateSettingsRequestSchema
+  updateSettingsRequestSchema,
+  YANDEX_TTS_RUB_PER_REQUEST,
+  yandexBillingMonth
 } from "@roastbot/shared";
 import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
 import { PgBoss } from "pg-boss";
@@ -25,6 +29,12 @@ import type { JSONValue, TransactionSql } from "postgres";
 import { z, ZodError } from "zod";
 
 import type { ApiConfig } from "./config.js";
+import {
+  authorizeUrl as authorizeDonationAlerts,
+  exchangeCode as exchangeDonationAlertsCode,
+  getUser as getDonationAlertsUser,
+  type DonationAlertsConfig
+} from "./donationalerts.js";
 import { decryptValue, encryptValue, signAudioPath, verifyAudioSignature } from "./security.js";
 import {
   generateRecoveryCodes,
@@ -72,7 +82,8 @@ const globalSettingSchemas = {
   monthly_budget_usd: z.number().min(0).max(10_000),
   model: z.string().regex(/^claude-[a-z0-9-]+$/u),
   classifier_model: z.string().regex(/^claude-[a-z0-9-]+$/u),
-  input_retention_days: z.number().int().min(1).max(30)
+  input_retention_days: z.number().int().min(1).max(30),
+  yandex_tts_monthly_limit_rub: z.number().min(0).max(100_000)
 } as const;
 type GlobalSettingKey = keyof typeof globalSettingSchemas;
 
@@ -285,7 +296,7 @@ export async function buildApp(config: ApiConfig) {
       client_id: config.TWITCH_CLIENT_ID,
       redirect_uri: config.TWITCH_REDIRECT_URI,
       response_type: "code",
-      scope: "channel:read:redemptions",
+      scope: TWITCH_SCOPES.join(" "),
       state
     }).toString();
     return reply.redirect(url.toString());
@@ -473,13 +484,15 @@ export async function buildApp(config: ApiConfig) {
         mfaEnabled: boolean;
         overlayToken: string;
         recoveryCodesLeft: number;
+        scopes: string[] | null;
       }[]
     >`
       select u.id "userId", c.id "channelId", u.login, u.display_name "displayName",
         u.role, u.status, c.twitch_login "channelLogin", c.overlay_token "overlayToken",
         u.totp_enabled_at is not null "mfaEnabled",
-        cardinality(u.mfa_recovery_hashes)::int "recoveryCodesLeft"
+        cardinality(u.mfa_recovery_hashes)::int "recoveryCodesLeft", t.scopes
       from users u join channels c on c.user_id=u.id
+      left join twitch_tokens t on t.channel_id=c.id
       where u.id=${userId} and c.id=${channelId}`;
     if (!row) {
       reply.clearCookie(SESSION_COOKIE, { path: "/" });
@@ -493,11 +506,14 @@ export async function buildApp(config: ApiConfig) {
         : "ok";
     // The overlay token is a credential: not before approval and the second factor.
     const restricted = row.status === "pending" || mfaRequired;
+    const { scopes, ...sessionRow } = row;
     return {
-      ...row,
+      ...sessionRow,
       overlayToken: restricted ? null : row.overlayToken,
       mfaRequired,
-      adminMfa
+      adminMfa,
+      // Scopes added after this channel logged in: its event triggers need a fresh Twitch login.
+      missingScopes: TWITCH_SCOPES.filter((scope) => !(scopes ?? []).includes(scope))
     };
   });
 
@@ -673,6 +689,118 @@ export async function buildApp(config: ApiConfig) {
       throw error;
     }
   });
+
+  // ---- DonationAlerts ----------------------------------------------------------------------
+  // An integration of an already signed-in channel, never a way to sign in: the callback needs
+  // the RoastBot session that started it and only stores tokens for that session's channel.
+  const daConfig: DonationAlertsConfig | undefined =
+    config.DONATIONALERTS_CLIENT_ID && config.DONATIONALERTS_CLIENT_SECRET
+      ? {
+          clientId: config.DONATIONALERTS_CLIENT_ID,
+          clientSecret: config.DONATIONALERTS_CLIENT_SECRET,
+          redirectUri: `${config.PUBLIC_URL}/integrations/donationalerts/callback`
+        }
+      : undefined;
+  const DA_STATE_COOKIE = "da_oauth_state";
+  const integrationRedirect = (reply: FastifyReply, result: string) => {
+    const url = new URL(config.DASHBOARD_URL);
+    url.searchParams.set("donationalerts", result);
+    return reply.redirect(url.toString());
+  };
+
+  app.get("/integrations/donationalerts", { preHandler: requireUser }, async (request) => {
+    const [row] = await sql<{ name: string }[]>`
+      select da_name "name" from donationalerts_accounts
+      where channel_id=${session(request).channelId}`;
+    return { configured: Boolean(daConfig), connected: Boolean(row), name: row?.name ?? null };
+  });
+
+  app.get(
+    "/integrations/donationalerts/connect",
+    { preHandler: requireUser },
+    async (request, reply) => {
+      if (!daConfig) return denied(reply, 404, "not_configured", "DonationAlerts не настроен");
+      const state = randomBytes(24).toString("base64url");
+      // The cookie also names who started: a callback landing in another session is rejected.
+      reply.setCookie(DA_STATE_COOKIE, `${state}.${session(request).userId}`, {
+        ...cookieOptions,
+        maxAge: 600
+      });
+      return reply.redirect(authorizeDonationAlerts(daConfig, state));
+    }
+  );
+
+  app.get("/integrations/donationalerts/callback", async (request, reply) => {
+    const query = z
+      .object({
+        code: z.string().optional(),
+        state: z.string().optional(),
+        error: z.string().optional()
+      })
+      .parse(request.query);
+    const startedBy = request.cookies[DA_STATE_COOKIE];
+    reply.clearCookie(DA_STATE_COOKIE, { path: "/" });
+    if (!daConfig) return integrationRedirect(reply, "not_configured");
+    try {
+      await request.jwtVerify();
+    } catch {
+      return integrationRedirect(reply, "login_required");
+    }
+    const { userId, channelId, mfaAt } = session(request);
+    const [user] = await sql<{ status: string; mfaEnabled: boolean }[]>`
+      select status, totp_enabled_at is not null "mfaEnabled" from users where id=${userId}`;
+    if (!user || user.status === "pending" || (user.mfaEnabled && !mfaAt)) {
+      return integrationRedirect(reply, "login_required");
+    }
+    if (query.error) return integrationRedirect(reply, "denied");
+    const [state, startedUserId] = startedBy?.split(".") ?? [];
+    if (!query.code || !state || state !== query.state || startedUserId !== userId) {
+      return integrationRedirect(reply, "invalid_state");
+    }
+    let token;
+    let account;
+    try {
+      token = await exchangeDonationAlertsCode(daConfig, query.code);
+      account = await getDonationAlertsUser(token.access_token);
+    } catch (error) {
+      request.log.warn(error, "DonationAlerts OAuth exchange failed");
+      return integrationRedirect(reply, "unavailable");
+    }
+    const access = encryptValue(token.access_token, config.TOKEN_ENCRYPTION_KEY);
+    const refresh = encryptValue(token.refresh_token, config.TOKEN_ENCRYPTION_KEY);
+    await sql.begin(async (tx) => {
+      await tx`insert into donationalerts_accounts(channel_id,da_user_id,da_name,
+          access_token_ciphertext,access_token_iv,access_token_tag,
+          refresh_token_ciphertext,refresh_token_iv,refresh_token_tag,expires_at)
+        values(${channelId},${String(account.id)},${account.name},
+          ${access.ciphertext},${access.iv},${access.tag},
+          ${refresh.ciphertext},${refresh.iv},${refresh.tag},
+          now()+${token.expires_in}*interval '1 second')
+        on conflict(channel_id) do update set da_user_id=excluded.da_user_id,
+          da_name=excluded.da_name, access_token_ciphertext=excluded.access_token_ciphertext,
+          access_token_iv=excluded.access_token_iv, access_token_tag=excluded.access_token_tag,
+          refresh_token_ciphertext=excluded.refresh_token_ciphertext,
+          refresh_token_iv=excluded.refresh_token_iv, refresh_token_tag=excluded.refresh_token_tag,
+          expires_at=excluded.expires_at, updated_at=now()`;
+      await audit(tx, request, "donationalerts.connect", channelId, {
+        daUserId: String(account.id)
+      });
+    });
+    return integrationRedirect(reply, "connected");
+  });
+
+  app.post(
+    "/integrations/donationalerts/disconnect",
+    { preHandler: requireUser },
+    async (request) => {
+      const { channelId } = session(request);
+      await sql.begin(async (tx) => {
+        await tx`delete from donationalerts_accounts where channel_id=${channelId}`;
+        await audit(tx, request, "donationalerts.disconnect", channelId, {});
+      });
+      return { connected: false };
+    }
+  );
 
   const channelStatus = async (request: FastifyRequest) => {
     const month = currentMonth();
@@ -921,7 +1049,16 @@ export async function buildApp(config: ApiConfig) {
           "killSwitch",
         (select count(*) from roasts where moderation_reviewed_at is null
           and status in ('blocked_input','blocked_output'))::int "pendingModeration"`;
-    return row;
+    const [tts] = await sql<{ requests: number; limitRub: number }[]>`
+      select coalesce((select requests from tts_usage_monthly
+          where provider='yandex' and month=${yandexBillingMonth(new Date())}),0)::int requests,
+        coalesce((select (value #>> '{}')::float8 from global_settings
+          where key='yandex_tts_monthly_limit_rub'), ${DEFAULT_YANDEX_TTS_MONTHLY_LIMIT_RUB})::float8 "limitRub"`;
+    return {
+      ...row,
+      yandexTtsSpentRub: Math.round((tts?.requests ?? 0) * YANDEX_TTS_RUB_PER_REQUEST * 100) / 100,
+      yandexTtsLimitRub: tts?.limitRub ?? DEFAULT_YANDEX_TTS_MONTHLY_LIMIT_RUB
+    };
   });
 
   app.get("/admin/users", { preHandler: requireOwner }, async (request) => {

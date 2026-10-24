@@ -1,0 +1,7 @@
+# Я тоже за тобой наблюдаю, краулер. Смотри только главную — остальное моё.
+User-agent: *
+Allow: /$
+Disallow: /admin
+Disallow: /security
+Disallow: /api/
+Disallow: /overlay/

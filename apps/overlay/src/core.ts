@@ -3,6 +3,11 @@ const TONES: readonly Tone[] = ["tsundere", "yandere"];
 export const isTone = (value: unknown): value is Tone =>
   typeof value === "string" && (TONES as readonly string[]).includes(value);
 
+export type Verdict = "agree" | "mixed" | "refuse";
+const VERDICTS: readonly Verdict[] = ["agree", "mixed", "refuse"];
+const isVerdict = (value: unknown): value is Verdict =>
+  typeof value === "string" && (VERDICTS as readonly string[]).includes(value);
+
 export interface RoastEvent {
   version: 1;
   type: "roast.play";
@@ -12,6 +17,8 @@ export interface RoastEvent {
   text: string;
   /** Character to show; absent on events from before characters existed. */
   tone?: Tone;
+  /** Channel-points verdict, shown as a badge; absent for plain roasts. */
+  verdict?: Verdict;
   audioUrl: string;
   expiresAt: string;
   sentAt: string;
@@ -61,8 +68,12 @@ export function parseEvent(raw: string): ServerEvent | null {
     return null;
   }
   // An unknown tone only loses the character, never the roast itself.
-  const { tone, ...rest } = value;
-  return { ...(rest as unknown as RoastEvent), ...(isTone(tone) ? { tone } : {}) };
+  const { tone, verdict, ...rest } = value;
+  return {
+    ...(rest as unknown as RoastEvent),
+    ...(isTone(tone) ? { tone } : {}),
+    ...(isVerdict(verdict) ? { verdict } : {})
+  };
 }
 
 /**

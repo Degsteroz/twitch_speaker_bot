@@ -7,8 +7,10 @@ RUN pnpm install --filter @roastbot/web... --frozen-lockfile
 COPY apps/web apps/web
 ARG VITE_API_URL=/api
 ARG VITE_OVERLAY_URL=/overlay
+ARG VITE_SITE_URL=https://roast.recursia.online
 ENV VITE_API_URL=$VITE_API_URL
 ENV VITE_OVERLAY_URL=$VITE_OVERLAY_URL
+ENV VITE_SITE_URL=$VITE_SITE_URL
 RUN pnpm --filter @roastbot/web build
 
 FROM nginx:1.27-alpine

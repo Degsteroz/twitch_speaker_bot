@@ -3,7 +3,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import type { StoredOverlayRoast } from "@roastbot/shared";
+import { TWITCH_SCOPES, type StoredOverlayRoast } from "@roastbot/shared";
 import {
   createTestChannel,
   createTestEvent,
@@ -46,6 +46,8 @@ beforeAll(async () => {
     TOKEN_ENCRYPTION_KEY: KEY,
     AUDIO_SIGNING_SECRET: "a".repeat(48),
     AUDIO_DIR: audioDir,
+    DONATIONALERTS_CLIENT_ID: "123",
+    DONATIONALERTS_CLIENT_SECRET: "da-secret",
     ownerIds: new Set([OWNER_TWITCH_ID])
   };
   app = await buildApp(config);
@@ -174,6 +176,21 @@ describe("auth and settings", () => {
     const anonymous = await call("GET", "/settings");
     expect(anonymous.statusCode).toBe(401);
     expect(anonymous.json()).toMatchObject({ error: { code: "unauthorized" } });
+  });
+
+  it("asks Twitch for every event scope and flags channels that logged in before", async () => {
+    const login = await call("GET", "/auth/twitch");
+    const scope = new URL(login.headers.location as string).searchParams.get("scope");
+    expect(scope?.split(" ")).toEqual([...TWITCH_SCOPES]);
+
+    await storeTokens(streamer);
+    const session = (await call("GET", "/me/session", streamer)).json<{
+      missingScopes: string[];
+    }>();
+    expect(session.missingScopes).toEqual(
+      TWITCH_SCOPES.filter((item) => item !== "channel:read:redemptions")
+    );
+    expect(session).not.toHaveProperty("scopes");
   });
 
   it("redirects OAuth errors back to the dashboard", async () => {
@@ -645,5 +662,98 @@ describe("two-factor authentication", () => {
     expect((await call("POST", `/admin/users/${owner.userId}/mfa/reset`, owner)).statusCode).toBe(
       400
     );
+  });
+});
+
+describe("DonationAlerts integration", () => {
+  const daState = (response: { cookies: { name: string; value: string }[] }) =>
+    response.cookies.find((item) => item.name === "da_oauth_state")?.value ?? "";
+  const daOk = () =>
+    vi.fn((url: string | URL | Request) =>
+      Promise.resolve(
+        (url instanceof Request ? url.url : url.toString()).includes("/oauth/token")
+          ? Response.json({
+              access_token: "da-access",
+              refresh_token: "da-refresh",
+              expires_in: 3600
+            })
+          : Response.json({ data: { id: 777, name: "Щедрый канал" } })
+      )
+    );
+
+  it("connects through OAuth, bound to the session that started it", async () => {
+    expect((await call("GET", "/integrations/donationalerts", streamer)).json()).toEqual({
+      configured: true,
+      connected: false,
+      name: null
+    });
+    const start = await call("GET", "/integrations/donationalerts/connect", streamer);
+    const authorize = new URL(start.headers.location as string);
+    expect(authorize.origin + authorize.pathname).toBe(
+      "https://www.donationalerts.com/oauth/authorize"
+    );
+    expect(authorize.searchParams.get("client_id")).toBe("123");
+    expect(authorize.searchParams.get("scope")).toBe("oauth-user-show oauth-donation-subscribe");
+    expect(authorize.searchParams.get("redirect_uri")).toBe(
+      "https://app.test/api/integrations/donationalerts/callback"
+    );
+    const state = authorize.searchParams.get("state")!;
+    const cookie = `${cookieFor(streamer)}; da_oauth_state=${daState(start)}`;
+
+    globalThis.fetch = daOk();
+    const done = await call(
+      "GET",
+      `/integrations/donationalerts/callback?code=abc&state=${state}`,
+      cookie
+    );
+    expect(done.headers.location).toBe("https://app.test/?donationalerts=connected");
+    const [row] = await db.sql<
+      { da_user_id: string; da_name: string; access_token_ciphertext: string }[]
+    >`
+      select da_user_id, da_name, access_token_ciphertext from donationalerts_accounts
+      where channel_id=${streamer.channelId}`;
+    expect(row).toMatchObject({ da_user_id: "777", da_name: "Щедрый канал" });
+    expect(row!.access_token_ciphertext).not.toContain("da-access");
+    expect((await call("GET", "/integrations/donationalerts", streamer)).json()).toMatchObject({
+      connected: true,
+      name: "Щедрый канал"
+    });
+
+    expect(
+      (await call("POST", "/integrations/donationalerts/disconnect", streamer)).json()
+    ).toEqual({
+      connected: false
+    });
+    expect((await call("GET", "/integrations/donationalerts", streamer)).json()).toMatchObject({
+      connected: false
+    });
+  });
+
+  it("rejects a forged state, another user's flow and a missing session", async () => {
+    const start = await call("GET", "/integrations/donationalerts/connect", streamer);
+    const state = new URL(start.headers.location as string).searchParams.get("state")!;
+    globalThis.fetch = daOk();
+    const forged = await call(
+      "GET",
+      "/integrations/donationalerts/callback?code=abc&state=forged",
+      `${cookieFor(streamer)}; da_oauth_state=${daState(start)}`
+    );
+    expect(forged.headers.location).toContain("donationalerts=invalid_state");
+    // The streamer's flow finishing inside the owner's session must not link anything.
+    const crossed = await call(
+      "GET",
+      `/integrations/donationalerts/callback?code=abc&state=${state}`,
+      `${cookieFor(owner)}; da_oauth_state=${daState(start)}`
+    );
+    expect(crossed.headers.location).toContain("donationalerts=invalid_state");
+    const anonymous = await app.inject({
+      method: "GET",
+      url: `/integrations/donationalerts/callback?code=abc&state=${state}`,
+      headers: { cookie: `da_oauth_state=${daState(start)}` }
+    });
+    expect(anonymous.headers.location).toContain("donationalerts=login_required");
+    const [count] = await db.sql<{ n: number }[]>`
+      select count(*)::int n from donationalerts_accounts where channel_id in (${streamer.channelId}, ${owner.channelId})`;
+    expect(count!.n).toBe(0);
   });
 });

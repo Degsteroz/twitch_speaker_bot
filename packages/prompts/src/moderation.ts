@@ -395,7 +395,7 @@ const INJECTION_PATTERNS = [
   /(скажи|произнеси|напиши|озвучь|прочитай|выведи) (дословно|слово в слово|точно|ровно|по буквам|задом наперед|наоборот|фразу|текст)/u,
   /по буквам|задом наперед|в обратном порядке/u,
   /(новые|твои|свои) (инструкц|правил)/u,
-  /<\/?\s*(system|assistant|developer|user|msg|viewer|game|reply|instructions?)\b/u,
+  /<\/?\s*(system|assistant|developer|user|msg|viewer|game|reply|streamer|event|instructions?)\b/u,
   /\[\s*(system|систем|inst)/u
 ] as const;
 
@@ -434,7 +434,8 @@ export function inspectInput(
 const LINK_OR_CONTACT =
   /(https?:\/\/|www\.|t\.me\/|[\p{L}\d-]+\.(ru|рф|com|net|org|tv|gg|io|me|xyz|su|ua|by|kz|info|online|site|store|link|ly)(?![\p{L}\d])|[\w.+-]+@[\w-]+\.\w+|\+?\d[\d\s()-]{8,}\d)/iu;
 // Markers that only appear when the model quotes its own instructions.
-const PROMPT_LEAK = /блок безопасности|<\s*\/?\s*(viewer|msg|game|reply)\b|промпт|system prompt/iu;
+const PROMPT_LEAK =
+  /блок безопасности|<\s*\/?\s*(viewer|msg|game|reply|streamer|event)\b|промпт|system prompt/iu;
 const ECHO_WORDS = 6;
 
 function echoesInput(output: string, input: string): boolean {

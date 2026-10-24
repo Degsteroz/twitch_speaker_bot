@@ -75,6 +75,8 @@ services:
       TWITCH_CLIENT_SECRET: ${TWITCH_CLIENT_SECRET}
       TWITCH_REDIRECT_URI: ${TWITCH_REDIRECT_URI}
       TWITCH_OWNER_IDS: ${TWITCH_OWNER_IDS:-}
+      DONATIONALERTS_CLIENT_ID: ${DONATIONALERTS_CLIENT_ID:-}
+      DONATIONALERTS_CLIENT_SECRET: ${DONATIONALERTS_CLIENT_SECRET:-}
       SESSION_SECRET: ${SESSION_SECRET}
       TOKEN_ENCRYPTION_KEY: ${TOKEN_ENCRYPTION_KEY}
       AUDIO_SIGNING_SECRET: ${AUDIO_SIGNING_SECRET}
@@ -111,6 +113,8 @@ services:
     environment:
       DATABASE_URL: ${DATABASE_URL}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      # Character voices; empty means every roast is voiced by the local Piper service.
+      YANDEX_TTS_API_KEY: ${YANDEX_TTS_API_KEY:-}
       TTS_URL: http://tts:8000
       AUDIO_DIR: /data/audio
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
@@ -139,6 +143,8 @@ services:
       TWITCH_CLIENT_ID: ${TWITCH_CLIENT_ID}
       TWITCH_CLIENT_SECRET: ${TWITCH_CLIENT_SECRET}
       TOKEN_ENCRYPTION_KEY: ${TOKEN_ENCRYPTION_KEY}
+      DONATIONALERTS_CLIENT_ID: ${DONATIONALERTS_CLIENT_ID:-}
+      DONATIONALERTS_CLIENT_SECRET: ${DONATIONALERTS_CLIENT_SECRET:-}
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -191,6 +197,8 @@ services:
       args:
         VITE_API_URL: /api
         VITE_OVERLAY_URL: /overlay
+        # Canonical and Open Graph links (index.html); the app itself uses relative URLs.
+        VITE_SITE_URL: https://${APP_DOMAIN}
     restart: unless-stopped
     networks: [internal]
     healthcheck:

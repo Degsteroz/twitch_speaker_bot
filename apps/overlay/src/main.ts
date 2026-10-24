@@ -8,7 +8,8 @@ import {
   reconnectDelay,
   websocketUrl,
   type RoastEvent,
-  type Tone
+  type Tone,
+  type Verdict
 } from "./core.js";
 import "./styles.css";
 
@@ -23,6 +24,12 @@ function element(selector: string): Element {
 }
 const card = element("#roast") as HTMLElement;
 const character = element("#character") as HTMLImageElement;
+const verdictBadge = element("#verdict") as HTMLElement;
+const VERDICT_TEXT: Readonly<Record<Verdict, string>> = {
+  agree: "✓ согласна",
+  mixed: "≈ отчасти",
+  refuse: "✗ не согласна"
+};
 const viewer = element("#viewer") as HTMLElement;
 const roastText = element("#text") as HTMLElement;
 const audio = element("#audio") as HTMLAudioElement;
@@ -45,6 +52,11 @@ function hideCard() {
   card.classList.remove("visible", "speaking");
   active = undefined;
 }
+function showVerdict(verdict: Verdict | undefined) {
+  verdictBadge.hidden = !verdict;
+  verdictBadge.textContent = verdict ? VERDICT_TEXT[verdict] : "";
+  if (verdict) verdictBadge.dataset.verdict = verdict;
+}
 function showCharacter(tone: Tone | undefined) {
   if (tone) {
     card.dataset.tone = tone;
@@ -64,6 +76,7 @@ function next() {
   viewer.textContent = `@${event.viewerLogin}`;
   roastText.textContent = event.text;
   showCharacter(event.tone);
+  showVerdict(event.verdict);
   audio.src = event.audioUrl;
   card.hidden = false;
   requestAnimationFrame(() => card.classList.add("visible"));
@@ -170,6 +183,7 @@ function showPreview(tone: Tone) {
       ? "Хм, это была игра? Не то чтобы мне было интересно, но… ладно, чуть-чуть."
       : "Я видела каждый твой промах… и запомнила их все. Навсегда.";
   showCharacter(tone);
+  showVerdict(tone === "tsundere" ? "refuse" : undefined);
   card.hidden = false;
   requestAnimationFrame(() => card.classList.add("visible", "speaking"));
 }

@@ -2,7 +2,8 @@ import {
   DEFAULT_ANTHROPIC_MODEL,
   DEFAULT_CHANNEL_MONTHLY_ROASTS,
   DEFAULT_GLOBAL_MONTHLY_ROAST_CAP,
-  DEFAULT_MONTHLY_BUDGET_USD
+  DEFAULT_MONTHLY_BUDGET_USD,
+  DEFAULT_YANDEX_TTS_MONTHLY_LIMIT_RUB
 } from "@roastbot/shared";
 import { sql } from "drizzle-orm";
 
@@ -42,7 +43,8 @@ export async function seedDatabase(
       { key: "model", value: model },
       { key: "classifier_model", value: model },
       { key: "global_stop_words", value: [] },
-      { key: "input_retention_days", value: 30 }
+      { key: "input_retention_days", value: 30 },
+      { key: "yandex_tts_monthly_limit_rub", value: DEFAULT_YANDEX_TTS_MONTHLY_LIMIT_RUB }
     ];
 
     for (const setting of defaults) {

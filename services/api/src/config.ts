@@ -14,7 +14,10 @@ const envSchema = z.object({
   SESSION_SECRET: z.string().min(32),
   TOKEN_ENCRYPTION_KEY: z.string().regex(/^[a-fA-F0-9]{64}$/u),
   AUDIO_SIGNING_SECRET: z.string().min(32),
-  AUDIO_DIR: z.string().default("/data/audio")
+  AUDIO_DIR: z.string().default("/data/audio"),
+  // Optional integration: without both values the panel hides DonationAlerts.
+  DONATIONALERTS_CLIENT_ID: z.string().optional(),
+  DONATIONALERTS_CLIENT_SECRET: z.string().optional()
 });
 
 export type ApiConfig = z.infer<typeof envSchema> & { ownerIds: ReadonlySet<string> };

@@ -9,6 +9,21 @@ export const MAX_ROAST_CHARACTERS = 200;
 export const OVERLAY_EVENT_TTL_SECONDS = 120;
 export const AUDIO_URL_TTL_SECONDS = 60;
 export const DEFAULT_MONTHLY_BUDGET_USD = 5;
+
+// Yandex SpeechKit hard cap. API v3 `general` voices bill 0.1626 ₽ with VAT per request of up to
+// 250 characters (pricing page, 2026-10); the cap converts roubles into a request count.
+export const DEFAULT_YANDEX_TTS_MONTHLY_LIMIT_RUB = 300;
+export const YANDEX_TTS_RUB_PER_REQUEST = 0.1626;
+export const YANDEX_TTS_CHARS_PER_REQUEST = 250;
+export const yandexTtsRequestLimit = (limitRub: number) =>
+  Math.max(0, Math.floor(limitRub / YANDEX_TTS_RUB_PER_REQUEST));
+export const yandexTtsRequestsFor = (text: string) =>
+  Math.max(1, Math.ceil(Array.from(text).length / YANDEX_TTS_CHARS_PER_REQUEST));
+/** Yandex Cloud bills by calendar month in Moscow time; the cap resets on the same boundary. */
+export const yandexBillingMonth = (date: Date) =>
+  new Intl.DateTimeFormat("sv-SE", { timeZone: "Europe/Moscow", year: "numeric", month: "2-digit" })
+    .format(date)
+    .slice(0, 7);
 export const DEFAULT_ANTHROPIC_MODEL = "claude-haiku-5-5";
 export const BLOCKED_OUTPUT_FALLBACK = "Даже мне за такое стыдно";
 export const ROAST_REQUESTED_QUEUE = "roast.requested";
@@ -30,7 +45,43 @@ export const toxicitySchema = z.union([
   z.literal(4),
   z.literal(5)
 ]);
-export const roastSourceSchema = z.enum(["chat_command", "reward", "dashboard_test"]);
+export const roastSourceSchema = z.enum([
+  "chat_command",
+  "chat_keyword",
+  "reward",
+  "dashboard_test",
+  "cheer",
+  "subscription",
+  "gift_sub",
+  "raid",
+  "follow",
+  "prediction",
+  "ad_break",
+  "donation"
+]);
+// Sources where chat could flood the bot: they obey channel and viewer cooldowns. Paid or rare
+// events (bits, subs, raids, ads, predictions, donations) always play, within the quota.
+export const COOLDOWN_SOURCES: ReadonlySet<RoastSource> = new Set<RoastSource>([
+  "chat_command",
+  "chat_keyword",
+  "reward",
+  "follow"
+]);
+/** Who the roast is aimed at: the viewer behind the trigger or the streamer. */
+export const roastTargetSchema = z.enum(["viewer", "streamer"]);
+/** The bot's stance on a channel-points message: agree with it, half-agree, or push back. */
+export const verdictSchema = z.enum(["agree", "mixed", "refuse"]);
+
+// Twitch scopes requested at login. Every EventSub trigger needs its own; a channel that logged
+// in before a scope was added is asked to log in again.
+export const TWITCH_SCOPES = Object.freeze([
+  "channel:read:redemptions",
+  "bits:read",
+  "channel:read:subscriptions",
+  "moderator:read:followers",
+  "channel:read:predictions",
+  "channel:read:ads"
+] as const);
 export const roastStatusSchema = z.enum([
   "queued",
   "blocked_input",
@@ -40,12 +91,86 @@ export const roastStatusSchema = z.enum([
   "skipped"
 ]);
 
+const percentSchema = z.number().int().min(0).max(100);
+
+export const DEFAULT_EVENT_TRIGGERS = Object.freeze({
+  cheer: { enabled: false, minBits: 100 },
+  subscription: { enabled: false },
+  giftSub: { enabled: false, minCount: 1 },
+  raid: { enabled: false, minViewers: 5 },
+  follow: { enabled: false, chancePercent: 20 },
+  prediction: { enabled: false },
+  adBreak: { enabled: false },
+  donation: { enabled: false, minAmount: 100 }
+});
+
+const toggle = z.object({ enabled: z.boolean().default(false) }).strict();
+export const eventTriggersSchema = z
+  .object({
+    cheer: z
+      .object({
+        enabled: z.boolean().default(false),
+        minBits: z.number().int().min(1).max(1_000_000).default(100)
+      })
+      .strict()
+      .default({ ...DEFAULT_EVENT_TRIGGERS.cheer }),
+    subscription: toggle.default({ ...DEFAULT_EVENT_TRIGGERS.subscription }),
+    giftSub: z
+      .object({
+        enabled: z.boolean().default(false),
+        minCount: z.number().int().min(1).max(1_000).default(1)
+      })
+      .strict()
+      .default({ ...DEFAULT_EVENT_TRIGGERS.giftSub }),
+    raid: z
+      .object({
+        enabled: z.boolean().default(false),
+        minViewers: z.number().int().min(0).max(1_000_000).default(5)
+      })
+      .strict()
+      .default({ ...DEFAULT_EVENT_TRIGGERS.raid }),
+    follow: z
+      .object({ enabled: z.boolean().default(false), chancePercent: percentSchema.default(20) })
+      .strict()
+      .default({ ...DEFAULT_EVENT_TRIGGERS.follow }),
+    prediction: toggle.default({ ...DEFAULT_EVENT_TRIGGERS.prediction }),
+    adBreak: toggle.default({ ...DEFAULT_EVENT_TRIGGERS.adBreak }),
+    // DonationAlerts; the threshold is in the donation's own currency.
+    donation: z
+      .object({
+        enabled: z.boolean().default(false),
+        minAmount: z.number().min(0).max(10_000_000).default(100)
+      })
+      .strict()
+      .default({ ...DEFAULT_EVENT_TRIGGERS.donation })
+  })
+  .strict();
+
+// DonationAlerts OAuth: profile for the user id, and the real-time donation channel.
+export const DONATIONALERTS_SCOPES = Object.freeze([
+  "oauth-user-show",
+  "oauth-donation-subscribe"
+] as const);
+
 export const triggerSettingsSchema = z
   .object({
     command: z.boolean().default(true),
-    rewardId: z.string().min(1).nullable().default(null)
+    rewardId: z.string().min(1).nullable().default(null),
+    // Chat messages containing one of these words (word start, any case) may trigger a roast.
+    keywords: z.array(z.string().trim().min(1).max(40)).max(50).default([]),
+    keywordChancePercent: percentSchema.default(30),
+    // For chat triggers (keywords, !роаст): chance that the streamer is roasted instead.
+    streamerTargetPercent: percentSchema.default(50),
+    // Channel-points reward: "verdict" judges the viewer's message (agree / mixed / refuse and
+    // roast the streamer or the viewer accordingly); "roast" roasts the viewer as before.
+    rewardMode: z.enum(["verdict", "roast"]).default("verdict"),
+    // How readily the verdict sides with the streamer: 0 agrees with critics, 100 defends.
+    streamerLoyaltyPercent: percentSchema.default(50),
+    events: eventTriggersSchema.default(eventTriggersSchema.parse({}))
   })
   .strict();
+
+export const DEFAULT_TRIGGERS = triggerSettingsSchema.parse({});
 
 export const channelSettingsSchema = z
   .object({
@@ -54,7 +179,7 @@ export const channelSettingsSchema = z
     toxicity: toxicitySchema.default(2),
     cooldownSec: z.number().int().min(0).max(3_600).default(DEFAULT_CHANNEL_COOLDOWN_SECONDS),
     userCooldownSec: z.number().int().min(0).max(86_400).default(DEFAULT_USER_COOLDOWN_SECONDS),
-    triggers: triggerSettingsSchema.default({ command: true, rewardId: null }),
+    triggers: triggerSettingsSchema.default(DEFAULT_TRIGGERS),
     stopWords: z.array(z.string().trim().min(1).max(100)).max(500).default([]),
     enabled: z.boolean().default(true)
   })
@@ -69,6 +194,10 @@ export const roastRequestedJobSchema = z
     viewerId: z.string().min(1).max(128).optional(),
     viewerLogin: z.string().min(1).max(64),
     inputText: z.string().max(2_000),
+    target: roastTargetSchema.default("viewer"),
+    // What happened, in our own words ("Рейд с канала x: 40 зрителей"); viewer text stays in
+    // inputText. Built by the twitch service from typed event fields.
+    eventSummary: z.string().max(500).optional(),
     requestedAt: z.string().datetime()
   })
   .strict();
@@ -149,6 +278,8 @@ export const overlayRoastEventSchema = z
     // Picks the character shown next to the text. Optional: outbox rows written before it existed
     // still validate and play without a character.
     tone: toneSchema.optional(),
+    // Channel-points verdict, shown as a badge next to the text.
+    verdict: verdictSchema.optional(),
     audioUrl: z.string().url(),
     expiresAt: z.string().datetime(),
     sentAt: z.string().datetime()
@@ -202,6 +333,9 @@ export type Toxicity = z.infer<typeof toxicitySchema>;
 export type RoastSource = z.infer<typeof roastSourceSchema>;
 export type RoastStatus = z.infer<typeof roastStatusSchema>;
 export type TriggerSettings = z.infer<typeof triggerSettingsSchema>;
+export type EventTriggers = z.infer<typeof eventTriggersSchema>;
+export type RoastTarget = z.infer<typeof roastTargetSchema>;
+export type Verdict = z.infer<typeof verdictSchema>;
 export type ChannelSettings = z.infer<typeof channelSettingsSchema>;
 export type RoastRequestedJob = z.infer<typeof roastRequestedJobSchema>;
 export type RoastCompletedJob = z.infer<typeof roastCompletedJobSchema>;

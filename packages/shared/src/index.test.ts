@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  DEFAULT_TRIGGERS,
   channelSettingsSchema,
   overlayServerEventSchema,
-  roastRequestedJobSchema
+  roastRequestedJobSchema,
+  triggerSettingsSchema
 } from "./index.js";
 
 describe("channelSettingsSchema", () => {
@@ -14,10 +16,24 @@ describe("channelSettingsSchema", () => {
       toxicity: 2,
       cooldownSec: 30,
       userCooldownSec: 60,
-      triggers: { command: true, rewardId: null },
+      triggers: DEFAULT_TRIGGERS,
       stopWords: [],
       enabled: true
     });
+    // Every new trigger is off by default: an upgrade never starts roasting on its own.
+    expect(DEFAULT_TRIGGERS).toMatchObject({
+      command: true,
+      rewardId: null,
+      keywords: [],
+      rewardMode: "verdict",
+      events: { cheer: { enabled: false }, raid: { enabled: false }, follow: { enabled: false } }
+    });
+  });
+
+  it("completes trigger rows saved before the new fields existed", () => {
+    const legacy = triggerSettingsSchema.parse({ command: false, rewardId: "r1" });
+    expect(legacy).toMatchObject({ command: false, rewardId: "r1", streamerTargetPercent: 50 });
+    expect(legacy.events.subscription).toEqual({ enabled: false });
   });
 
   it("rejects unsupported toxicity and unknown fields", () => {

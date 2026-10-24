@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { normalizeSettings, overlayUrl } from "./api.js";
+import { DEFAULT_TRIGGERS, normalizeSettings, normalizeTriggers, overlayUrl } from "./api.js";
 
 describe("normalizeSettings", () => {
   it("maps the API snake_case settings contract", () => {
@@ -21,10 +21,21 @@ describe("normalizeSettings", () => {
       toxicity: 3,
       cooldownSec: 20,
       userCooldownSec: 60,
-      triggers: { command: true, rewardId: null },
+      triggers: DEFAULT_TRIGGERS,
       stopWords: ["бан"],
       enabled: true
     });
+  });
+
+  it("completes triggers saved before the newer fields existed", () => {
+    const triggers = normalizeTriggers({
+      command: false,
+      rewardId: "r1",
+      events: { raid: { enabled: true } }
+    });
+    expect(triggers).toMatchObject({ command: false, rewardId: "r1", keywordChancePercent: 30 });
+    expect(triggers.events.raid).toEqual({ enabled: true, minViewers: 5 });
+    expect(triggers.events.cheer).toEqual({ enabled: false, minBits: 100 });
   });
 });
 

@@ -26,7 +26,20 @@ export const toneEnum = pgEnum("tone", ["tsundere", "yandere"]);
 export const voiceEnum = pgEnum("voice", ["male", "female"]);
 export const planCodeEnum = pgEnum("plan_code", ["free", "basic", "premium"]);
 export const subscriptionSourceEnum = pgEnum("subscription_source", ["manual"]);
-export const eventTypeEnum = pgEnum("event_type", ["chat_command", "reward", "dashboard_test"]);
+export const eventTypeEnum = pgEnum("event_type", [
+  "chat_command",
+  "reward",
+  "dashboard_test",
+  "chat_keyword",
+  "cheer",
+  "subscription",
+  "gift_sub",
+  "raid",
+  "follow",
+  "prediction",
+  "ad_break",
+  "donation"
+]);
 export const roastStatusEnum = pgEnum("roast_status", [
   "queued",
   "blocked_input",
@@ -100,10 +113,12 @@ export const settings = pgTable(
     toxicity: integer("toxicity").notNull().default(2),
     cooldownSec: integer("cooldown_sec").notNull().default(30),
     userCooldownSec: integer("user_cooldown_sec").notNull().default(60),
+    // The column default predates most trigger fields; readers parse the value with
+    // triggerSettingsSchema, which fills in everything missing.
     triggers: jsonb("triggers")
       .$type<TriggerSettings>()
       .notNull()
-      .default({ command: true, rewardId: null }),
+      .default(sql`'{"command": true, "rewardId": null}'::jsonb`),
     stopWords: text("stop_words")
       .array()
       .notNull()
@@ -172,6 +187,23 @@ export const twitchTokens = pgTable("twitch_tokens", {
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow()
 });
 
+export const donationAlertsAccounts = pgTable("donationalerts_accounts", {
+  channelId: uuid("channel_id")
+    .primaryKey()
+    .references(() => channels.id, { onDelete: "cascade" }),
+  daUserId: text("da_user_id").notNull(),
+  daName: text("da_name").notNull(),
+  accessTokenCiphertext: text("access_token_ciphertext").notNull(),
+  accessTokenIv: text("access_token_iv").notNull(),
+  accessTokenTag: text("access_token_tag").notNull(),
+  refreshTokenCiphertext: text("refresh_token_ciphertext").notNull(),
+  refreshTokenIv: text("refresh_token_iv").notNull(),
+  refreshTokenTag: text("refresh_token_tag").notNull(),
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  connectedAt: timestamp("connected_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow()
+});
+
 export const events = pgTable(
   "events",
   {
@@ -216,6 +248,8 @@ export const roasts = pgTable(
     costUsd: numeric("cost_usd", { precision: 10, scale: 6 }).notNull().default("0"),
     latencyMs: integer("latency_ms"),
     error: text("error"),
+    // Channel-points verdict; null for plain roasts.
+    verdict: text("verdict"),
     moderationReviewedAt: timestamp("moderation_reviewed_at", { withTimezone: true }),
     createdAt: createdAt()
   },
@@ -229,7 +263,11 @@ export const roasts = pgTable(
       sql`${table.tokensIn} >= 0 and ${table.tokensOut} >= 0 and ${table.ttsChars} >= 0`
     ),
     check("roasts_latency_check", sql`${table.latencyMs} is null or ${table.latencyMs} >= 0`),
-    check("roasts_cost_check", sql`${table.costUsd} >= 0`)
+    check("roasts_cost_check", sql`${table.costUsd} >= 0`),
+    check(
+      "roasts_verdict_check",
+      sql`${table.verdict} is null or ${table.verdict} in ('agree', 'mixed', 'refuse')`
+    )
   ]
 );
 
@@ -254,6 +292,21 @@ export const usageMonthly = pgTable(
       "usage_monthly_counters_check",
       sql`${table.roasts} >= 0 and ${table.tokensIn} >= 0 and ${table.tokensOut} >= 0 and ${table.ttsChars} >= 0 and ${table.costUsd} >= 0`
     )
+  ]
+);
+
+export const ttsUsageMonthly = pgTable(
+  "tts_usage_monthly",
+  {
+    provider: text("provider").notNull(),
+    month: char("month", { length: 7 }).notNull(),
+    requests: integer("requests").notNull().default(0),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow()
+  },
+  (table) => [
+    primaryKey({ columns: [table.provider, table.month] }),
+    check("tts_usage_monthly_month_check", sql`${table.month} ~ '^[0-9]{4}-(0[1-9]|1[0-2])$'`),
+    check("tts_usage_monthly_requests_check", sql`${table.requests} >= 0`)
   ]
 );
 

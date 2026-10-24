@@ -27,7 +27,12 @@ import {
   type RoastResult,
   type Session,
   type Settings,
-  type Status
+  type Status,
+  type DonationAlertsStatus,
+  type EventTriggers,
+  type Triggers,
+  DONATIONALERTS_RESULT_TEXT,
+  donationAlertsConnectUrl
 } from "./api.js";
 import "./styles.css";
 import { Tour } from "./tour.js";
@@ -428,7 +433,8 @@ function Landing() {
           Войти через Twitch <span aria-hidden>↗</span>
         </a>
         <p className="fine">
-          Требуется доступ только к наградам канала · новые каналы подключаются после одобрения
+          Только чтение: награды, битсы, подписки и события канала · новые каналы подключаются после
+          одобрения
         </p>
       </section>
       <div className="demo-card">
@@ -436,7 +442,7 @@ function Landing() {
         <blockquote>
           «@viewer, твой aim — это современное искусство: никто не понимает, но все делают вид.»
         </blockquote>
-        <small>Цундэрэ · Женский голос · 8 сек</small>
+        <small>Цундэрэ · голос персонажа · 8 сек</small>
       </div>
     </main>
   );
@@ -625,6 +631,17 @@ function Dashboard({
           </button>
         </div>
       </div>
+      {session.missingScopes.length > 0 && (
+        <div className="reauth" role="status">
+          <span>
+            Чтобы бот реагировал на битсы, подписки, фоллоу, прогнозы и рекламу, Twitch нужно выдать
+            новые права.
+          </span>
+          <a className="button secondary" href={authUrl}>
+            Перезайти через Twitch
+          </a>
+        </div>
+      )}
       <section className="status-grid">
         <Card className="status-card" tour="status">
           <span className={`status-pill ${status.state === "working" ? "" : "warn"}`}>
@@ -689,23 +706,7 @@ function Dashboard({
                 />
               </div>
             </fieldset>
-            <fieldset>
-              <legend>Голос</legend>
-              <div className="segment">
-                <button
-                  className={settings.voice === "female" ? "active" : ""}
-                  onClick={() => patch("voice", "female")}
-                >
-                  Женский
-                </button>
-                <button
-                  className={settings.voice === "male" ? "active" : ""}
-                  onClick={() => patch("voice", "male")}
-                >
-                  Мужской
-                </button>
-              </div>
-            </fieldset>
+            <p className="hint">Голос подобран под персонажа и меняется вместе с тоном.</p>
             <fieldset>
               <legend>
                 Токсичность <span>{settings.toxicity}/5</span>
@@ -748,49 +749,11 @@ function Dashboard({
               }
             />
           </div>
-          <fieldset>
-            <legend>Триггеры</legend>
-            <label className="check" data-tour="command">
-              <input
-                type="checkbox"
-                checked={settings.triggers.command}
-                onChange={(event) =>
-                  patch("triggers", { ...settings.triggers, command: event.target.checked })
-                }
-              />
-              <span>
-                Команда <code>!роаст</code>
-              </span>
-            </label>
-            <div data-tour="reward">
-              <label className="field-label">
-                Награда за баллы канала
-                <select
-                  value={settings.triggers.rewardId ?? ""}
-                  disabled={!rewards?.available}
-                  onChange={(event) =>
-                    patch("triggers", {
-                      ...settings.triggers,
-                      rewardId: event.target.value || null
-                    })
-                  }
-                >
-                  <option value="">Не выбрана</option>
-                  {rewards?.rewards.map((reward) => (
-                    <option key={reward.id} value={reward.id}>
-                      {reward.title} · {reward.cost}
-                      {reward.is_enabled ? "" : " (выключена)"}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              {rewards === undefined && <small>Загружаем награды…</small>}
-              {rewards?.reason && <small>{REWARD_REASON_TEXT[rewards.reason]}</small>}
-              {rewards?.available && rewards.rewards.length === 0 && (
-                <small>На канале нет наград. Создайте награду с полем ввода текста в Twitch.</small>
-              )}
-            </div>
-          </fieldset>
+          <TriggerSettings
+            triggers={settings.triggers}
+            rewards={rewards}
+            onChange={(triggers) => patch("triggers", triggers)}
+          />
           <div data-tour="stopwords">
             <Tags value={settings.stopWords} onChange={(value) => patch("stopWords", value)} />
           </div>
@@ -813,6 +776,271 @@ function Dashboard({
       </section>
       <Tour open={tourOpen} onClose={closeTour} />
     </Shell>
+  );
+}
+
+type EventKey = keyof EventTriggers;
+interface EventRow {
+  key: EventKey;
+  title: string;
+  hint: string;
+  threshold?: { field: string; label: string; min: number; max: number };
+}
+const EVENT_ROWS: EventRow[] = [
+  {
+    key: "cheer",
+    title: "Битсы",
+    hint: "жарит автора по тексту cheer",
+    threshold: { field: "minBits", label: "от, битсов", min: 1, max: 1_000_000 }
+  },
+  { key: "subscription", title: "Подписки и ресабы", hint: "жарит подписчика, учитывает стаж" },
+  {
+    key: "giftSub",
+    title: "Подарочные сабы",
+    hint: "жарит щедрого дарителя",
+    threshold: { field: "minCount", label: "от, сабов", min: 1, max: 1_000 }
+  },
+  {
+    key: "raid",
+    title: "Рейды",
+    hint: "встречает рейдера",
+    threshold: { field: "minViewers", label: "от, зрителей", min: 0, max: 1_000_000 }
+  },
+  {
+    key: "follow",
+    title: "Фоллоу",
+    hint: "фоллоу бывает много — шанс держите небольшим",
+    threshold: { field: "chancePercent", label: "шанс, %", min: 0, max: 100 }
+  },
+  { key: "prediction", title: "Итоги прогнозов", hint: "жарит проигравших или стримера" },
+  { key: "adBreak", title: "Реклама", hint: "подкалывает стримера, пока идёт реклама" },
+  {
+    key: "donation",
+    title: "Донаты DonationAlerts",
+    hint: "жарит донатера по тексту доната",
+    threshold: { field: "minAmount", label: "от, сумма", min: 0, max: 10_000_000 }
+  }
+];
+
+function DonationAlertsLink() {
+  const [status, setStatus] = useState<DonationAlertsStatus>();
+  const [notice] = useState(() => {
+    const result = new URLSearchParams(location.search).get("donationalerts");
+    return result ? (DONATIONALERTS_RESULT_TEXT[result] ?? result) : "";
+  });
+  useEffect(() => {
+    api<DonationAlertsStatus>("/integrations/donationalerts")
+      .then(setStatus)
+      .catch(() => setStatus({ configured: false, connected: false, name: null }));
+  }, []);
+  if (!status?.configured) return null;
+  const disconnect = async () => {
+    if (!confirm("Отключить DonationAlerts? Донаты перестанут приходить боту.")) return;
+    await api("/integrations/donationalerts/disconnect", post());
+    setStatus({ ...status, connected: false, name: null });
+  };
+  return (
+    <div className="integration">
+      <span>
+        {status.connected ? (
+          <>
+            DonationAlerts: <strong>{status.name}</strong>
+          </>
+        ) : (
+          "DonationAlerts не подключён"
+        )}
+        {notice && <small> · {notice}</small>}
+      </span>
+      {status.connected ? (
+        <button className="mini" onClick={() => void disconnect()}>
+          Отключить
+        </button>
+      ) : (
+        <a className="mini" href={donationAlertsConnectUrl}>
+          Подключить
+        </a>
+      )}
+    </div>
+  );
+}
+
+function PercentSlider({
+  label,
+  value,
+  left,
+  right,
+  onChange
+}: {
+  label: string;
+  value: number;
+  left: string;
+  right: string;
+  onChange: (value: number) => void;
+}) {
+  return (
+    <fieldset>
+      <legend>
+        {label} <span>{value}%</span>
+      </legend>
+      <input
+        aria-label={label}
+        type="range"
+        min="0"
+        max="100"
+        step="5"
+        value={value}
+        onChange={(event) => onChange(Number(event.target.value))}
+      />
+      <div className="range-labels">
+        <span>{left}</span>
+        <span>{right}</span>
+      </div>
+    </fieldset>
+  );
+}
+
+function TriggerSettings({
+  triggers,
+  rewards,
+  onChange
+}: {
+  triggers: Triggers;
+  rewards: RewardsResponse | undefined;
+  onChange: (triggers: Triggers) => void;
+}) {
+  const set = (patch: Partial<Triggers>) => onChange({ ...triggers, ...patch });
+  const setEvent = (key: EventKey, patch: Record<string, unknown>) =>
+    set({ events: { ...triggers.events, [key]: { ...triggers.events[key], ...patch } } });
+  return (
+    <>
+      <fieldset>
+        <legend>Чат</legend>
+        <label className="check" data-tour="command">
+          <input
+            type="checkbox"
+            checked={triggers.command}
+            onChange={(event) => set({ command: event.target.checked })}
+          />
+          <span>
+            Команда <code>!роаст</code>
+          </span>
+        </label>
+        <Tags
+          legend="Слова-триггеры"
+          placeholder="Например: слился ↵"
+          value={triggers.keywords}
+          onChange={(keywords) => set({ keywords })}
+        />
+        <small className="hint">
+          Бот отвечает на сообщения, где слово стоит в начале любого слова: «слил» сработает на
+          «слился». Команды на «!», сообщения стримера и ботов пропускаются.
+        </small>
+        <PercentSlider
+          label="Шанс ответа на слово"
+          value={triggers.keywordChancePercent}
+          left="редко"
+          right="всегда"
+          onChange={(keywordChancePercent) => set({ keywordChancePercent })}
+        />
+        <PercentSlider
+          label="Кого жарить в чате: стримера"
+          value={triggers.streamerTargetPercent}
+          left="только чатера"
+          right="только стримера"
+          onChange={(streamerTargetPercent) => set({ streamerTargetPercent })}
+        />
+      </fieldset>
+      <fieldset data-tour="reward">
+        <legend>Награда за баллы канала</legend>
+        <label className="field-label">
+          Награда
+          <select
+            value={triggers.rewardId ?? ""}
+            disabled={!rewards?.available}
+            onChange={(event) => set({ rewardId: event.target.value || null })}
+          >
+            <option value="">Не выбрана</option>
+            {rewards?.rewards.map((reward) => (
+              <option key={reward.id} value={reward.id}>
+                {reward.title} · {reward.cost}
+                {reward.is_enabled ? "" : " (выключена)"}
+              </option>
+            ))}
+          </select>
+        </label>
+        {rewards === undefined && <small>Загружаем награды…</small>}
+        {rewards?.reason && <small>{REWARD_REASON_TEXT[rewards.reason]}</small>}
+        {rewards?.available && rewards.rewards.length === 0 && (
+          <small>На канале нет наград. Создайте награду с полем ввода текста в Twitch.</small>
+        )}
+        <div className="segment">
+          <button
+            className={triggers.rewardMode === "verdict" ? "active" : ""}
+            onClick={() => set({ rewardMode: "verdict" })}
+          >
+            Вердикт
+          </button>
+          <button
+            className={triggers.rewardMode === "roast" ? "active" : ""}
+            onClick={() => set({ rewardMode: "roast" })}
+          >
+            Прожарка автора
+          </button>
+        </div>
+        <small className="hint">
+          {triggers.rewardMode === "verdict"
+            ? "Бот оценивает сообщение зрителя о стримере: соглашается и жарит стримера, отказывает и жарит автора или выбирает середину."
+            : "Бот жарит того, кто активировал награду, по тексту награды."}
+        </small>
+        {triggers.rewardMode === "verdict" && (
+          <PercentSlider
+            label="Лояльность к стримеру"
+            value={triggers.streamerLoyaltyPercent}
+            left="соглашается с критикой"
+            right="защищает стримера"
+            onChange={(streamerLoyaltyPercent) => set({ streamerLoyaltyPercent })}
+          />
+        )}
+      </fieldset>
+      <fieldset>
+        <legend>События Twitch и донаты</legend>
+        <DonationAlertsLink />
+        {EVENT_ROWS.map((row) => {
+          const value = triggers.events[row.key] as { enabled: boolean } & Record<string, number>;
+          return (
+            <div className="event-row" key={row.key}>
+              <label className="check">
+                <input
+                  type="checkbox"
+                  checked={value.enabled}
+                  onChange={(event) => setEvent(row.key, { enabled: event.target.checked })}
+                />
+                <span>
+                  {row.title} <small>— {row.hint}</small>
+                </span>
+              </label>
+              {row.threshold && value.enabled && (
+                <Field
+                  label={row.threshold.label}
+                  type="number"
+                  min={row.threshold.min}
+                  max={row.threshold.max}
+                  value={value[row.threshold.field]}
+                  onChange={(raw) =>
+                    setEvent(row.key, {
+                      [row.threshold!.field]: Math.max(
+                        row.threshold!.min,
+                        Math.min(row.threshold!.max, Math.round(Number(raw) || 0))
+                      )
+                    })
+                  }
+                />
+              )}
+            </div>
+          );
+        })}
+      </fieldset>
+    </>
   );
 }
 
@@ -996,6 +1224,8 @@ interface Overview {
   budget: number;
   killSwitch: boolean;
   pendingModeration: number;
+  yandexTtsSpentRub: number;
+  yandexTtsLimitRub: number;
 }
 type AnyRow = Record<string, unknown>;
 
@@ -1099,6 +1329,12 @@ function AdminOverview() {
         value={`$${data.spentMonth.toFixed(2)}`}
         note={`из $${data.budget.toFixed(2)}`}
         warn={data.spentMonth / Math.max(0.01, data.budget) > 0.8}
+      />
+      <Metric
+        label="Голоса Яндекса за месяц"
+        value={`${data.yandexTtsSpentRub.toFixed(0)} ₽`}
+        note={`жёсткий лимит ${String(data.yandexTtsLimitRub)} ₽, дальше озвучивает Piper`}
+        warn={data.yandexTtsSpentRub / Math.max(1, data.yandexTtsLimitRub) > 0.8}
       />
       <Metric
         label="Роасты за месяц"
@@ -1581,7 +1817,8 @@ function GlobalSettingsForm({
     global_monthly_limit: String(Number(values.global_monthly_limit ?? 4000)),
     monthly_budget_usd: String(Number(values.monthly_budget_usd ?? 5)),
     model: typeof values.model === "string" ? values.model : "",
-    classifier_model: typeof values.classifier_model === "string" ? values.classifier_model : ""
+    classifier_model: typeof values.classifier_model === "string" ? values.classifier_model : "",
+    yandex_tts_monthly_limit_rub: String(Number(values.yandex_tts_monthly_limit_rub ?? 300))
   });
   const set = async (key: string, value: unknown) => {
     try {
@@ -1630,6 +1867,14 @@ function GlobalSettingsForm({
           onChange={(value) => setForm({ ...form, monthly_budget_usd: value })}
         />
         <Field
+          label="Жёсткий лимит голосов Яндекса в месяц, ₽"
+          type="number"
+          min={0}
+          step="10"
+          value={form.yandex_tts_monthly_limit_rub}
+          onChange={(value) => setForm({ ...form, yandex_tts_monthly_limit_rub: value })}
+        />
+        <Field
           label="Модель генерации"
           value={form.model}
           onChange={(value) => setForm({ ...form, model: value.trim() })}
@@ -1645,6 +1890,7 @@ function GlobalSettingsForm({
             void (async () => {
               await set("global_monthly_limit", Number(form.global_monthly_limit));
               await set("monthly_budget_usd", Number(form.monthly_budget_usd));
+              await set("yandex_tts_monthly_limit_rub", Number(form.yandex_tts_monthly_limit_rub));
               await set("model", form.model);
               await set("classifier_model", form.classifier_model);
             })()
@@ -1705,12 +1951,16 @@ function Tags({
   value,
   onChange,
   draft: externalDraft,
-  setDraft: externalSet
+  setDraft: externalSet,
+  legend = "Стоп-слова",
+  placeholder = "Добавить слово ↵"
 }: {
   value: string[];
   onChange: (value: string[]) => void;
   draft?: string;
   setDraft?: (value: string) => void;
+  legend?: string;
+  placeholder?: string;
 }) {
   const [localDraft, setLocalDraft] = useState("");
   const draft = externalDraft ?? localDraft;
@@ -1722,7 +1972,7 @@ function Tags({
   };
   return (
     <fieldset>
-      <legend>Стоп-слова</legend>
+      <legend>{legend}</legend>
       <div className="tag-box">
         {value.map((word) => (
           <span className="tag" key={word}>
@@ -1745,7 +1995,7 @@ function Tags({
               add();
             }
           }}
-          placeholder="Добавить слово ↵"
+          placeholder={placeholder}
         />
       </div>
     </fieldset>
@@ -1861,6 +2111,16 @@ function State({
     </div>
   );
 }
+
+// Yandere easter eggs: a note for whoever opens the console, and a tab that misses you.
+console.log(
+  "%cЯ вижу, что ты открыл консоль… Ищешь, где я храню твои промахи? Не найдёшь. 🔪",
+  "color:#ff6b81;font:700 14px Manrope,sans-serif"
+);
+const homeTitle = document.title;
+document.addEventListener("visibilitychange", () => {
+  document.title = document.hidden ? "Ты куда? Я жду… 🩸" : homeTitle;
+});
 
 const root = document.getElementById("root");
 if (!root) throw new Error("Root element is missing");

@@ -946,3 +946,52 @@ td small {
     flex: 1;
   }
 }
+.hint {
+  margin: -4px 0 18px;
+  font-size: 13px;
+}
+.reauth {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 18px;
+  padding: 14px 18px;
+  border: 1px solid #f5d37a55;
+  border-radius: 14px;
+  background: #3a301522;
+  color: #f5d37a;
+}
+.event-row {
+  display: grid;
+  grid-template-columns: 1fr 140px;
+  align-items: center;
+  gap: 12px;
+}
+.event-row .check small {
+  color: var(--muted);
+}
+.event-row .field-label {
+  margin: 0;
+}
+@media (max-width: 640px) {
+  .event-row {
+    grid-template-columns: 1fr;
+  }
+}
+.integration {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #0e0d13;
+}
+.integration small {
+  color: var(--muted);
+}

@@ -4,8 +4,11 @@ import { join } from "node:path";
 
 import type Anthropic from "@anthropic-ai/sdk";
 import { createDatabase } from "@roastbot/db";
-import { CLASSIFIER_SYSTEM_PROMPT } from "@roastbot/prompts";
-import { BLOCKED_OUTPUT_FALLBACK, storedOverlayRoastSchema } from "@roastbot/shared";
+import {
+  BLOCKED_OUTPUT_FALLBACK,
+  storedOverlayRoastSchema,
+  type RoastSource
+} from "@roastbot/shared";
 import {
   createTestChannel,
   createTestEvent,
@@ -48,7 +51,9 @@ beforeEach(async () => {
 
 function fakeAnthropic(generate: FakeReply | Error, classify: FakeReply = { text: "ALLOW" }) {
   const create = vi.fn((request: Anthropic.MessageCreateParamsNonStreaming) => {
-    const isClassifier = request.system === CLASSIFIER_SYSTEM_PROMPT;
+    // Both calls carry a system prompt; the classifier is the one checking a <reply>.
+    const content = request.messages[0]?.content;
+    const isClassifier = typeof content === "string" && content.startsWith("<reply>");
     if (!isClassifier && generate instanceof Error) return Promise.reject(generate);
     const reply = isClassifier ? classify : (generate as FakeReply);
     return Promise.resolve({
@@ -80,20 +85,27 @@ function deps(
 
 async function job(
   overrides: Partial<{
-    source: "chat_command" | "reward" | "dashboard_test";
+    source: RoastSource;
     viewerLogin: string;
     inputText: string;
     requestedAt: string;
+    target: "viewer" | "streamer";
+    eventSummary: string;
   }> = {}
 ) {
   const source = overrides.source ?? "chat_command";
+  // The events row only anchors the roast; its type does not matter to the pipeline.
+  const eventType =
+    source === "reward" || source === "dashboard_test" ? source : ("chat_command" as const);
   return {
     jobVersion: 1 as const,
-    eventId: await createTestEvent(db.sql, channel.channelId, source),
+    eventId: await createTestEvent(db.sql, channel.channelId, eventType),
     channelId: channel.channelId,
     source,
     viewerLogin: overrides.viewerLogin ?? "viewer",
     inputText: overrides.inputText ?? "опять проиграл",
+    ...(overrides.target ? { target: overrides.target } : {}),
+    ...(overrides.eventSummary ? { eventSummary: overrides.eventSummary } : {}),
     requestedAt: overrides.requestedAt ?? new Date().toISOString()
   };
 }
@@ -332,5 +344,188 @@ describe("audio files", () => {
   it("are written atomically without leftovers", async () => {
     const names = await readdir(audioDir);
     expect(names.some((name) => name.endsWith(".tmp"))).toBe(false);
+  });
+});
+
+describe("character voices", () => {
+  const yandexAudio = () =>
+    new Response(
+      `${JSON.stringify({ result: { audioChunk: { data: Buffer.from("RIFFyandex").toString("base64") } } })}\n`
+    );
+
+  it("voices the roast with the character's Yandex voice and counts its cost", async () => {
+    await db.sql`update settings set tone='yandere' where channel_id=${channel.channelId}`;
+    const anthropic = fakeAnthropic({ text: "Я всё запомнила." });
+    const pipeline = deps(anthropic.client, () => Promise.resolve(yandexAudio()));
+    pipeline.config = { ...pipeline.config, YANDEX_TTS_API_KEY: "test-key" };
+
+    const outcome = await processRoast(await job({ source: "dashboard_test" }), pipeline);
+
+    expect(outcome.status).toBe("done");
+    const [url, init] = pipeline.fetch.mock.calls[0]! as [string, RequestInit];
+    expect(url).toContain("tts.api.cloud.yandex.net");
+    expect(init.headers).toMatchObject({ Authorization: "Api-Key test-key" });
+    expect(JSON.parse(init.body as string)).toEqual({
+      text: "Я всё запомнила.",
+      hints: [{ voice: "jane" }, { role: "good" }]
+    });
+    expect(pipeline.fetch).toHaveBeenCalledOnce();
+    expect(Number((await roast(outcome.roastId)).cost_usd)).toBeCloseTo(
+      (800 * 0.1 + 120 * 0.5) / 1e6 + 0.0015,
+      6
+    );
+  });
+
+  it("falls back to Piper when Yandex fails, without charging for the cloud voice", async () => {
+    const anthropic = fakeAnthropic({ text: "Хм, сыграл. Не то чтобы мне было интересно." });
+    const pipeline = deps(anthropic.client, (url) =>
+      Promise.resolve(
+        (url as string).includes("yandex")
+          ? new Response("unavailable", { status: 503 })
+          : new Response(new Uint8Array([82, 73, 70, 70]))
+      )
+    );
+    pipeline.config = { ...pipeline.config, YANDEX_TTS_API_KEY: "test-key" };
+
+    const outcome = await processRoast(await job({ source: "dashboard_test" }), pipeline);
+
+    expect(outcome.status).toBe("done");
+    const urls = pipeline.fetch.mock.calls.map(([url]) => String(url));
+    expect(urls).toEqual([
+      "https://tts.api.cloud.yandex.net/tts/v3/utteranceSynthesis",
+      "http://tts.test/synth"
+    ]);
+    expect(Number((await roast(outcome.roastId)).cost_usd)).toBeCloseTo(
+      (800 * 0.1 + 120 * 0.5) / 1e6,
+      6
+    );
+  });
+
+  it("enforces the monthly rouble cap atomically, even for parallel roasts", async () => {
+    // 0.33 ₽ buys exactly two 0.1626 ₽ requests.
+    await db.sql`delete from tts_usage_monthly`;
+    await db.sql`update global_settings set value='0.33'::jsonb
+      where key='yandex_tts_monthly_limit_rub'`;
+    try {
+      const pipeline = deps(fakeAnthropic({ text: "Ну и катка." }).client, (url) =>
+        Promise.resolve(
+          (url as string).includes("yandex")
+            ? yandexAudio()
+            : new Response(new Uint8Array([82, 73, 70, 70]))
+        )
+      );
+      pipeline.config = { ...pipeline.config, YANDEX_TTS_API_KEY: "test-key" };
+
+      const jobs = await Promise.all(
+        Array.from({ length: 5 }, () => job({ source: "dashboard_test" }))
+      );
+      const outcomes = await Promise.all(jobs.map((item) => processRoast(item, pipeline)));
+
+      expect(outcomes.map((outcome) => outcome.status)).toEqual(Array(5).fill("done"));
+      const yandexCalls = pipeline.fetch.mock.calls.filter(([url]) =>
+        (url as string).includes("yandex")
+      );
+      expect(yandexCalls).toHaveLength(2);
+      const [usage] = await db.sql<{ requests: number }[]>`
+        select requests from tts_usage_monthly where provider='yandex'`;
+      expect(usage!.requests).toBe(2);
+    } finally {
+      await db.sql`update global_settings set value='300'::jsonb
+        where key='yandex_tts_monthly_limit_rub'`;
+    }
+  });
+});
+
+describe("triggers, targets and verdicts", () => {
+  const generationOf = (anthropic: ReturnType<typeof fakeAnthropic>) =>
+    anthropic.create.mock.calls[0]![0];
+
+  it("aims at the streamer and passes the event as data", async () => {
+    const anthropic = fakeAnthropic({ text: "Стример, рейдеры уже жалеют." });
+    const outcome = await processRoast(
+      await job({
+        source: "raid",
+        target: "streamer",
+        eventSummary: "Рейд с канала other: 40 зрителей"
+      }),
+      deps(anthropic.client)
+    );
+    expect(outcome.status).toBe("done");
+    const generation = generationOf(anthropic);
+    expect(generation.system as string).toContain("подколов стримера из <streamer>");
+    const data = generation.messages[0]!.content as string;
+    expect(data).toContain(`<streamer>${channel.login}</streamer>`);
+    expect(data).toContain("<event>Рейд с канала other: 40 зрителей</event>");
+  });
+
+  it("lets events skip cooldowns but keeps them for follows and chat", async () => {
+    await db.sql`update settings set cooldown_sec=600, user_cooldown_sec=600
+      where channel_id=${channel.channelId}`;
+    const anthropic = fakeAnthropic({ text: "Ну привет." });
+    for (let index = 0; index < 2; index += 1) {
+      expect(
+        (await processRoast(await job({ source: "raid" }), deps(anthropic.client))).status
+      ).toBe("done");
+    }
+    expect(
+      await processRoast(await job({ source: "follow" }), deps(anthropic.client))
+    ).toMatchObject({
+      status: "done"
+    });
+    expect(
+      await processRoast(await job({ source: "follow" }), deps(anthropic.client))
+    ).toMatchObject({
+      status: "skipped",
+      reason: "cooldown_active"
+    });
+  });
+
+  it("blocks a stop-listed event summary before any API call", async () => {
+    const anthropic = fakeAnthropic({ text: "unused" });
+    const outcome = await processRoast(
+      await job({ source: "raid", eventSummary: "Рейд с канала pidor_228: 40 зрителей" }),
+      deps(anthropic.client)
+    );
+    expect(outcome.status).toBe("blocked_input");
+    expect((await roast(outcome.roastId)).error).toBe("event:пидор");
+    expect(anthropic.create).not.toHaveBeenCalled();
+  });
+
+  it("judges a channel-points message and sends the verdict to the overlay", async () => {
+    await db.sql`update settings set toxicity=5, triggers=triggers || '{"rewardMode":"verdict","streamerLoyaltyPercent":80}'::jsonb
+      where channel_id=${channel.channelId}`;
+    const anthropic = fakeAnthropic({ text: "VERDICT: agree\nАга, руки у него из жопы." });
+    const outcome = await processRoast(
+      await job({ source: "reward", inputText: "Стример совсем стрелять не умеет" }),
+      deps(anthropic.client)
+    );
+
+    expect(outcome.status).toBe("done");
+    const [generation, classifier] = anthropic.create.mock.calls.map(([request]) => request);
+    expect(generation!.system as string).toContain("Лояльность к стримеру: 80/100");
+    expect(classifier!.system as string).toContain("mild coarse words such as жопа");
+    const [row] = await db.sql<{ output_text: string; verdict: string }[]>`
+      select output_text, verdict from roasts where id=${outcome.roastId}`;
+    expect(row).toEqual({ output_text: "Ага, руки у него из жопы.", verdict: "agree" });
+    const [event] = await db.sql<{ payload: unknown }[]>`
+      select payload from overlay_events where roast_id=${outcome.roastId}`;
+    expect(storedOverlayRoastSchema.parse(event!.payload)).toMatchObject({
+      text: "Ага, руки у него из жопы.",
+      verdict: "agree"
+    });
+  });
+
+  it("roasts the reward author as before in roast mode", async () => {
+    await db.sql`update settings set triggers=triggers || '{"rewardMode":"roast"}'::jsonb
+      where channel_id=${channel.channelId}`;
+    const anthropic = fakeAnthropic({ text: "Это ты стрелять не умеешь." });
+    const outcome = await processRoast(
+      await job({ source: "reward", inputText: "Стример совсем стрелять не умеет" }),
+      deps(anthropic.client)
+    );
+    expect(generationOf(anthropic).system as string).not.toContain("[ВЕРДИКТ]");
+    const [row] = await db.sql<{ verdict: string | null }[]>`
+      select verdict from roasts where id=${outcome.roastId}`;
+    expect(row!.verdict).toBeNull();
   });
 });

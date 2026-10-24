@@ -4,6 +4,8 @@ const schema = z.object({
   DATABASE_URL: z.string().min(1),
   ANTHROPIC_API_KEY: z.string().min(1),
   TTS_URL: z.string().url().default("http://tts:8000"),
+  // Optional: without it every roast is voiced by the local Piper service.
+  YANDEX_TTS_API_KEY: z.string().optional(),
   AUDIO_DIR: z.string().default("/data/audio"),
   TELEGRAM_BOT_TOKEN: z.string().optional(),
   TELEGRAM_CHAT_ID: z.string().optional()

@@ -65,6 +65,8 @@ export interface Session {
   /** What /admin needs from the owner: enroll, confirm again (every 12 h) or nothing. */
   adminMfa: "ok" | "setup" | "verify";
   recoveryCodesLeft: number;
+  /** Twitch scopes added after this channel logged in; non-empty means "log in again". */
+  missingScopes: string[];
 }
 export interface Settings {
   tone: "tsundere" | "yandere";
@@ -72,10 +74,83 @@ export interface Settings {
   toxicity: 1 | 2 | 3 | 4 | 5;
   cooldownSec: number;
   userCooldownSec: number;
-  triggers: { command: boolean; rewardId: string | null };
+  triggers: Triggers;
   stopWords: string[];
   enabled: boolean;
 }
+export interface EventTriggers {
+  cheer: { enabled: boolean; minBits: number };
+  subscription: { enabled: boolean };
+  giftSub: { enabled: boolean; minCount: number };
+  raid: { enabled: boolean; minViewers: number };
+  follow: { enabled: boolean; chancePercent: number };
+  prediction: { enabled: boolean };
+  adBreak: { enabled: boolean };
+  donation: { enabled: boolean; minAmount: number };
+}
+export interface Triggers {
+  command: boolean;
+  rewardId: string | null;
+  keywords: string[];
+  keywordChancePercent: number;
+  streamerTargetPercent: number;
+  rewardMode: "verdict" | "roast";
+  streamerLoyaltyPercent: number;
+  events: EventTriggers;
+}
+
+// Mirrors DEFAULT_TRIGGERS in packages/shared: the API fills these in, the panel only needs them
+// for rows saved before the fields existed.
+export const DEFAULT_TRIGGERS: Triggers = {
+  command: true,
+  rewardId: null,
+  keywords: [],
+  keywordChancePercent: 30,
+  streamerTargetPercent: 50,
+  rewardMode: "verdict",
+  streamerLoyaltyPercent: 50,
+  events: {
+    cheer: { enabled: false, minBits: 100 },
+    subscription: { enabled: false },
+    giftSub: { enabled: false, minCount: 1 },
+    raid: { enabled: false, minViewers: 5 },
+    follow: { enabled: false, chancePercent: 20 },
+    prediction: { enabled: false },
+    adBreak: { enabled: false },
+    donation: { enabled: false, minAmount: 100 }
+  }
+};
+
+export interface DonationAlertsStatus {
+  configured: boolean;
+  connected: boolean;
+  name: string | null;
+}
+export const donationAlertsConnectUrl = `${API}/integrations/donationalerts/connect`;
+export const DONATIONALERTS_RESULT_TEXT: Record<string, string> = {
+  connected: "DonationAlerts подключён",
+  denied: "Подключение DonationAlerts отменено",
+  invalid_state: "Сессия подключения устарела, попробуйте ещё раз",
+  login_required: "Войдите в RoastBot и попробуйте ещё раз",
+  unavailable: "DonationAlerts не ответил, попробуйте позже",
+  not_configured: "DonationAlerts не настроен на сервере"
+};
+
+export function normalizeTriggers(raw: unknown): Triggers {
+  const value = (typeof raw === "object" && raw !== null ? raw : {}) as Partial<Triggers>;
+  const events = (value.events ?? {}) as Partial<EventTriggers>;
+  const merged = { ...DEFAULT_TRIGGERS, ...value };
+  return {
+    ...merged,
+    events: Object.fromEntries(
+      Object.entries(DEFAULT_TRIGGERS.events).map(([key, defaults]) => [
+        key,
+        { ...defaults, ...(events[key as keyof EventTriggers] ?? {}) }
+      ])
+    ) as unknown as EventTriggers
+  };
+}
+
 export type BotState = "working" | "paused" | "limit" | "suspended";
 export interface Status {
   month: string;
@@ -116,7 +191,7 @@ export function normalizeSettings(row: Record<string, unknown>): Settings {
     toxicity: Number(row.toxicity) as Settings["toxicity"],
     cooldownSec: Number(row.cooldown_sec),
     userCooldownSec: Number(row.user_cooldown_sec),
-    triggers: row.triggers as Settings["triggers"],
+    triggers: normalizeTriggers(row.triggers),
     stopWords: row.stop_words as string[],
     enabled: Boolean(row.enabled)
   };
