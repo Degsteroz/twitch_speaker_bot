@@ -12,6 +12,9 @@ ENV VITE_API_URL=$VITE_API_URL
 ENV VITE_OVERLAY_URL=$VITE_OVERLAY_URL
 ENV VITE_SITE_URL=$VITE_SITE_URL
 RUN pnpm --filter @roastbot/web build
+# Readable for the unprivileged runtime user whatever the host umask was at checkout time
+# (a server shell left at `umask 077` writes source files as 0600).
+RUN chmod -R a+rX apps/web/dist
 
 FROM nginx:1.27-alpine
 COPY apps/web/nginx.conf /etc/nginx/conf.d/default.conf

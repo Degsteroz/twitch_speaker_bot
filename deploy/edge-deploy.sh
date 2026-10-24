@@ -4,6 +4,8 @@
 # to the other projects. Run from the repository root or anywhere: ./deploy/edge-deploy.sh
 #   SKIP_PULL=1  — build the checked-out code without `git pull`.
 set -eu
+# Files written by `git pull` must stay world-readable: the images run as unprivileged users.
+umask 022
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$ROOT"
