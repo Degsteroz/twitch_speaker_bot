@@ -68,6 +68,9 @@ export interface Session {
   /** Twitch scopes added after this channel logged in; non-empty means "log in again". */
   missingScopes: string[];
 }
+/** Mirrors CHARACTER_NAMES in packages/shared: the tone is the character's temperament. */
+export const CHARACTER_NAMES = { tsundere: "Мицуки", yandere: "Аи" } as const;
+
 export interface Settings {
   tone: "tsundere" | "yandere";
   voice: "male" | "female";
@@ -93,9 +96,8 @@ export interface Triggers {
   rewardId: string | null;
   keywords: string[];
   keywordChancePercent: number;
-  streamerTargetPercent: number;
-  rewardMode: "verdict" | "roast";
-  streamerLoyaltyPercent: number;
+  /** Who is roasted on every trigger: the author, the streamer, or the character decides. */
+  targetMode: "author" | "streamer" | "auto";
   events: EventTriggers;
 }
 
@@ -106,9 +108,7 @@ export const DEFAULT_TRIGGERS: Triggers = {
   rewardId: null,
   keywords: [],
   keywordChancePercent: 25,
-  streamerTargetPercent: 50,
-  rewardMode: "verdict",
-  streamerLoyaltyPercent: 50,
+  targetMode: "auto",
   events: {
     cheer: { enabled: false, minBits: 100 },
     subscription: { enabled: false },
@@ -139,7 +139,12 @@ export const DONATIONALERTS_RESULT_TEXT: Record<string, string> = {
 export function normalizeTriggers(raw: unknown): Triggers {
   const value = (typeof raw === "object" && raw !== null ? raw : {}) as Partial<Triggers>;
   const events = (value.events ?? {}) as Partial<EventTriggers>;
-  const merged = { ...DEFAULT_TRIGGERS, ...value };
+  // Fields the API no longer accepts (the old verdict reward and target split) must not be sent
+  // back on save: keep only the keys the panel knows.
+  const current = Object.fromEntries(
+    Object.entries(value).filter(([key]) => key in DEFAULT_TRIGGERS)
+  ) as Partial<Triggers>;
+  const merged = { ...DEFAULT_TRIGGERS, ...current };
   return {
     ...merged,
     events: Object.fromEntries(
@@ -154,6 +159,9 @@ export function normalizeTriggers(raw: unknown): Triggers {
 export type BotState = "working" | "paused" | "limit" | "suspended";
 export interface Status {
   month: string;
+  plan: string | null;
+  /** `!роаст` is a paid feature. */
+  commandAvailable: boolean;
   enabled: boolean;
   used: number;
   limit: number;
@@ -242,5 +250,6 @@ export const SKIP_REASON_TEXT: Record<string, string> = {
   global_budget_exceeded: "исчерпан месячный бюджет сервиса",
   channel_quota_exceeded: "квота канала закончилась",
   cooldown_active: "действует кулдаун",
+  command_not_in_plan: "!роаст недоступен на бесплатном тарифе",
   stale_job: "задача устарела"
 };

@@ -28,27 +28,14 @@ export function matchKeyword(message: string, keywords: readonly string[]): stri
   return null;
 }
 
-/** The message talks about the streamer: "стример" in any form, or the channel login. */
-export function aboutStreamer(message: string, streamerLogin = ""): boolean {
-  const text = fold(message);
-  const login = fold(streamerLogin.trim());
-  if (/(?:^|[^\p{L}\p{N}])стример/u.test(text)) return true;
-  return login.length > 0 && new RegExp(`(?:^|[^\\p{L}\\p{N}_])@?${escapeRegExp(login)}(?![\\p{L}\\p{N}_])`, "u").test(text);
-}
-
 /** `random` is in [0, 1): below the percentage means "yes". */
 export const rollPercent = (percent: number, random: number) => random * 100 < percent;
-
-export const pickTarget = (streamerPercent: number, random: number): RoastTarget =>
-  rollPercent(streamerPercent, random) ? "streamer" : "viewer";
 
 export interface ChatMessage {
   message: string;
   username: string;
   displayName: string;
   isBroadcaster: boolean;
-  /** The channel login, to notice "@streamer" in the message. */
-  streamerLogin?: string;
 }
 
 export interface ChatRoast {
@@ -58,34 +45,27 @@ export interface ChatRoast {
 }
 
 /**
- * Decides whether a chat message triggers a roast. `!роаст` works when enabled; otherwise other
- * commands and known bots are ignored, and a keyword fires with `keywordChancePercent`. The
- * target is then the streamer with `streamerTargetPercent`; the streamer's own message always
- * roasts the streamer (there is nobody else to pick, and it is how a streamer tests the bot alone).
+ * Decides whether a chat message triggers a roast: `!роаст` when the channel enabled it and its
+ * plan includes it, or a keyword with `keywordChancePercent`. Other commands and known bots are
+ * ignored. Who is roasted is the channel's targetMode, applied by the worker; the streamer's own
+ * message has no other author, so it always roasts the streamer.
  */
 export function chatTrigger(
   chat: ChatMessage,
   triggers: TriggerSettings,
-  random: () => number = Math.random
+  options: { commandAllowed?: boolean; random?: () => number } = {}
 ): ChatRoast | null {
+  const { commandAllowed = false, random = Math.random } = options;
   if (KNOWN_BOTS.has(chat.username.toLowerCase())) return null;
-  const target = (text: string): RoastTarget => {
-    if (chat.isBroadcaster) return "streamer";
-    // "скажи стримеру, что он мажет" is about the streamer: a coin flip would answer the
-    // viewer instead. A channel that chose "only the chatter" (0%) keeps its streamer safe.
-    if (triggers.streamerTargetPercent > 0 && aboutStreamer(text, chat.streamerLogin)) {
-      return "streamer";
-    }
-    return pickTarget(triggers.streamerTargetPercent, random());
-  };
-  if (triggers.command) {
+  const target: RoastTarget = chat.isBroadcaster ? "streamer" : "viewer";
+  if (triggers.command && commandAllowed) {
     const inputText = parseRoastCommand(chat.message, chat.displayName);
-    if (inputText !== null) return { source: "chat_command", inputText, target: target(inputText) };
+    if (inputText !== null) return { source: "chat_command", inputText, target };
   }
   if (chat.message.trimStart().startsWith("!")) return null;
   if (!triggers.keywords.length || !matchKeyword(chat.message, triggers.keywords)) return null;
   if (!rollPercent(triggers.keywordChancePercent, random())) return null;
-  return { source: "chat_keyword", inputText: chat.message, target: target(chat.message) };
+  return { source: "chat_keyword", inputText: chat.message, target };
 }
 
 // ---- EventSub --------------------------------------------------------------------------------
@@ -208,16 +188,12 @@ export function eventRoast(
       const reward = event.reward as Event | undefined;
       if (!triggers.rewardId || str(reward?.id) !== triggers.rewardId || !login) return null;
       const message = str(event.user_input).trim();
-      // With rewardMode "verdict" the worker judges the message and picks the target itself.
       return {
         source: "reward",
         viewerLogin: login,
         ...viewerId(event),
         inputText: message || login,
-        target:
-          triggers.rewardMode === "roast" || !message
-            ? "viewer"
-            : pickTarget(triggers.streamerTargetPercent, random())
+        target: "viewer"
       };
     }
     case "channel.cheer": {
@@ -308,10 +284,8 @@ export function eventRoast(
           Array.isArray(outcome.top_predictors) ? (outcome.top_predictors as Event[]) : []
         )
         .sort((a, b) => num(b.channel_points_used) - num(a.channel_points_used))[0];
-      const target =
-        loser && str(loser.user_login)
-          ? pickTarget(triggers.streamerTargetPercent, random())
-          : "streamer";
+      // The biggest loser is the author; with nobody to name, the streamer takes it.
+      const target: RoastTarget = loser && str(loser.user_login) ? "viewer" : "streamer";
       const lostUsers = losers.reduce((sum, outcome) => sum + num(outcome.users), 0);
       return {
         source: "prediction",

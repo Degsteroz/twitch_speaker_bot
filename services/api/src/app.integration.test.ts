@@ -228,8 +228,10 @@ describe("auth and settings", () => {
   it("reports working, paused and limit states", async () => {
     expect((await call("GET", "/status", streamer)).json()).toMatchObject({
       state: "working",
-      limit: 100,
-      remaining: 100
+      plan: "free",
+      commandAvailable: false,
+      limit: 10,
+      remaining: 10
     });
     await call("POST", "/settings/enabled", streamer, { enabled: false });
     expect((await call("GET", "/status", streamer)).json()).toMatchObject({
@@ -244,7 +246,7 @@ describe("auth and settings", () => {
     });
     await db.sql`update global_settings set value='false'::jsonb where key='kill_switch'`;
     await db.sql`insert into usage_monthly(channel_id,month,roasts)
-      values(${streamer.channelId},${new Date().toISOString().slice(0, 7)},100)`;
+      values(${streamer.channelId},${new Date().toISOString().slice(0, 7)},10)`;
     expect((await call("GET", "/status", streamer)).json()).toMatchObject({
       state: "limit",
       remaining: 0
@@ -432,7 +434,7 @@ describe("back-office", () => {
   it("lists users with plan and usage, and applies manual actions", async () => {
     const users = await call("GET", `/admin/users?search=${streamer.login}`, owner);
     expect(users.json()).toEqual([
-      expect.objectContaining({ id: streamer.userId, plan: "free", used: 0, limit: 100 })
+      expect.objectContaining({ id: streamer.userId, plan: "free", used: 0, limit: 10 })
     ]);
     await call("POST", `/admin/users/${streamer.userId}/gift`, owner, { amount: 5 });
     await call("POST", `/admin/users/${streamer.userId}/subscription`, owner, {
@@ -441,7 +443,8 @@ describe("back-office", () => {
     });
     expect((await call("GET", "/status", streamer)).json()).toMatchObject({
       limit: 1000,
-      gifted: 5
+      gifted: 5,
+      commandAvailable: true
     });
     await call("POST", `/admin/users/${streamer.userId}/suspend`, owner);
     expect((await call("GET", "/status", streamer)).json()).toMatchObject({ state: "suspended" });

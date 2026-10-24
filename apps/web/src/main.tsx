@@ -31,6 +31,7 @@ import {
   type DonationAlertsStatus,
   type EventTriggers,
   type Triggers,
+  CHARACTER_NAMES,
   DONATIONALERTS_RESULT_TEXT,
   donationAlertsConnectUrl
 } from "./api.js";
@@ -427,9 +428,9 @@ function Security({ session, onChange }: { session: Session; onChange: () => voi
 }
 
 const LANDING_TRIGGERS: [string, string][] = [
-  ["!роаст", "зритель сам просит прожарку"],
+  ["Награда за баллы", "читает текст зрителя и отвечает по смыслу"],
   ["Слова-триггеры", "«слил», «гг», «лаг» — с шансом, который вы зададите"],
-  ["Награда за баллы", "вердикт по мнению зрителя о стримере"],
+  ["!роаст", "зритель сам зовёт её в чат — на тарифах Basic и Premium"],
   ["Битсы", "от порога, по тексту cheer"],
   ["Подписки", "новые и ресабы, со стажем"],
   ["Подарочные сабы", "щедрому дарителю — отдельный привет"],
@@ -483,13 +484,13 @@ function Landing() {
           </p>
         </div>
         <figure className="stage" aria-label="Так роаст выглядит на стриме">
-          <img src={yandereArt} alt="Яндэрэ — один из двух персонажей бота" />
+          <img src={yandereArt} alt="Аи — яндэрэ, одна из двух героинь бота" />
           <figcaption className="demo-card">
             <span className="live-dot" /> LIVE ROAST
             <blockquote>
               «@viewer, опять слил катку? Ничего… Я запомнила, кто тебе мешал. Всех до одного.»
             </blockquote>
-            <small>Яндэрэ · голос персонажа · 7 сек</small>
+            <small>Аи · яндэрэ · 7 сек</small>
           </figcaption>
         </figure>
       </section>
@@ -502,16 +503,16 @@ function Landing() {
             <b>1</b>
             <h3>Что-то происходит</h3>
             <p>
-              Зритель пишет <code>!роаст</code>, в чате звучит слово-триггер, приходит донат, рейд
-              или награда за баллы.
+              Зритель активирует награду с текстом, в чате звучит слово-триггер, приходит донат,
+              рейд или подписка.
             </p>
           </li>
           <li>
             <b>2</b>
-            <h3>Бот придумывает ответ</h3>
+            <h3>Она понимает, что произошло</h3>
             <p>
-              Модель Claude пишет одну-две фразы в характере персонажа. Перед эфиром ответ проходит
-              стоп-лист и отдельную проверку.
+              Модель Claude читает сообщение и событие и отвечает по смыслу — одной-двумя фразами в
+              характере героини. Перед эфиром ответ проходит стоп-лист и отдельную проверку.
             </p>
           </li>
           <li>
@@ -530,9 +531,11 @@ function Landing() {
         <h2>Кто сегодня будет вас жарить?</h2>
         <div className="heroines">
           <article>
-            <img src={tsundereArt} alt="Цундэрэ" loading="lazy" />
+            <img src={tsundereArt} alt="Мицуки" loading="lazy" />
             <div>
-              <h3>Цундэрэ</h3>
+              <h3>
+                Мицуки <small>цундэрэ</small>
+              </h3>
               <p>Колется, фыркает и делает вид, что ей всё равно. Проговаривается.</p>
               <blockquote>
                 «Я не смотрю твой стрим! Просто вкладка случайно открыта… Третий час.»
@@ -540,9 +543,11 @@ function Landing() {
             </div>
           </article>
           <article>
-            <img src={yandereArt} alt="Яндэрэ" loading="lazy" />
+            <img src={yandereArt} alt="Аи" loading="lazy" />
             <div>
-              <h3>Яндэрэ</h3>
+              <h3>
+                Аи <small>яндэрэ</small>
+              </h3>
               <p>Ласковая, внимательная и слегка пугающая. Помнит всё.</p>
               <blockquote>
                 «Ты так мило промахиваешься… Не волнуйся, я всегда рядом. Всегда.»
@@ -556,28 +561,25 @@ function Landing() {
       </section>
 
       <section className="landing-section">
-        <p className="eyebrow">ВЕРДИКТ ЗА БАЛЛЫ</p>
-        <h2>Зритель высказался. Бот решает, кто прав</h2>
+        <p className="eyebrow">ПО СМЫСЛУ</p>
+        <h2>Кого жарить, решаете вы. Или она</h2>
         <p className="section-lead">
-          Зритель пишет мнение о стримере в награде за баллы канала. Бот соглашается и жарит
-          стримера, спорит и жарит автора — или находит середину. На чьей он стороне, решает
-          стример.
+          Героиня понимает, о чём сообщение. А переключатель решает, кому достанется: автору,
+          стримеру или на её усмотрение. Вот одно и то же сообщение в трёх режимах.
         </p>
+        <p className="viewer-line wide">«Стример стреляет из лука хуже, чем моя бабушка»</p>
         <div className="verdict-cards">
           <article>
-            <span className="viewer-line">«Стример играет руками из жопы»</span>
-            <b className="agree">✓ Согласна</b>
-            <p>«Не поспоришь. Даже я целюсь лучше, а у меня нет рук.»</p>
+            <b className="refuse">Автора</b>
+            <p>«Твоя бабушка хотя бы целится. А ты только комментируешь.»</p>
           </article>
           <article>
-            <span className="viewer-line">«Стример лучший, но опять тильтует»</span>
-            <b className="mixed">≈ Отчасти</b>
-            <p>«Лучший — да. Тильтует — тоже да. Талантливый человек талантлив во всём.»</p>
+            <b className="mixed">На усмотрение Аи</b>
+            <p>«Бабушка, наверное, милая. А вот стрелы стримера летят мимо… как и его планы.»</p>
           </article>
           <article>
-            <span className="viewer-line">«Я бы прошёл это с закрытыми глазами»</span>
-            <b className="refuse">✗ Не согласна</b>
-            <p>«С закрытыми глазами ты, судя по всему, и сообщение писал.»</p>
+            <b className="agree">Стримера</b>
+            <p>«Даже бабушка заметила. Может, лук просто держат другим концом?»</p>
           </article>
         </div>
       </section>
@@ -594,7 +596,7 @@ function Landing() {
           ))}
         </ul>
         <p className="section-note">
-          Каждый триггер включается отдельно. Кого жарить — стримера или чатера — тоже решаете вы.
+          Каждый триггер включается отдельно. На всё она реагирует по смыслу.
         </p>
       </section>
 
@@ -642,7 +644,7 @@ function Landing() {
           </li>
           <li>
             <b>4</b>
-            <p>Выберите персонажа, включите триггеры — и в эфир.</p>
+            <p>Выберите героиню и кого жарить, включите триггеры — и в эфир.</p>
           </li>
         </ol>
       </section>
@@ -904,20 +906,27 @@ function Dashboard({
             <div className="choice-grid">
               <Choice
                 active={settings.tone === "tsundere"}
-                title="Цундэрэ"
-                desc="Колюче, но с заботой"
+                title={CHARACTER_NAMES.tsundere}
+                desc="Цундэрэ · колюче, но с заботой"
                 onClick={() => patch("tone", "tsundere")}
                 icon="✦"
               />
               <Choice
                 active={settings.tone === "yandere"}
-                title="Яндэрэ"
-                desc="Мило и слегка пугающе"
+                title={CHARACTER_NAMES.yandere}
+                desc="Яндэрэ · мило и слегка пугающе"
                 onClick={() => patch("tone", "yandere")}
                 icon="♥"
               />
             </div>
             <small className="hint below">У каждой свой голос и своя картинка на оверлее.</small>
+            <ScaleChoice
+              label="Кого жарить"
+              tour="target"
+              value={settings.triggers.targetMode}
+              steps={targetSteps(settings.tone)}
+              onChange={(targetMode) => patch("triggers", { ...settings.triggers, targetMode })}
+            />
             <ScaleChoice
               label="Токсичность"
               value={settings.toxicity}
@@ -957,6 +966,7 @@ function Dashboard({
           <TriggerSettings
             triggers={settings.triggers}
             rewards={rewards}
+            commandAvailable={status.commandAvailable}
             onChange={(triggers) => patch("triggers", triggers)}
           />
           <Card tour="stopwords">
@@ -1089,8 +1099,8 @@ function DonationAlertsLink() {
   );
 }
 
-interface ScaleStep {
-  value: number;
+interface ScaleStep<T extends string | number = number> {
+  value: T;
   label: string;
   note: string;
 }
@@ -1116,51 +1126,51 @@ const KEYWORD_CHANCE_STEPS: ScaleStep[] = [
   { value: 75, label: "Часто", note: "Почти на каждое сообщение со словом." },
   { value: 100, label: "Всегда", note: "На каждое сообщение со словом, если нет паузы." }
 ];
-const TARGET_STEPS: ScaleStep[] = [
-  {
-    value: 0,
-    label: "Только чатера",
-    note: "Достаётся автору сообщения, стримера бот не трогает."
-  },
-  { value: 25, label: "Чаще чатера", note: "Обычно автору, иногда стримеру." },
-  { value: 50, label: "Поровну", note: "Стримеру и чатеру с равной вероятностью." },
-  { value: 75, label: "Чаще стримера", note: "Обычно стримеру, иногда автору." },
-  { value: 100, label: "Только стримера", note: "Каждое сообщение — повод подколоть стримера." }
-];
-const LOYALTY_STEPS: ScaleStep[] = [
-  { value: 0, label: "Против стримера", note: "Охотно соглашается с любой критикой стримера." },
-  { value: 25, label: "Скорее против", note: "Чаще соглашается с критикой, чем спорит." },
-  { value: 50, label: "Нейтрально", note: "Решает по смыслу сообщения." },
-  { value: 75, label: "Скорее за", note: "Чаще встаёт на сторону стримера." },
-  {
-    value: 100,
-    label: "Горой за стримера",
-    note: "Почти любую критику разворачивает против автора."
-  }
-];
+function targetSteps(tone: Settings["tone"]): ScaleStep<Triggers["targetMode"]>[] {
+  const name = CHARACTER_NAMES[tone];
+  return [
+    {
+      value: "author",
+      label: "Автора",
+      note: "Достаётся тому, кто написал, задонатил, зарейдил или подписался."
+    },
+    {
+      value: "auto",
+      label: `На усмотрение ${name}`,
+      note: `${name} читает сообщение и событие и сама решает, кого подколоть: автора или стримера.`
+    },
+    { value: "streamer", label: "Стримера", note: "Любое событие — повод подколоть стримера." }
+  ];
+}
 
-/** Five named steps instead of a slider; a stored value between steps shows the nearest one. */
-function ScaleChoice({
+/** Named steps instead of a slider; a stored number between steps shows the nearest one. */
+function ScaleChoice<T extends string | number>({
   label,
   value,
   steps,
-  onChange
+  onChange,
+  tour
 }: {
   label: string;
-  value: number;
-  steps: ScaleStep[];
-  onChange: (value: number) => void;
+  value: T;
+  steps: ScaleStep<T>[];
+  onChange: (value: T) => void;
+  tour?: string;
 }) {
-  const current = steps.reduce((best, step) =>
-    Math.abs(step.value - value) < Math.abs(best.value - value) ? step : best
-  );
+  const distance = (step: ScaleStep<T>) =>
+    typeof value === "number" ? Math.abs(Number(step.value) - value) : step.value === value ? 0 : 1;
+  const current = steps.reduce((best, step) => (distance(step) < distance(best) ? step : best));
   return (
-    <fieldset>
+    <fieldset data-tour={tour}>
       <legend>{label}</legend>
-      <div className="segment scale" role="radiogroup" aria-label={label}>
+      <div
+        className={`segment scale steps-${String(steps.length)}`}
+        role="radiogroup"
+        aria-label={label}
+      >
         {steps.map((step) => (
           <button
-            key={step.value}
+            key={String(step.value)}
             type="button"
             role="radio"
             aria-checked={step === current}
@@ -1179,10 +1189,12 @@ function ScaleChoice({
 function TriggerSettings({
   triggers,
   rewards,
+  commandAvailable,
   onChange
 }: {
   triggers: Triggers;
   rewards: RewardsResponse | undefined;
+  commandAvailable: boolean;
   onChange: (triggers: Triggers) => void;
 }) {
   const set = (patch: Partial<Triggers>) => onChange({ ...triggers, ...patch });
@@ -1193,14 +1205,20 @@ function TriggerSettings({
       <Card tour="command">
         <p className="label">ЧАТ</p>
         <h2>На что отвечать в чате</h2>
-        <label className="check">
+        <label className={`check ${commandAvailable ? "" : "locked"}`}>
           <input
             type="checkbox"
-            checked={triggers.command}
+            checked={commandAvailable && triggers.command}
+            disabled={!commandAvailable}
             onChange={(event) => set({ command: event.target.checked })}
           />
           <span>
-            Команда <code>!роаст</code> <small>— «!роаст опять проиграл катку»</small>
+            Команда <code>!роаст</code>{" "}
+            <small>
+              {commandAvailable
+                ? "— «!роаст опять проиграл катку»"
+                : "— доступна на тарифах Basic и Premium"}
+            </small>
           </span>
         </label>
         <Tags
@@ -1211,7 +1229,7 @@ function TriggerSettings({
         />
         <small className="hint below">
           Слово срабатывает в начале любого слова: «слил» поймает «слился». Команды на «!» и
-          сообщения ботов бот пропускает. На слово стримера бот жарит самого стримера. Проверяете
+          сообщения ботов пропускаются, на сообщение самого стримера достаётся стримеру. Проверяете
           сами — поставьте «Всегда» и учтите паузы из «Темпа».
         </small>
         {triggers.keywords.length > 0 && (
@@ -1222,16 +1240,10 @@ function TriggerSettings({
             onChange={(keywordChancePercent) => set({ keywordChancePercent })}
           />
         )}
-        <ScaleChoice
-          label="Кого жарить"
-          value={triggers.streamerTargetPercent}
-          steps={TARGET_STEPS}
-          onChange={(streamerTargetPercent) => set({ streamerTargetPercent })}
-        />
       </Card>
       <Card tour="reward">
         <p className="label">БАЛЛЫ КАНАЛА</p>
-        <h2>Награда для бота</h2>
+        <h2>Награда с текстом</h2>
         <label className="field-label">
           Награда
           <select
@@ -1257,50 +1269,10 @@ function TriggerSettings({
             На канале нет наград. Создайте награду с полем ввода текста в Twitch.
           </small>
         )}
-        <fieldset>
-          <legend>Что делает бот</legend>
-          <div className="segment">
-            <button
-              type="button"
-              className={triggers.rewardMode === "verdict" ? "active" : ""}
-              onClick={() => set({ rewardMode: "verdict" })}
-            >
-              Выносит вердикт
-            </button>
-            <button
-              type="button"
-              className={triggers.rewardMode === "roast" ? "active" : ""}
-              onClick={() => set({ rewardMode: "roast" })}
-            >
-              Жарит автора
-            </button>
-          </div>
-          {triggers.rewardMode === "verdict" ? (
-            <ul className="verdicts">
-              <li>
-                <b className="agree">✓</b> Согласна — жарит стримера
-              </li>
-              <li>
-                <b className="mixed">≈</b> Отчасти — достаётся обоим
-              </li>
-              <li>
-                <b className="refuse">✗</b> Не согласна — жарит автора
-              </li>
-            </ul>
-          ) : (
-            <small className="hint below">
-              Бот жарит того, кто активировал награду, по тексту награды.
-            </small>
-          )}
-        </fieldset>
-        {triggers.rewardMode === "verdict" && (
-          <ScaleChoice
-            label="На чьей стороне бот"
-            value={triggers.streamerLoyaltyPercent}
-            steps={LOYALTY_STEPS}
-            onChange={(streamerLoyaltyPercent) => set({ streamerLoyaltyPercent })}
-          />
-        )}
+        <small className="hint below">
+          Зритель пишет текст в награде, героиня читает его и отвечает по смыслу. Кого она при этом
+          жарит, решает переключатель «Кого жарить» в карточке персонажа.
+        </small>
       </Card>
       <Card tour="events">
         <p className="label">СОБЫТИЯ</p>

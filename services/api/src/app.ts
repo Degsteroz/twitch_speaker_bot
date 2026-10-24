@@ -8,6 +8,7 @@ import jwt from "@fastify/jwt";
 import websocket, { type WebSocket } from "@fastify/websocket";
 import { createDatabase } from "@roastbot/db";
 import {
+  COMMAND_PLANS,
   DEFAULT_GLOBAL_MONTHLY_ROAST_CAP,
   DEFAULT_MONTHLY_BUDGET_USD,
   DEFAULT_YANDEX_TTS_MONTHLY_LIMIT_RUB,
@@ -811,9 +812,10 @@ export async function buildApp(config: ApiConfig) {
         used: number;
         limit: number;
         gifted: number;
+        plan: string | null;
       }[]
     >`
-      select s.enabled, u.status "userStatus", coalesce(um.roasts,0)::int used,
+      select s.enabled, u.status "userStatus", coalesce(um.roasts,0)::int used, p.code plan,
         coalesce(p.monthly_roast_limit,0)::int "limit",
         coalesce((select sum(amount-used) from gifted_quota
           where channel_id=c.id and month=${month}),0)::int gifted
@@ -851,6 +853,9 @@ export async function buildApp(config: ApiConfig) {
             : "working";
     return {
       month,
+      plan: row.plan,
+      // `!роаст` is a paid feature; the panel shows the switch disabled on the free plan.
+      commandAvailable: COMMAND_PLANS.has(row.plan ?? ""),
       enabled: row.enabled,
       used: row.used,
       limit: row.limit,

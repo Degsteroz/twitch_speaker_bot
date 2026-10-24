@@ -14,7 +14,6 @@ import {
   inspectInput,
   inspectOutput,
   parseClassifierVerdict,
-  parseVerdictReply,
   pricingForModel
 } from "@roastbot/prompts";
 import {
@@ -27,12 +26,12 @@ import {
   OVERLAY_EVENT_TTL_SECONDS,
   roastRequestedJobSchema,
   triggerSettingsSchema,
+  COMMAND_PLANS,
   type RoastRequestedJob,
   type RoastStatus,
   type StoredOverlayRoast,
   type Tone,
   type Toxicity,
-  type Verdict,
   type Voice,
   yandexBillingMonth,
   yandexTtsRequestLimit
@@ -55,6 +54,7 @@ interface ChannelContext {
   stopWords: string[];
   triggers: unknown;
   monthlyLimit: number | null;
+  planCode: string | null;
 }
 
 export interface PipelineDependencies {
@@ -106,7 +106,8 @@ async function loadContext(sql: Sql, channelId: string): Promise<ChannelContext 
     select u.status "userStatus", c.twitch_login "streamerLogin", s.enabled, s.tone, s.voice,
       s.toxicity,
       s.cooldown_sec "cooldownSec", s.user_cooldown_sec "userCooldownSec",
-      s.stop_words "stopWords", s.triggers, p.monthly_roast_limit "monthlyLimit"
+      s.stop_words "stopWords", s.triggers, p.monthly_roast_limit "monthlyLimit",
+      p.code "planCode"
     from channels c join users u on u.id=c.user_id join settings s on s.channel_id=c.id
     left join lateral (
       select sub.plan_id from subscriptions sub
@@ -275,6 +276,11 @@ export async function processRoast(
     if (await globalValue<boolean>(deps.sql, "kill_switch", false)) {
       return await settle("skipped", "global_kill_switch");
     }
+    // `!роаст` is a paid feature. The twitch service drops it on free channels already; this is
+    // the authoritative check for a job queued before a downgrade.
+    if (job.source === "chat_command" && !COMMAND_PLANS.has(context.planCode ?? "")) {
+      return await settle("skipped", "command_not_in_plan");
+    }
 
     const globalWords = await globalValue<string[]>(deps.sql, "global_stop_words", []);
     const stopWords = [...globalWords, ...context.stopWords];
@@ -293,21 +299,23 @@ export async function processRoast(
     // Haiku 5.5 thinks by default and counts thinking against max_tokens; a one-line roast does
     // not need it, and disabling keeps latency inside the 4-second budget.
     // Instructions go in `system`, the viewer's data alone in the user turn.
-    // A channel-points message is judged rather than roasted (rewardMode "verdict").
-    const triggers = triggerSettingsSchema.parse(context.triggers ?? {});
-    const verdictMode =
-      job.source === "reward" && triggers.rewardMode === "verdict" && job.inputText.trim() !== "";
+    // The channel's switch picks the target; a job without an author (anonymous gift, ad break,
+    // the streamer's own message) always roasts the streamer.
+    const { targetMode } = triggerSettingsSchema.parse(context.triggers ?? {});
+    const target =
+      job.target === "streamer" || targetMode === "streamer"
+        ? "streamer"
+        : targetMode === "author"
+          ? "viewer"
+          : "auto";
     const prompt = composeRoastPrompt({
       viewer: job.viewerLogin,
       message: job.inputText,
       tone: context.tone,
       toxicity: context.toxicity,
-      target: job.target,
+      target,
       streamer: context.streamerLogin,
-      ...(job.eventSummary ? { event: job.eventSummary } : {}),
-      ...(verdictMode
-        ? { mode: "verdict" as const, streamerLoyaltyPercent: triggers.streamerLoyaltyPercent }
-        : {})
+      ...(job.eventSummary ? { event: job.eventSummary } : {})
     });
     const generated = await deps.anthropic.messages.create({
       model,
@@ -321,11 +329,7 @@ export async function processRoast(
       tokensIn: generated.usage.input_tokens,
       tokensOut: generated.usage.output_tokens
     });
-    const reply = verdictMode
-      ? parseVerdictReply(textFrom(generated))
-      : { verdict: undefined, text: textFrom(generated) };
-    const verdict: Verdict | undefined = reply.verdict;
-    let output = enforceOutputLimit(reply.text);
+    let output = enforceOutputLimit(textFrom(generated));
     let blockReason: string | undefined;
     if (generated.stop_reason === "refusal") blockReason = "model_refusal";
     else if (!output) blockReason = "empty_output";
@@ -387,7 +391,7 @@ export async function processRoast(
       await tx`update usage_monthly set tts_chars=tts_chars+${ttsChars}
         where channel_id=${job.channelId} and month=${month}`;
       await tx`update roasts set status=${blockReason ? "blocked_output" : "done"}, output_text=${output},
-        error=${blockReason ?? null}, verdict=${verdict ?? null},
+        error=${blockReason ?? null},
         tokens_in=${spent.tokensIn},tokens_out=${spent.tokensOut},
         tts_chars=${ttsChars}, cost_usd=${spent.cost},latency_ms=${Date.now() - started}
         where id=${currentRoastId}`;
@@ -400,7 +404,6 @@ export async function processRoast(
         viewerLogin: job.viewerLogin,
         text: output,
         tone: context.tone,
-        ...(verdict && !blockReason ? { verdict } : {}),
         audioFile,
         expiresAt: expiresAt.toISOString(),
         sentAt: now.toISOString()

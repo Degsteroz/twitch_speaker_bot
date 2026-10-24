@@ -64,6 +64,13 @@
       "when": 1793260800000,
       "tag": "0008_channel_change_notify",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "9",
+      "when": 1793347200000,
+      "tag": "0009_plan_change_notify",
+      "breakpoints": true
     }
   ]
 }

@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 
 import { createDatabase } from "@roastbot/db";
 import {
+  COMMAND_PLANS,
   COOLDOWN_SOURCES,
   ROAST_REQUESTED_QUEUE,
   ROAST_REQUESTED_QUEUE_OPTIONS,
@@ -55,6 +56,7 @@ interface ChannelRow {
   twitchLogin: string;
   triggers: unknown;
   scopes: string[];
+  planCode: string | null;
   accessCiphertext: string;
   accessIv: string;
   accessTag: string;
@@ -76,9 +78,15 @@ async function activeChannels(): Promise<Channel[]> {
       t.access_token_ciphertext "accessCiphertext",
       t.access_token_iv "accessIv",t.access_token_tag "accessTag",
       t.refresh_token_ciphertext "refreshCiphertext",t.refresh_token_iv "refreshIv",
-      t.refresh_token_tag "refreshTag",t.expires_at "expiresAt"
+      t.refresh_token_tag "refreshTag",t.expires_at "expiresAt",p.code "planCode"
     from channels c join users u on u.id=c.user_id join settings s on s.channel_id=c.id
     join twitch_tokens t on t.channel_id=c.id
+    left join lateral (
+      select sub.plan_id from subscriptions sub
+      where sub.user_id=u.id and (sub.valid_until is null or sub.valid_until>now())
+      order by sub.created_at desc limit 1
+    ) sub on true
+    left join plans p on p.id=sub.plan_id
     where u.status='active' and s.enabled=true`;
   return rows.flatMap((row) => {
     // Rows saved before newer trigger fields existed are completed with defaults here.
@@ -121,10 +129,10 @@ chat.on("message", (channelName, tags, message, self) => {
       message,
       username: viewerLogin,
       displayName: tags["display-name"] ?? viewerLogin,
-      isBroadcaster: tags["user-id"] === channel.twitchId,
-      streamerLogin: channel.twitchLogin
+      isBroadcaster: tags["user-id"] === channel.twitchId
     },
-    channel.triggers
+    channel.triggers,
+    { commandAllowed: COMMAND_PLANS.has(channel.planCode ?? "") }
   );
   if (!roast) return;
   void (async () => {

@@ -43,7 +43,8 @@ afterAll(async () => {
 });
 
 beforeEach(async () => {
-  channel = await createTestChannel(db.sql);
+  // Premium: `!роаст` (the default job source here) is a paid feature.
+  channel = await createTestChannel(db.sql, { plan: "premium" });
   await db.sql`update global_settings set value='false'::jsonb where key='kill_switch'`;
   await db.sql`update global_settings set value='5'::jsonb where key='monthly_budget_usd'`;
   await db.sql`delete from usage_monthly`;
@@ -436,7 +437,7 @@ describe("character voices", () => {
   });
 });
 
-describe("triggers, targets and verdicts", () => {
+describe("triggers and targets", () => {
   const generationOf = (anthropic: ReturnType<typeof fakeAnthropic>) =>
     anthropic.create.mock.calls[0]![0];
 
@@ -491,41 +492,47 @@ describe("triggers, targets and verdicts", () => {
     expect(anthropic.create).not.toHaveBeenCalled();
   });
 
-  it("judges a channel-points message and sends the verdict to the overlay", async () => {
-    await db.sql`update settings set toxicity=5, triggers=triggers || '{"rewardMode":"verdict","streamerLoyaltyPercent":80}'::jsonb
+  it("lets the character pick the target by default and follows the channel switch", async () => {
+    await db.sql`update settings set cooldown_sec=0, user_cooldown_sec=0
       where channel_id=${channel.channelId}`;
-    const anthropic = fakeAnthropic({ text: "VERDICT: agree\nАга, руки у него из жопы." });
-    const outcome = await processRoast(
-      await job({ source: "reward", inputText: "Стример совсем стрелять не умеет" }),
-      deps(anthropic.client)
+    const anthropic = fakeAnthropic({ text: "Ну и мазила." });
+    const reward = async () =>
+      processRoast(
+        await job({ source: "reward", inputText: "скажи стримеру, что он плохо стреляет" }),
+        deps(anthropic.client)
+      );
+    await reward();
+    const auto = anthropic.create.mock.calls[0]![0].system as string;
+    expect(auto).toContain("Сама реши по смыслу, кого подколоть");
+    expect(auto).toContain("не поручение");
+
+    await db.sql`update settings set triggers=triggers || '{"targetMode":"author"}'::jsonb
+      where channel_id=${channel.channelId}`;
+    anthropic.create.mockClear();
+    await reward();
+    expect(anthropic.create.mock.calls[0]![0].system as string).toContain(
+      "подколов автора из <viewer>"
     );
 
-    expect(outcome.status).toBe("done");
-    const [generation, classifier] = anthropic.create.mock.calls.map(([request]) => request);
-    expect(generation!.system as string).toContain("Лояльность к стримеру: 80/100");
-    expect(classifier!.system as string).toContain("mild coarse words such as жопа");
-    const [row] = await db.sql<{ output_text: string; verdict: string }[]>`
-      select output_text, verdict from roasts where id=${outcome.roastId}`;
-    expect(row).toEqual({ output_text: "Ага, руки у него из жопы.", verdict: "agree" });
-    const [event] = await db.sql<{ payload: unknown }[]>`
-      select payload from overlay_events where roast_id=${outcome.roastId}`;
-    expect(storedOverlayRoastSchema.parse(event!.payload)).toMatchObject({
-      text: "Ага, руки у него из жопы.",
-      verdict: "agree"
-    });
+    await db.sql`update settings set triggers=triggers || '{"targetMode":"streamer"}'::jsonb
+      where channel_id=${channel.channelId}`;
+    anthropic.create.mockClear();
+    await reward();
+    expect(anthropic.create.mock.calls[0]![0].system as string).toContain(
+      "подколов стримера из <streamer>"
+    );
   });
 
-  it("roasts the reward author as before in roast mode", async () => {
-    await db.sql`update settings set triggers=triggers || '{"rewardMode":"roast"}'::jsonb
-      where channel_id=${channel.channelId}`;
-    const anthropic = fakeAnthropic({ text: "Это ты стрелять не умеешь." });
-    const outcome = await processRoast(
-      await job({ source: "reward", inputText: "Стример совсем стрелять не умеет" }),
-      deps(anthropic.client)
-    );
-    expect(generationOf(anthropic).system as string).not.toContain("[ВЕРДИКТ]");
-    const [row] = await db.sql<{ verdict: string | null }[]>`
-      select verdict from roasts where id=${outcome.roastId}`;
-    expect(row!.verdict).toBeNull();
+  it("ignores !роаст on the free plan before spending anything", async () => {
+    await db.sql`update subscriptions set plan_id=(select id from plans where code='free')
+      where user_id=${channel.userId}`;
+    const anthropic = fakeAnthropic({ text: "unused" });
+    expect(
+      await processRoast(await job({ source: "chat_command" }), deps(anthropic.client))
+    ).toMatchObject({ status: "skipped", reason: "command_not_in_plan" });
+    expect(anthropic.create).not.toHaveBeenCalled();
+    expect(
+      (await processRoast(await job({ source: "reward" }), deps(anthropic.client))).status
+    ).toBe("done");
   });
 });

@@ -25,15 +25,27 @@ describe("channelSettingsSchema", () => {
       command: true,
       rewardId: null,
       keywords: [],
-      rewardMode: "verdict",
+      targetMode: "auto",
       events: { cheer: { enabled: false }, raid: { enabled: false }, follow: { enabled: false } }
     });
   });
 
   it("completes trigger rows saved before the new fields existed", () => {
     const legacy = triggerSettingsSchema.parse({ command: false, rewardId: "r1" });
-    expect(legacy).toMatchObject({ command: false, rewardId: "r1", streamerTargetPercent: 50 });
+    expect(legacy).toMatchObject({ command: false, rewardId: "r1", targetMode: "auto" });
     expect(legacy.events.subscription).toEqual({ enabled: false });
+  });
+
+  it("drops the old reward and target fields instead of rejecting the row", () => {
+    const old = triggerSettingsSchema.parse({
+      rewardMode: "verdict",
+      streamerLoyaltyPercent: 80,
+      streamerTargetPercent: 50
+    });
+    expect(old.targetMode).toBe("auto");
+    expect(old).not.toHaveProperty("rewardMode");
+    expect(old).not.toHaveProperty("streamerTargetPercent");
+    expect(() => triggerSettingsSchema.parse({ targetMode: "both" })).toThrow();
   });
 
   it("rejects unsupported toxicity and unknown fields", () => {

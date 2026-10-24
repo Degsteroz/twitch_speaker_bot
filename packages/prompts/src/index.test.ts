@@ -15,8 +15,7 @@ import {
   inspectOutput,
   moderateText,
   normalizeForModeration,
-  parseClassifierVerdict,
-  parseVerdictReply
+  parseClassifierVerdict
 } from "./index.js";
 
 // Every way of writing these must be caught: spelling tricks, transliteration, leetspeak,
@@ -312,7 +311,7 @@ describe("prompt composition", () => {
   });
 });
 
-describe("targets and channel-points verdicts", () => {
+describe("targets and answering by meaning", () => {
   const base = {
     viewer: "viewer",
     message: "стример не умеет стрелять",
@@ -332,31 +331,24 @@ describe("targets and channel-points verdicts", () => {
     expect(prompt.user).toContain("<event>Рейд с канала &lt;x&gt;: 40 зрителей</event>");
   });
 
-  it("asks for a verdict line and passes the loyalty to the system prompt", () => {
-    const prompt = composeRoastPrompt({
-      ...base,
-      streamer: "boss",
-      mode: "verdict",
-      streamerLoyaltyPercent: 80
-    });
-    expect(prompt.system).toContain("[ВЕРДИКТ]");
-    expect(prompt.system).toContain("Лояльность к стримеру: 80/100");
-    expect(prompt.system).toContain("VERDICT: refuse");
+  it("answers by meaning and treats a request in the message as a topic", () => {
+    const prompt = composeRoastPrompt({ ...base, streamer: "boss" });
+    expect(prompt.system).toContain("[ОТВЕТ ПО СМЫСЛУ]");
+    expect(prompt.system).toContain("не поручение");
+    expect(prompt.system).toContain("подколов автора из <viewer>");
+    expect(prompt.system).toContain("Мицуки, цундэрэ");
   });
 
-  it("parses the verdict and never leaves the service line in the spoken text", () => {
-    expect(parseVerdictReply("VERDICT: agree\nАга, руки у него из жопы.")).toEqual({
-      verdict: "agree",
-      text: "Ага, руки у него из жопы."
+  it("lets the character pick the target in auto mode", () => {
+    const prompt = composeRoastPrompt({
+      ...base,
+      tone: "yandere",
+      target: "auto",
+      streamer: "boss"
     });
-    expect(parseVerdictReply("verdict: REFUSE\nОн таких как ты на завтрак ест!")).toMatchObject({
-      verdict: "refuse"
-    });
-    expect(parseVerdictReply("Без служебной строки.")).toEqual({
-      verdict: "mixed",
-      text: "Без служебной строки."
-    });
-    expect(parseVerdictReply("VERDICT: maybe\nТекст").text).toBe("Текст");
+    expect(prompt.system).toContain("Сама реши по смыслу, кого подколоть");
+    expect(prompt.system).toContain("Аи, яндэрэ");
+    expect(prompt.system).not.toContain("VERDICT");
   });
 
   it("allows mild coarse words only from toxicity 4, never mat", () => {

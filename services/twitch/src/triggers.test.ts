@@ -7,7 +7,6 @@ import {
   eventRoast,
   extractDonations,
   matchKeyword,
-  pickTarget,
   subscriptionSpecs
 } from "./triggers.js";
 
@@ -33,52 +32,43 @@ describe("chat triggers", () => {
     expect(matchKeyword("(слил)", ["слил"])).toBe("слил");
   });
 
-  it("picks the streamer below the percentage and the viewer above it", () => {
-    expect(pickTarget(50, 0.49)).toBe("streamer");
-    expect(pickTarget(50, 0.5)).toBe("viewer");
-    expect(pickTarget(0, 0)).toBe("viewer");
-    expect(pickTarget(100, 0.99)).toBe("streamer");
-  });
-
-  it("handles !роаст when enabled and keywords with their chance", () => {
+  it("answers !роаст only on a paid plan and keywords with their chance", () => {
     const settings = triggers({ keywords: ["слил"], keywordChancePercent: 50 });
-    expect(chatTrigger(chat("!роаст мой aim"), settings, never)).toEqual({
+    const paid = { commandAllowed: true, random: never };
+    expect(chatTrigger(chat("!роаст мой aim"), settings, paid)).toEqual({
       source: "chat_command",
       inputText: "мой aim",
       target: "viewer"
     });
-    expect(chatTrigger(chat("опять слил"), settings, always)).toEqual({
+    expect(chatTrigger(chat("!роаст мой aim"), settings, { random: always })).toBeNull();
+    expect(chatTrigger(chat("!роаст"), triggers({ command: false }), paid)).toBeNull();
+    expect(chatTrigger(chat("опять слил"), settings, { random: always })).toEqual({
       source: "chat_keyword",
       inputText: "опять слил",
-      target: "streamer"
+      target: "viewer"
     });
-    expect(chatTrigger(chat("опять слил"), settings, never)).toBeNull();
-    expect(chatTrigger(chat("просто привет"), settings, always)).toBeNull();
-    expect(chatTrigger(chat("!роаст"), triggers({ command: false }), always)).toBeNull();
+    expect(chatTrigger(chat("опять слил"), settings, { random: never })).toBeNull();
+    expect(chatTrigger(chat("просто привет"), settings, { random: always })).toBeNull();
   });
 
   it("ignores bots and other commands", () => {
     const settings = triggers({ keywords: ["слил"], keywordChancePercent: 100 });
-    expect(chatTrigger(chat("слил", { username: "Nightbot" }), settings, always)).toBeNull();
-    expect(chatTrigger(chat("!слил"), settings, always)).toBeNull();
+    const options = { commandAllowed: true, random: always };
+    expect(chatTrigger(chat("слил", { username: "Nightbot" }), settings, options)).toBeNull();
+    expect(chatTrigger(chat("!слил"), settings, options)).toBeNull();
   });
 
-  it("answers the streamer's own keyword by roasting the streamer", () => {
-    const settings = triggers({
-      keywords: ["слил"],
-      keywordChancePercent: 100,
-      streamerTargetPercent: 0
-    });
-    expect(chatTrigger(chat("опять слил", { isBroadcaster: true }), settings, never)).toEqual({
+  it("roasts the streamer for their own message: there is no other author", () => {
+    const settings = triggers({ keywords: ["слил"], keywordChancePercent: 100 });
+    const options = { commandAllowed: true, random: never };
+    expect(chatTrigger(chat("опять слил", { isBroadcaster: true }), settings, options)).toEqual({
       source: "chat_keyword",
       inputText: "опять слил",
       target: "streamer"
     });
-    expect(chatTrigger(chat("!роаст мой aim", { isBroadcaster: true }), settings, never)).toEqual({
-      source: "chat_command",
-      inputText: "мой aim",
-      target: "streamer"
-    });
+    expect(
+      chatTrigger(chat("!роаст мой aim", { isBroadcaster: true }), settings, options)?.target
+    ).toBe("streamer");
   });
 });
 
@@ -237,26 +227,19 @@ describe("events to roasts", () => {
       ]
     };
     const viewerSide = withEvents({ prediction: { enabled: true } });
-    expect(
-      eventRoast(
-        "channel.prediction.end",
-        prediction,
-        { ...viewerSide, streamerTargetPercent: 0 },
-        "boss"
-      )
-    ).toMatchObject({
+    expect(eventRoast("channel.prediction.end", prediction, viewerSide, "boss")).toMatchObject({
       viewerLogin: "big",
       target: "viewer",
       eventSummary: "Прогноз «Победит ли?» завершён: победил исход «Да», проиграли 8 зрителей"
     });
-    expect(
-      eventRoast(
-        "channel.prediction.end",
-        prediction,
-        { ...viewerSide, streamerTargetPercent: 100 },
-        "boss"
-      )
-    ).toMatchObject({ viewerLogin: "boss", target: "streamer" });
+    const nobodyBet = {
+      ...prediction,
+      outcomes: prediction.outcomes.map((outcome) => ({ ...outcome, top_predictors: [] }))
+    };
+    expect(eventRoast("channel.prediction.end", nobodyBet, viewerSide, "boss")).toMatchObject({
+      viewerLogin: "boss",
+      target: "streamer"
+    });
     expect(
       eventRoast(
         "channel.prediction.end",
@@ -276,7 +259,7 @@ describe("events to roasts", () => {
       target: "streamer",
       eventSummary: "Стример запустил рекламу на 90 секунд"
     });
-    const reward = { ...settings, rewardId: "r1", rewardMode: "roast" as const };
+    const reward = { ...settings, rewardId: "r1" };
     expect(
       eventRoast(
         "channel.channel_points_custom_reward_redemption.add",

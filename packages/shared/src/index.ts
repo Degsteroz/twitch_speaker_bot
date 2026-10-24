@@ -1,7 +1,9 @@
 import { z } from "zod";
 
 export const APP_NAME = "RoastBot";
-export const DEFAULT_CHANNEL_MONTHLY_ROASTS = 100;
+export const DEFAULT_CHANNEL_MONTHLY_ROASTS = 10;
+// `!роаст` is a paid feature: on the free plan the command is ignored.
+export const COMMAND_PLANS: ReadonlySet<string> = new Set(["basic", "premium"]);
 export const DEFAULT_CHANNEL_COOLDOWN_SECONDS = 30;
 export const DEFAULT_USER_COOLDOWN_SECONDS = 60;
 export const DEFAULT_GLOBAL_MONTHLY_ROAST_CAP = 4_000;
@@ -68,6 +70,8 @@ export const COOLDOWN_SOURCES: ReadonlySet<RoastSource> = new Set<RoastSource>([
   "follow"
 ]);
 /** Who the roast is aimed at: the viewer behind the trigger or the streamer. */
+/** The two characters by name; the tone is their temperament. */
+export const CHARACTER_NAMES = Object.freeze({ tsundere: "Мицуки", yandere: "Аи" } as const);
 export const roastTargetSchema = z.enum(["viewer", "streamer"]);
 /** The bot's stance on a channel-points message: agree with it, half-agree, or push back. */
 export const verdictSchema = z.enum(["agree", "mixed", "refuse"]);
@@ -152,23 +156,32 @@ export const DONATIONALERTS_SCOPES = Object.freeze([
   "oauth-donation-subscribe"
 ] as const);
 
-export const triggerSettingsSchema = z
+// Who gets roasted, for every trigger: the author (viewer, donor, raider…), the streamer, or the
+// character decides from what the message and the event say.
+export const targetModeSchema = z.enum(["author", "streamer", "auto"]);
+
+// Fields of older settings rows; the target switch replaced all three.
+const LEGACY_TRIGGER_KEYS = ["rewardMode", "streamerLoyaltyPercent", "streamerTargetPercent"];
+function dropLegacyTriggers(value: unknown): unknown {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return value;
+  const row = { ...(value as Record<string, unknown>) };
+  for (const key of LEGACY_TRIGGER_KEYS) delete row[key];
+  return row;
+}
+
+const triggerSettingsObject = z
   .object({
     command: z.boolean().default(true),
     rewardId: z.string().min(1).nullable().default(null),
     // Chat messages containing one of these words (word start, any case) may trigger a roast.
     keywords: z.array(z.string().trim().min(1).max(40)).max(50).default([]),
     keywordChancePercent: percentSchema.default(25),
-    // For chat triggers (keywords, !роаст): chance that the streamer is roasted instead.
-    streamerTargetPercent: percentSchema.default(50),
-    // Channel-points reward: "verdict" judges the viewer's message (agree / mixed / refuse and
-    // roast the streamer or the viewer accordingly); "roast" roasts the viewer as before.
-    rewardMode: z.enum(["verdict", "roast"]).default("verdict"),
-    // How readily the verdict sides with the streamer: 0 agrees with critics, 100 defends.
-    streamerLoyaltyPercent: percentSchema.default(50),
+    targetMode: targetModeSchema.default("auto"),
     events: eventTriggersSchema.default(eventTriggersSchema.parse({}))
   })
   .strict();
+
+export const triggerSettingsSchema = z.preprocess(dropLegacyTriggers, triggerSettingsObject);
 
 export const DEFAULT_TRIGGERS = triggerSettingsSchema.parse({});
 
@@ -194,6 +207,8 @@ export const roastRequestedJobSchema = z
     viewerId: z.string().min(1).max(128).optional(),
     viewerLogin: z.string().min(1).max(64),
     inputText: z.string().max(2_000),
+    // "streamer" when there is no author to roast (anonymous gift, ad break, the streamer's own
+    // message); otherwise "viewer", and the channel's targetMode decides in the worker.
     target: roastTargetSchema.default("viewer"),
     // What happened, in our own words ("Рейд с канала x: 40 зрителей"); viewer text stays in
     // inputText. Built by the twitch service from typed event fields.
@@ -336,6 +351,7 @@ export type TriggerSettings = z.infer<typeof triggerSettingsSchema>;
 export type EventTriggers = z.infer<typeof eventTriggersSchema>;
 export type RoastTarget = z.infer<typeof roastTargetSchema>;
 export type Verdict = z.infer<typeof verdictSchema>;
+export type TargetMode = z.infer<typeof targetModeSchema>;
 export type ChannelSettings = z.infer<typeof channelSettingsSchema>;
 export type RoastRequestedJob = z.infer<typeof roastRequestedJobSchema>;
 export type RoastCompletedJob = z.infer<typeof roastCompletedJobSchema>;

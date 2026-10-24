@@ -37,6 +37,16 @@ describe("normalizeSettings", () => {
     expect(triggers.events.raid).toEqual({ enabled: true, minViewers: 5 });
     expect(triggers.events.cheer).toEqual({ enabled: false, minBits: 100 });
   });
+
+  it("drops the old reward and target fields so a save is not rejected", () => {
+    const triggers = normalizeTriggers({
+      rewardMode: "verdict",
+      streamerLoyaltyPercent: 80,
+      streamerTargetPercent: 50
+    });
+    expect(triggers.targetMode).toBe("auto");
+    expect(Object.keys(triggers).sort()).toEqual(Object.keys(DEFAULT_TRIGGERS).sort());
+  });
 });
 
 describe("overlayUrl", () => {

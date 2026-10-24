@@ -314,8 +314,16 @@ a {
   content: "Зритель: ";
   color: #706b7b;
 }
-.verdict-cards b,
-.verdicts b {
+.viewer-line.wide {
+  margin: 0 0 16px !important;
+  font-size: 16px;
+}
+.heroines h3 small {
+  color: var(--muted);
+  font-weight: 500;
+  font-size: 14px;
+}
+.verdict-cards b {
   justify-self: start;
   padding: 4px 9px;
   border-radius: 7px;
@@ -650,6 +658,12 @@ legend,
   grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 2px;
 }
+.segment.scale.steps-3 {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+.check.locked {
+  opacity: 0.6;
+}
 .segment.scale button {
   padding: 10px 4px;
   font-size: 13px;
@@ -662,21 +676,6 @@ legend,
 }
 .segment button:not(.active):hover {
   background: #1a1722;
-}
-.verdicts {
-  display: grid;
-  gap: 8px;
-  list-style: none;
-  padding: 0;
-  margin: 12px 0 0;
-  font-size: 13px;
-  color: #bcb7c8;
-}
-.verdicts b {
-  display: inline-block;
-  min-width: 26px;
-  margin-right: 6px;
-  text-align: center;
 }
 .save-bar {
   position: sticky;
