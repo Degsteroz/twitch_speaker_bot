@@ -1,0 +1,55 @@
+{
+	email {$ACME_EMAIL}
+	servers {
+		protocols h1 h2 h3
+	}
+}
+
+{$APP_DOMAIN} {
+	encode zstd gzip
+
+	# Uptime checks hit https://APP_DOMAIN/health (plan §11).
+	handle /health {
+		reverse_proxy api:3000
+	}
+
+	@overlay_socket {
+		path /overlay/*
+		header Connection *Upgrade*
+	}
+	handle @overlay_socket {
+		reverse_proxy api:3000
+	}
+
+	handle_path /api/* {
+		reverse_proxy api:3000
+	}
+
+	redir /overlay /overlay/ 308
+	handle_path /overlay/* {
+		reverse_proxy overlay:80
+	}
+
+	handle {
+		reverse_proxy web:80
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		-Server
+	}
+}
+
+{$API_DOMAIN} {
+	encode zstd gzip
+	reverse_proxy api:3000
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		-Server
+	}
+}

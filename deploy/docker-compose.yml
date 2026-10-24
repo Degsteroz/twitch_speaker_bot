@@ -1,0 +1,255 @@
+name: roastbot
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+x-node-healthcheck: &node-healthcheck
+  test: ["CMD", "node", "-e", "process.kill(1, 0)"]
+  interval: 30s
+  timeout: 5s
+  retries: 3
+  start_period: 15s
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks: [internal]
+    healthcheck:
+      test: ["CMD-SHELL", 'pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    mem_limit: 512m
+    cpus: 0.50
+    logging: *default-logging
+
+  migrate:
+    image: ghcr.io/${GHCR_OWNER}/roastbot-api:${IMAGE_TAG:-latest}
+    build:
+      context: ..
+      dockerfile: services/api/Dockerfile
+    restart: "no"
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-haiku-5-5}
+    command:
+      - /bin/sh
+      - -ec
+      - node packages/db/dist/migrate.js && node packages/db/dist/seed.js
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [internal]
+    mem_limit: 256m
+    cpus: 0.25
+    logging: *default-logging
+
+  api:
+    image: ghcr.io/${GHCR_OWNER}/roastbot-api:${IMAGE_TAG:-latest}
+    build:
+      context: ..
+      dockerfile: services/api/Dockerfile
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      HOST: 0.0.0.0
+      PORT: "3000"
+      DATABASE_URL: ${DATABASE_URL}
+      PUBLIC_URL: ${PUBLIC_URL}
+      DASHBOARD_URL: ${DASHBOARD_URL}
+      TWITCH_CLIENT_ID: ${TWITCH_CLIENT_ID}
+      TWITCH_CLIENT_SECRET: ${TWITCH_CLIENT_SECRET}
+      TWITCH_REDIRECT_URI: ${TWITCH_REDIRECT_URI}
+      TWITCH_OWNER_IDS: ${TWITCH_OWNER_IDS:-}
+      SESSION_SECRET: ${SESSION_SECRET}
+      TOKEN_ENCRYPTION_KEY: ${TOKEN_ENCRYPTION_KEY}
+      AUDIO_SIGNING_SECRET: ${AUDIO_SIGNING_SECRET}
+      AUDIO_DIR: /data/audio
+    volumes:
+      - audio:/data/audio:ro
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    # `internal` has no route to the internet; Twitch OAuth/Helix needs `egress`.
+    networks: [internal, egress]
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:3000/ready').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"
+        ]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    mem_limit: 512m
+    cpus: 0.50
+    logging: *default-logging
+
+  worker:
+    image: ghcr.io/${GHCR_OWNER}/roastbot-worker:${IMAGE_TAG:-latest}
+    build:
+      context: ..
+      dockerfile: services/worker/Dockerfile
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      TTS_URL: http://tts:8000
+      AUDIO_DIR: /data/audio
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
+    volumes:
+      - audio:/data/audio
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      tts:
+        condition: service_healthy
+    networks: [internal, egress]
+    healthcheck: *node-healthcheck
+    mem_limit: 512m
+    cpus: 0.75
+    logging: *default-logging
+
+  twitch:
+    image: ghcr.io/${GHCR_OWNER}/roastbot-twitch:${IMAGE_TAG:-latest}
+    build:
+      context: ..
+      dockerfile: services/twitch/Dockerfile
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      TWITCH_CLIENT_ID: ${TWITCH_CLIENT_ID}
+      TWITCH_CLIENT_SECRET: ${TWITCH_CLIENT_SECRET}
+      TOKEN_ENCRYPTION_KEY: ${TOKEN_ENCRYPTION_KEY}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    networks: [internal, egress]
+    healthcheck: *node-healthcheck
+    mem_limit: 256m
+    cpus: 0.25
+    logging: *default-logging
+
+  tts:
+    image: ghcr.io/${GHCR_OWNER}/roastbot-tts:${IMAGE_TAG:-latest}
+    build:
+      context: ..
+      dockerfile: services/tts/Dockerfile
+    restart: unless-stopped
+    environment:
+      MODEL_DIR: /models
+      CACHE_DIR: /cache
+      MALE_MODEL: ${MALE_MODEL:-ru_RU-denis-medium.onnx}
+      FEMALE_MODEL: ${FEMALE_MODEL:-ru_RU-irina-medium.onnx}
+      CACHE_MAX_AGE_SECONDS: ${TTS_CACHE_MAX_AGE_SECONDS:-86400}
+    volumes:
+      - models:/models:ro
+      - tts-cache:/cache
+    networks: [internal]
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import json,urllib.request,sys; sys.exit(0 if json.load(urllib.request.urlopen('http://127.0.0.1:8000/health',timeout=3))['ok'] else 1)"
+        ]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    mem_limit: 1g
+    cpus: 1.0
+    logging: *default-logging
+
+  web:
+    image: ghcr.io/${GHCR_OWNER}/roastbot-web:${IMAGE_TAG:-latest}
+    build:
+      context: ..
+      dockerfile: apps/web/Dockerfile
+      args:
+        VITE_API_URL: /api
+        VITE_OVERLAY_URL: /overlay
+    restart: unless-stopped
+    networks: [internal]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    mem_limit: 64m
+    cpus: 0.10
+    logging: *default-logging
+
+  overlay:
+    image: ghcr.io/${GHCR_OWNER}/roastbot-overlay:${IMAGE_TAG:-latest}
+    build:
+      context: ..
+      dockerfile: apps/overlay/Dockerfile
+    restart: unless-stopped
+    networks: [internal]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    mem_limit: 64m
+    cpus: 0.10
+    logging: *default-logging
+
+  caddy:
+    image: caddy:2.10-alpine
+    restart: unless-stopped
+    environment:
+      APP_DOMAIN: ${APP_DOMAIN}
+      API_DOMAIN: ${API_DOMAIN}
+      ACME_EMAIL: ${ACME_EMAIL}
+    ports:
+      - "${HTTP_BIND:-0.0.0.0}:80:80"
+      - "${HTTPS_BIND:-0.0.0.0}:443:443"
+      - "${HTTPS_BIND:-0.0.0.0}:443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      api:
+        condition: service_healthy
+      web:
+        condition: service_healthy
+      overlay:
+        condition: service_healthy
+    networks: [internal, public]
+    mem_limit: 128m
+    cpus: 0.20
+    logging: *default-logging
+
+networks:
+  internal:
+    internal: true
+  # Outbound internet for api/worker/twitch; nothing on it publishes ports.
+  egress:
+  public:
+
+volumes:
+  postgres-data:
+  audio:
+  models:
+  tts-cache:
+  caddy-data:
+  caddy-config:

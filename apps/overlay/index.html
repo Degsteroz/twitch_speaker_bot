@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>RoastBot Overlay</title>
+  </head>
+  <body>
+    <main id="stage" aria-live="polite">
+      <article id="roast" hidden>
+        <div class="orb">R</div>
+        <div>
+          <p id="viewer"></p>
+          <blockquote id="text"></blockquote>
+        </div>
+        <span class="wave" aria-hidden><i></i><i></i><i></i><i></i></span>
+      </article>
+      <button id="recover" hidden>🔊 Нажми, чтобы включить звук RoastBot</button>
+      <p id="connection">Подключение…</p>
+    </main>
+    <audio id="audio" preload="auto"></audio>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

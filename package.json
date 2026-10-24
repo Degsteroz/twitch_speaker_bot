@@ -1,0 +1,37 @@
+{
+  "name": "roastbot",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.18.3",
+  "engines": {
+    "node": ">=20.0.0",
+    "pnpm": ">=9.0.0"
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "clean": "pnpm -r clean",
+    "db:cleanup": "pnpm --filter @roastbot/db cleanup",
+    "db:generate": "pnpm --filter @roastbot/db generate",
+    "db:migrate": "pnpm --filter @roastbot/db migrate",
+    "db:seed": "pnpm --filter @roastbot/db seed",
+    "demo": "pnpm build && node scripts/demo.mjs",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "lint": "eslint . --max-warnings=0",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc -b --pretty false"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.38.0",
+    "@types/node": "^24.9.1",
+    "@vitest/coverage-v8": "^3.2.4",
+    "eslint": "^9.38.0",
+    "eslint-config-prettier": "^10.1.8",
+    "prettier": "^3.6.2",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.46.2",
+    "vitest": "^3.2.4"
+  }
+}

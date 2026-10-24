@@ -1,0 +1,6 @@
+pnpm-lock.yaml
+RoastBot-PLAN.md
+**/dist/
+**/coverage/
+.pycache/
+**/migrations/meta/

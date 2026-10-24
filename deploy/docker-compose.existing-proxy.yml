@@ -1,0 +1,14 @@
+# Publishes loopback ports for a host reverse proxy. Ports cannot be published from an
+# `internal: true` network, so web and overlay also join `egress` here.
+services:
+  api:
+    ports:
+      - "127.0.0.1:${API_HOST_PORT:-3000}:3000"
+  web:
+    networks: [internal, egress]
+    ports:
+      - "127.0.0.1:${WEB_HOST_PORT:-8080}:80"
+  overlay:
+    networks: [internal, egress]
+    ports:
+      - "127.0.0.1:${OVERLAY_HOST_PORT:-8081}:80"

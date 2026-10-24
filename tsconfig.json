@@ -1,0 +1,35 @@
+{
+  "files": [],
+  "references": [
+    {
+      "path": "./packages/shared"
+    },
+    {
+      "path": "./packages/prompts"
+    },
+    {
+      "path": "./packages/db"
+    },
+    {
+      "path": "./packages/testing"
+    },
+    {
+      "path": "./services/api"
+    },
+    {
+      "path": "./services/worker"
+    },
+    {
+      "path": "./services/twitch"
+    },
+    {
+      "path": "./services/tts"
+    },
+    {
+      "path": "./apps/web"
+    },
+    {
+      "path": "./apps/overlay"
+    }
+  ]
+}

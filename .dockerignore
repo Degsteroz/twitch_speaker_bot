@@ -1,0 +1,17 @@
+.git
+.github
+.cursor
+**/.DS_Store
+**/node_modules
+**/dist
+**/.vite
+**/coverage
+**/*.log
+deploy/.env
+deploy/backups
+backups
+audio
+models
+RoastBot-PLAN.md
+**/__pycache__
+.pycache
