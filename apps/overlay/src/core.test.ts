@@ -4,6 +4,7 @@ import {
   getToken,
   parseEvent,
   previewTone,
+  readingTimeMs,
   reconnectDelay,
   websocketUrl,
   type RoastEvent
@@ -53,5 +54,10 @@ describe("overlay protocol", () => {
       "wss://site.test/overlay/a%20b"
     );
     expect(reconnectDelay(20, 0.5)).toBe(30_000);
+  });
+  it("keeps a silent card on screen long enough to read, but bounded", () => {
+    expect(readingTimeMs("")).toBe(4_000);
+    expect(readingTimeMs("а".repeat(100))).toBe(11_000);
+    expect(readingTimeMs("а".repeat(1_000))).toBe(15_000);
   });
 });

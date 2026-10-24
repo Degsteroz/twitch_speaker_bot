@@ -5,6 +5,7 @@ import {
   getToken,
   parseEvent,
   previewTone,
+  readingTimeMs,
   reconnectDelay,
   websocketUrl,
   type RoastEvent,
@@ -34,6 +35,13 @@ const viewer = element("#viewer") as HTMLElement;
 const roastText = element("#text") as HTMLElement;
 const audio = element("#audio") as HTMLAudioElement;
 const recover = element("#recover") as HTMLButtonElement;
+// OBS Browser Source plays audio without a click; a button there would only hang on stream,
+// since nobody can press it. Ordinary browsers need one click per page load.
+const inObs = "obsstudio" in window;
+let silentFallback: number | undefined;
+const showUnlock = () => {
+  if (!inObs) recover.hidden = false;
+};
 const connection = element("#connection") as HTMLElement;
 
 const queue = new EventQueue();
@@ -86,10 +94,13 @@ function next() {
       recover.hidden = true;
     })
     .catch(() => {
-      recover.hidden = false;
+      showUnlock();
+      // Without sound the card would wait forever for "ended" and block the queue.
+      silentFallback = window.setTimeout(finish, readingTimeMs(event.text));
     });
 }
 function finish() {
+  window.clearTimeout(silentFallback);
   audio.pause();
   audio.removeAttribute("src");
   audio.load();
@@ -97,21 +108,34 @@ function finish() {
   recover.hidden = true;
   next();
 }
-audio.addEventListener("playing", () => card.classList.add("speaking"));
+audio.addEventListener("playing", () => {
+  window.clearTimeout(silentFallback);
+  card.classList.add("speaking");
+});
 audio.addEventListener("pause", () => card.classList.remove("speaking"));
 audio.addEventListener("ended", finish);
 audio.addEventListener("error", finish);
 recover.addEventListener("click", () => {
+  // The click itself unlocks audio for this page; replay the current roast if there is one.
+  recover.hidden = true;
   if (!active) return;
-  void audio
-    .play()
-    .then(() => {
-      recover.hidden = true;
-    })
-    .catch(() => {
-      recover.hidden = false;
-    });
+  void audio.play().catch(showUnlock);
 });
+
+// One silent sample. Playing it is the only reliable autoplay probe: Chrome reports a running
+// AudioContext even while it refuses to start <audio> without a click.
+const SILENCE =
+  "data:audio/wav;base64,UklGRiYAAABXQVZFZm10IBAAAAABAAEAIlYAAESsAAACABAAZGF0YQIAAAAAAA==";
+
+/** Resolves true when the browser will refuse to start sound until the page gets a click. */
+async function audioLocked(): Promise<boolean> {
+  try {
+    await new Audio(SILENCE).play();
+    return false;
+  } catch (error) {
+    return error instanceof DOMException && error.name === "NotAllowedError";
+  }
+}
 
 function connect() {
   if (!token) {
@@ -195,4 +219,10 @@ window.addEventListener("beforeunload", () => {
 });
 const preview = previewTone(location.search);
 if (preview) showPreview(preview);
-else connect();
+else {
+  // Ask for the one click up front, before the first roast arrives, not in the middle of it.
+  void audioLocked().then((locked) => {
+    if (locked) showUnlock();
+  });
+  connect();
+}

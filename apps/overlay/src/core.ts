@@ -134,3 +134,11 @@ export class EventQueue {
 export function reconnectDelay(attempt: number, random = Math.random()): number {
   return Math.min(30_000, 750 * 2 ** Math.min(attempt, 6)) * (0.8 + random * 0.4);
 }
+
+/**
+ * How long a roast stays on screen when its audio cannot play (autoplay blocked, broken file):
+ * long enough to read, short enough that the queue keeps moving.
+ */
+export function readingTimeMs(text: string): number {
+  return Math.min(15_000, 4_000 + Array.from(text).length * 70);
+}

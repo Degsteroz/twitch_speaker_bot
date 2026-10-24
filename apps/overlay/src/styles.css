@@ -257,8 +257,15 @@ blockquote {
   padding: 13px 18px;
   color: white;
   background: #21182dcc;
+  font: inherit;
   font-weight: 800;
   cursor: pointer;
+}
+#recover small {
+  display: block;
+  margin-top: 4px;
+  color: #c9c2d6;
+  font-weight: 600;
 }
 #connection {
   position: absolute;
