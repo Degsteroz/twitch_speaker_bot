@@ -1,10 +1,14 @@
 # Routes shared by the standalone Caddyfile and Caddyfile.edge. Keep site-specific settings
 # (domains, TLS) out of this file.
+#
+# Upstreams are addressed by container name, never by service name: in edge mode this Caddy
+# also sits on the shared `edge` network, where `web` resolves to other projects' containers
+# (purrse-web, it-connect-web) and loops requests back through the front proxy.
 encode zstd gzip
 
 # Uptime checks hit /health on the app domain (plan §11).
 handle /health {
-	reverse_proxy api:3000
+	reverse_proxy roastbot-api:3000
 }
 
 @overlay_socket {
@@ -12,20 +16,20 @@ handle /health {
 	header Connection *Upgrade*
 }
 handle @overlay_socket {
-	reverse_proxy api:3000
+	reverse_proxy roastbot-api:3000
 }
 
 handle_path /api/* {
-	reverse_proxy api:3000
+	reverse_proxy roastbot-api:3000
 }
 
 redir /overlay /overlay/ 308
 handle_path /overlay/* {
-	reverse_proxy overlay:80
+	reverse_proxy roastbot-overlay:80
 }
 
 handle {
-	reverse_proxy web:80
+	reverse_proxy roastbot-web:80
 }
 
 header {

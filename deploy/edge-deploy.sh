@@ -40,5 +40,7 @@ fi
 
 # migrate runs before api/worker/twitch start (depends_on), so the schema is current first.
 compose up -d --no-build
+# The Caddyfile is a bind mount and admin is off, so route changes only apply on restart.
+compose restart caddy
 compose ps
 docker image prune -f >/dev/null

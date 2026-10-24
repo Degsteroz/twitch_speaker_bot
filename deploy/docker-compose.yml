@@ -57,6 +57,9 @@ services:
 
   api:
     image: ghcr.io/${GHCR_OWNER}/roastbot-api:${IMAGE_TAG:-latest}
+    # Caddy reaches it by this unique name: plain service names like `web` collide with other
+    # projects on the shared `edge` network (edge mode).
+    container_name: roastbot-api
     build:
       context: ..
       dockerfile: services/api/Dockerfile
@@ -179,6 +182,9 @@ services:
 
   web:
     image: ghcr.io/${GHCR_OWNER}/roastbot-web:${IMAGE_TAG:-latest}
+    # Caddy reaches it by this unique name: plain service names like `web` collide with other
+    # projects on the shared `edge` network (edge mode).
+    container_name: roastbot-web
     build:
       context: ..
       dockerfile: apps/web/Dockerfile
@@ -198,6 +204,9 @@ services:
 
   overlay:
     image: ghcr.io/${GHCR_OWNER}/roastbot-overlay:${IMAGE_TAG:-latest}
+    # Caddy reaches it by this unique name: plain service names like `web` collide with other
+    # projects on the shared `edge` network (edge mode).
+    container_name: roastbot-overlay
     build:
       context: ..
       dockerfile: apps/overlay/Dockerfile
