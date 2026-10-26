@@ -288,7 +288,7 @@ describe("processRoast against PostgreSQL", () => {
       values(${channel.channelId},${new Date().toISOString().slice(0, 7)},1)`;
     expect((await runJob()).status).toBe("done");
     expect(await runJob()).toMatchObject({ status: "skipped", reason: "channel_quota_exceeded" });
-    await db.sql`update plans set monthly_roast_limit=1000 where code='basic'`;
+    await db.sql`update plans set monthly_roast_limit=300 where code='basic'`;
   });
 
   it("gives dashboard tests a daily allowance apart from the monthly quota", async () => {

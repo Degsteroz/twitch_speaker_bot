@@ -541,7 +541,7 @@ describe("back-office", () => {
       validUntil: null
     });
     expect((await call("GET", "/status", streamer)).json()).toMatchObject({
-      limit: 1000,
+      limit: 300,
       gifted: 5,
       commandAvailable: true
     });
@@ -1043,6 +1043,36 @@ describe("Telegram bot and Stars", () => {
     expect(String(calls[1]!.body.text)).toContain("устарела");
   });
 
+  it("shows the owner what Telegram says about the webhook and re-registers it", async () => {
+    telegram({
+      getWebhookInfo: {
+        url: "https://app.test/api/telegram/webhook",
+        pending_update_count: 2,
+        last_error_message: "Connection timed out",
+        last_error_date: 1_790_000_000
+      }
+    });
+    const status = (await call("GET", "/admin/telegram", owner)).json<Record<string, unknown>>();
+    expect(status).toMatchObject({
+      configured: true,
+      expected: "https://app.test/api/telegram/webhook",
+      pending: 2,
+      lastError: "Connection timed out",
+      ok: false
+    });
+    expect((await call("GET", "/admin/telegram", streamer)).statusCode).toBe(403);
+    await call("POST", "/admin/telegram/webhook", owner);
+    expect(calls.map((item) => item.method)).toEqual([
+      "getWebhookInfo",
+      "setWebhook",
+      "getWebhookInfo"
+    ]);
+    expect(calls[1]!.body).toMatchObject({
+      url: "https://app.test/api/telegram/webhook",
+      secret_token: "w".repeat(24)
+    });
+  });
+
   it("sells a 30-day Stars plan, books each payment once and refunds it", async () => {
     telegram({ createInvoiceLink: "https://t.me/$invoice" });
     const checkout = await call("POST", "/billing/checkout", streamer, { plan: "basic" });
@@ -1050,7 +1080,7 @@ describe("Telegram bot and Stars", () => {
     const invoice = calls[0]!.body;
     expect(invoice).toMatchObject({
       currency: "XTR",
-      prices: [{ amount: 600 }],
+      prices: [{ amount: 170 }],
       subscription_period: 2_592_000,
       payload: `rb1:${streamer.channelId}:basic`
     });
@@ -1066,7 +1096,7 @@ describe("Telegram bot and Stars", () => {
           invoice_payload: invoice.payload
         }
       });
-    await precheck(600);
+    await precheck(170);
     expect(calls[0]).toMatchObject({ method: "answerPreCheckoutQuery", body: { ok: true } });
     await precheck(1);
     expect(calls[1]).toMatchObject({ method: "answerPreCheckoutQuery", body: { ok: false } });
@@ -1078,7 +1108,7 @@ describe("Telegram bot and Stars", () => {
         from: { id: 777 },
         successful_payment: {
           currency: "XTR",
-          total_amount: 600,
+          total_amount: 170,
           invoice_payload: invoice.payload,
           telegram_payment_charge_id: `charge-${streamer.channelId}`,
           subscription_expiration_date: expires,
@@ -1090,7 +1120,7 @@ describe("Telegram bot and Stars", () => {
     await webhook(paid);
     const payments = await db.sql`select plan, stars from star_payments
       where channel_id=${streamer.channelId}`;
-    expect(payments).toEqual([{ plan: "basic", stars: 600 }]);
+    expect(payments).toEqual([{ plan: "basic", stars: 170 }]);
     expect((await call("GET", "/status", streamer)).json()).toMatchObject({
       plan: "basic",
       commandAvailable: true

@@ -32,20 +32,20 @@ export async function seedDatabase(
           // owner set them in /admin, the upsert below only refreshes the limits.
           premiumRoasts: FREE_PREMIUM_ROASTS
         },
-        // Prices and premium allowances: break-even at full use, see migration 0014.
+        // Prices and premium allowances: break-even at full use, see migration 0015.
         {
           code: "basic",
-          monthlyRoastLimit: 1_000,
-          monthlyTtsLimit: 200_000,
-          premiumRoasts: 200,
-          starsPrice: 600
+          monthlyRoastLimit: 300,
+          monthlyTtsLimit: 60_000,
+          premiumRoasts: 50,
+          starsPrice: 170
         },
         {
           code: "premium",
-          monthlyRoastLimit: 5_000,
-          monthlyTtsLimit: 1_000_000,
-          premiumRoasts: 1_000,
-          starsPrice: 3_000
+          monthlyRoastLimit: 1_500,
+          monthlyTtsLimit: 300_000,
+          premiumRoasts: 300,
+          starsPrice: 900
         }
       ])
       .onConflictDoUpdate({

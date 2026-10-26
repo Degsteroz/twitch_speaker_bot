@@ -4,6 +4,7 @@ import { useState } from "react";
 import { api, post } from "../api.js";
 import { Card, State, date, errorText } from "../ui.js";
 import { useAdmin } from "./common.js";
+import { TelegramStatus } from "./telegram-status.js";
 
 interface Payment {
   chargeId: string;
@@ -45,59 +46,62 @@ export function Payments() {
     }
   };
   return (
-    <Card>
-      <div className="section-head">
-        <div>
-          <p className="label">ПЛАТЕЖИ</p>
-          <h2>Звёзды Telegram</h2>
-          <p>
-            За {month}: {stars} ⭐ ≈ ${(stars * USD_PER_STAR).toFixed(2)} на вывод. Вывод — через
-            Fragment, от 1000 ⭐ и через 21 день после оплаты.
-          </p>
+    <>
+      <TelegramStatus />
+      <Card>
+        <div className="section-head">
+          <div>
+            <p className="label">ПЛАТЕЖИ</p>
+            <h2>Звёзды Telegram</h2>
+            <p>
+              За {month}: {stars} ⭐ ≈ ${(stars * USD_PER_STAR).toFixed(2)} на вывод. Вывод — через
+              Fragment, от 1000 ⭐ и через 21 день после оплаты.
+            </p>
+          </div>
+          {notice && <span className="notice">{notice}</span>}
         </div>
-        {notice && <span className="notice">{notice}</span>}
-      </div>
-      {data.length === 0 ? (
-        <p>Оплат пока не было.</p>
-      ) : (
-        <div className="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>Когда</th>
-                <th>Канал</th>
-                <th>Тариф</th>
-                <th>Звёзды</th>
-                <th>До</th>
-                <th />
-              </tr>
-            </thead>
-            <tbody>
-              {data.map((row) => (
-                <tr key={row.chargeId}>
-                  <td>{date(row.createdAt)}</td>
-                  <td>{row.channel ? `#${row.channel}` : "канал удалён"}</td>
-                  <td>
-                    {row.plan}
-                    {row.recurring && <small>продление</small>}
-                  </td>
-                  <td>{row.stars} ⭐</td>
-                  <td>{date(row.validUntil)}</td>
-                  <td>
-                    {row.refundedAt ? (
-                      <small>возвращено {date(row.refundedAt)}</small>
-                    ) : (
-                      <button className="mini danger" onClick={() => void refund(row)}>
-                        Вернуть
-                      </button>
-                    )}
-                  </td>
+        {data.length === 0 ? (
+          <p>Оплат пока не было.</p>
+        ) : (
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Когда</th>
+                  <th>Канал</th>
+                  <th>Тариф</th>
+                  <th>Звёзды</th>
+                  <th>До</th>
+                  <th />
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-    </Card>
+              </thead>
+              <tbody>
+                {data.map((row) => (
+                  <tr key={row.chargeId}>
+                    <td>{date(row.createdAt)}</td>
+                    <td>{row.channel ? `#${row.channel}` : "канал удалён"}</td>
+                    <td>
+                      {row.plan}
+                      {row.recurring && <small>продление</small>}
+                    </td>
+                    <td>{row.stars} ⭐</td>
+                    <td>{date(row.validUntil)}</td>
+                    <td>
+                      {row.refundedAt ? (
+                        <small>возвращено {date(row.refundedAt)}</small>
+                      ) : (
+                        <button className="mini danger" onClick={() => void refund(row)}>
+                          Вернуть
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </Card>
+    </>
   );
 }

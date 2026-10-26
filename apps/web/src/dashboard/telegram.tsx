@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 
 import { api, post } from "../api.js";
 import { Card, errorText } from "../ui.js";
+import { usePolling } from "./poll.js";
 
 interface TelegramStatus {
   configured: boolean;
@@ -16,8 +17,13 @@ export function TelegramCard() {
   const [notice, setNotice] = useState("");
   const load = () =>
     api<TelegramStatus>("/integrations/telegram")
-      .then(setStatus)
-      .catch(() => setStatus(undefined));
+      .then((value) => {
+        setStatus(value);
+        return value;
+      })
+      .catch(() => undefined);
+  // After "Подключить" the streamer presses Start in Telegram; the card notices by itself.
+  const polling = usePolling(async () => Boolean((await load())?.connected));
   useEffect(() => {
     void load();
   }, []);
@@ -27,7 +33,7 @@ export function TelegramCard() {
     try {
       const { url } = await api<{ url: string }>("/integrations/telegram/link", post());
       window.open(url, "_blank", "noopener");
-      setNotice("Нажмите «Запустить» в Telegram, потом обновите эту карточку.");
+      polling.start();
     } catch (reason) {
       setNotice(errorText(reason));
     }
@@ -62,6 +68,21 @@ export function TelegramCard() {
             Обновить
           </button>
         </div>
+      )}
+      {polling.waiting && (
+        <p className="quota-estimate" role="status">
+          Ждём, пока вы нажмёте «Запустить» в Telegram… Окно не открылось?{" "}
+          <button className="mini" onClick={() => void connect()}>
+            Открыть ещё раз
+          </button>
+        </p>
+      )}
+      {polling.timedOut && !status.connected && (
+        <p className="quota-estimate warn" role="status">
+          Бот не ответил. Если вы нажали «Запустить», а подключения нет, значит, Telegram не
+          достучался до сервера: владельцу стоит проверить вкладку «Платежи» в админке — там видно,
+          что говорит Telegram.
+        </p>
       )}
       {notice && <small className="hint below">{notice}</small>}
     </Card>

@@ -80,13 +80,32 @@ export function registerTelegramRoutes(app: FastifyInstance, context: RouteConte
       (error: unknown) => app.log.warn(error, "telegram reply")
     );
 
+  const webhookUrl = `${config.PUBLIC_URL}/telegram/webhook`;
+  const registerWebhook = () =>
+    call("setWebhook", {
+      url: webhookUrl,
+      secret_token: config.TELEGRAM_WEBHOOK_SECRET,
+      allowed_updates: ["message", "pre_checkout_query"]
+    });
+
+  // Right after the container starts the network may not be ready, and Telegram may answer 5xx:
+  // one failed attempt must not leave the bot deaf until the next restart. Retries run in the
+  // background and never hold up the API.
+  const registerWithRetry = async () => {
+    for (let attempt = 1; attempt <= 6; attempt += 1) {
+      try {
+        await registerWebhook();
+        app.log.info({ url: webhookUrl }, "telegram webhook registered");
+        return;
+      } catch (error) {
+        app.log.error({ err: error, attempt }, "telegram setWebhook failed");
+        if (attempt < 6) await new Promise((resolve) => setTimeout(resolve, 15_000 * attempt));
+      }
+    }
+  };
   if (configured && config.NODE_ENV !== "test") {
-    app.addHook("onReady", async () => {
-      await call("setWebhook", {
-        url: `${config.PUBLIC_URL}/telegram/webhook`,
-        secret_token: config.TELEGRAM_WEBHOOK_SECRET,
-        allowed_updates: ["message", "pre_checkout_query"]
-      }).catch((error: unknown) => app.log.error(error, "telegram setWebhook"));
+    app.addHook("onReady", () => {
+      void registerWithRetry();
     });
   }
 
@@ -230,6 +249,53 @@ export function registerTelegramRoutes(app: FastifyInstance, context: RouteConte
   });
 
   // ---- owner ---------------------------------------------------------------------------------
+  // What Telegram itself says about our webhook: the first place to look when the bot is silent.
+  const webhookStatus = async () => {
+    const info = await call<{
+      url: string;
+      pending_update_count: number;
+      last_error_date?: number;
+      last_error_message?: string;
+    }>("getWebhookInfo", {});
+    return {
+      configured: true,
+      expected: webhookUrl,
+      url: info.url || null,
+      pending: info.pending_update_count,
+      lastError: info.last_error_message ?? null,
+      lastErrorAt: info.last_error_date
+        ? new Date(info.last_error_date * 1000).toISOString()
+        : null,
+      ok: info.url === webhookUrl && !info.last_error_message
+    };
+  };
+  app.get("/admin/telegram", { preHandler: requireOwner }, async (_request, reply) => {
+    if (!configured) return { configured: false };
+    return webhookStatus().catch((error: unknown) =>
+      denied(
+        reply,
+        502,
+        "telegram_unavailable",
+        error instanceof Error ? error.message : "Telegram"
+      )
+    );
+  });
+  app.post("/admin/telegram/webhook", { preHandler: requireOwner }, async (request, reply) => {
+    if (!configured) return denied(reply, 404, "not_configured", "Telegram-бот не настроен");
+    try {
+      await registerWebhook();
+      return await webhookStatus();
+    } catch (error) {
+      request.log.error(error, "telegram setWebhook failed");
+      return denied(
+        reply,
+        502,
+        "telegram_unavailable",
+        error instanceof Error ? error.message : "Telegram"
+      );
+    }
+  });
+
   app.get(
     "/admin/payments",
     { preHandler: requireOwner },

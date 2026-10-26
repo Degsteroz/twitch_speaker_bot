@@ -1,16 +1,14 @@
 # Edge mode: a VPS where another project's Caddy already owns 80/443 (here: purrse-web).
 # Nothing is published on the host. Our Caddy joins the shared Docker network `edge` under the
 # fixed name `roastbot-edge` and serves plain HTTP on :8080; the front Caddy terminates TLS for
-# roast.recursia.online and forwards to it. Images are built on the server, one at a time:
+# roast.recursia.online and forwards to it. Images come ready from GHCR (CI builds them on
+# every push to main), tagged with the commit the server checked out:
 #
-#   ./deploy/edge-deploy.sh
+#   ./deploy/edge-deploy.sh            # pull the images of the current commit and restart
+#   BUILD=1 ./deploy/edge-deploy.sh    # build here instead, one image at a time (slow, 2 GB RAM)
 #
-# Needs Docker Compose 2.24+ (`!reset` / `!override`).
-
-# Images are built on this server and never pulled. The `localhost/` prefix keeps a stray
-# `docker compose pull` from fetching a same-named image from Docker Hub.
-x-local-build: &local-build
-  pull_policy: never
+# Image names are the base file's ghcr.io/${GHCR_OWNER}/roastbot-*:${IMAGE_TAG}; a local build
+# tags the same names. Needs Docker Compose 2.24+ (`!reset` / `!override`).
 
 services:
   postgres:
@@ -18,41 +16,25 @@ services:
     command: ["postgres", "-c", "shared_buffers=64MB", "-c", "max_connections=60"]
     mem_limit: 256m
 
-  migrate:
-    image: localhost/roastbot-api:edge
-    <<: *local-build
-
   api:
-    image: localhost/roastbot-api:edge
-    <<: *local-build
     mem_limit: 256m
 
   worker:
-    image: localhost/roastbot-worker:edge
-    <<: *local-build
     mem_limit: 256m
 
   twitch:
-    image: localhost/roastbot-twitch:edge
-    <<: *local-build
     mem_limit: 192m
 
   tts:
-    image: localhost/roastbot-tts:edge
-    <<: *local-build
     environment:
       # Load a voice on first use instead of both at start: only voices streamers pick use RAM.
       PRELOAD_VOICES: "false"
     mem_limit: 640m
 
   web:
-    image: localhost/roastbot-web:edge
-    <<: *local-build
     mem_limit: 48m
 
   overlay:
-    image: localhost/roastbot-overlay:edge
-    <<: *local-build
     mem_limit: 48m
 
   caddy:
