@@ -1882,6 +1882,16 @@ td small {
   opacity: 0;
   cursor: pointer;
 }
+.character-image-field {
+  display: flex;
+  gap: 14px;
+  align-items: flex-start;
+}
+.character-image-field > div {
+  display: grid;
+  gap: 8px;
+  justify-items: start;
+}
 .character-form,
 .character-rename {
   display: grid;

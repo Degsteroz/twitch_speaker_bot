@@ -1,7 +1,7 @@
 // Premium characters: the streamer's own heroines (name, temperament, voice, picture) and the shop
 // of heroines other streamers offered and the owner approved. Choosing one applies at once, like
 // the power switch, independent of the form's save bar.
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
   api,
@@ -29,13 +29,24 @@ interface Draft {
   name: string;
   archetype: Archetype;
   voiceId: string | null;
+  /** The current picture of a saved character, shown until a new file is picked. */
+  imagePath: string | null;
 }
 const emptyDraft = (voices: VoiceOption[]): Draft => ({
   id: null,
   name: "",
   archetype: "tsundere",
-  voiceId: voices[0]?.id ?? null
+  voiceId: voices[0]?.id ?? null,
+  imagePath: null
 });
+
+/** Why a picture cannot be uploaded, checked before sending it. */
+const imageProblem = (file: File) =>
+  !CHARACTER_IMAGE_TYPES.includes(file.type)
+    ? "Подойдёт PNG, JPEG или WebP"
+    : file.size > MAX_CHARACTER_UPLOAD_BYTES
+      ? "Файл больше 4 МБ"
+      : null;
 
 /** One sample at a time: a new click stops the previous one. */
 function useSample() {
@@ -104,22 +115,22 @@ export function CustomCharacters({
       () => api("/settings/character", put({ characterId, characterName })),
       characterId ? "Героиня выбрана, следующий роаст — её голосом" : "Вернули встроенную героиню"
     );
-  const saveDraft = (value: Draft) =>
+  const saveDraft = (value: Draft, image: File | null) =>
     run(async () => {
       const body = { name: value.name, archetype: value.archetype, voiceId: value.voiceId };
-      if (value.id)
-        await api(`/characters/${value.id}`, { method: "PATCH", body: JSON.stringify(body) });
-      else await api("/characters", post(body));
+      let id = value.id;
+      if (id) await api(`/characters/${id}`, { method: "PATCH", body: JSON.stringify(body) });
+      else id = (await api<{ id: string }>("/characters", post(body))).id;
+      // The character is saved even if the picture fails; the form stays open to retry it.
+      setDraft({ ...value, id });
+      if (image) await uploadCharacterImage(id, image);
       setDraft(null);
-    }, "Сохранено. Не забудьте картинку");
+    }, "Героиня сохранена");
   const upload = (character: CharacterView, file: File | undefined) => {
     if (!file) return;
-    if (!CHARACTER_IMAGE_TYPES.includes(file.type)) {
-      setNotice("Подойдёт PNG, JPEG или WebP");
-      return;
-    }
-    if (file.size > MAX_CHARACTER_UPLOAD_BYTES) {
-      setNotice("Файл больше 4 МБ");
+    const problem = imageProblem(file);
+    if (problem) {
+      setNotice(problem);
       return;
     }
     void run(() => uploadCharacterImage(character.id, file), "Картинка загружена");
@@ -198,7 +209,8 @@ export function CustomCharacters({
                       id: character.id,
                       name: character.name,
                       archetype: character.archetype,
-                      voiceId: character.voiceId
+                      voiceId: character.voiceId,
+                      imagePath: character.imagePath
                     })
                   }
                 >
@@ -333,7 +345,7 @@ export function CustomCharacters({
           busy={busy}
           onPlay={playSample}
           onCancel={() => setDraft(null)}
-          onSave={(value) => void saveDraft(value)}
+          onSave={(value, image) => void saveDraft(value, image)}
         />
       ) : (
         data.own.length < data.maxOwn && (
@@ -376,15 +388,28 @@ function CharacterForm({
   busy: boolean;
   onPlay: (voiceId: string) => void;
   onCancel: () => void;
-  onSave: (value: Draft) => void;
+  onSave: (value: Draft, image: File | null) => void;
 }) {
   const [value, setValue] = useState(draft);
+  const [image, setImage] = useState<File | null>(null);
+  const [imageError, setImageError] = useState("");
+  // A saved draft keeps its id: after a failed upload the next click retries only the picture.
+  useEffect(() => setValue((current) => ({ ...current, id: draft.id })), [draft.id]);
+  const preview = useMemo(() => (image ? URL.createObjectURL(image) : null), [image]);
+  useEffect(() => () => void (preview && URL.revokeObjectURL(preview)), [preview]);
+  const shown = preview ?? (value.imagePath ? apiUrl(value.imagePath) : null);
+  const pick = (file: File | undefined) => {
+    if (!file) return;
+    const problem = imageProblem(file);
+    setImageError(problem ?? "");
+    if (!problem) setImage(file);
+  };
   return (
     <form
       className="character-form"
       onSubmit={(event) => {
         event.preventDefault();
-        onSave(value);
+        onSave(value, image);
       }}
     >
       <Field
@@ -442,8 +467,37 @@ function CharacterForm({
           </label>
         ))}
       </fieldset>
+      <fieldset>
+        <legend>Картинка</legend>
+        <div className="character-image-field">
+          {shown ? (
+            <img className="character-portrait" src={shown} alt="" />
+          ) : (
+            <span className="character-portrait empty">нет картинки</span>
+          )}
+          <div>
+            <label className="button secondary file-button">
+              {shown ? "Выбрать другую" : "Выбрать картинку"}
+              <input
+                type="file"
+                accept={CHARACTER_IMAGE_TYPES.join(",")}
+                onChange={(event) => pick(event.target.files?.[0])}
+              />
+            </label>
+            <small className="hint below">
+              Портрет в полный рост, лучше PNG с прозрачным фоном, до 4 МБ. Без картинки героиню
+              нельзя выбрать на стрим.
+            </small>
+            {imageError && <small className="feedback">{imageError}</small>}
+          </div>
+        </div>
+      </fieldset>
       <div className="character-actions">
-        <button className="button primary" type="submit" disabled={busy || !value.name.trim()}>
+        <button
+          className="button primary"
+          type="submit"
+          disabled={busy || !value.name.trim() || (!image && !value.imagePath)}
+        >
           {draft.id ? "Сохранить" : "Создать"}
         </button>
         <button className="button secondary" type="button" onClick={onCancel}>
