@@ -900,12 +900,16 @@ describe("premium characters", () => {
     await db.sql`insert into voices(id,label) values(${VOICE_ID},'Звонкая') on conflict do nothing`;
     const fetchSample = vi.fn(elevenLabs);
     const config = { ...deps(fakeAnthropic({ text: "" }).client).config, ELEVENLABS_API_KEY: "k" };
+    const timeout = vi.spyOn(AbortSignal, "timeout");
     expect(
       await recordVoiceSample(
         { voiceId: VOICE_ID },
         { sql: worker.client, config, fetch: fetchSample }
       )
     ).toBe("ready");
+    // The first synthesis in a library voice is slow: a sample waits far past the live timeout.
+    expect(timeout).toHaveBeenCalledWith(60_000);
+    timeout.mockRestore();
     const [voice] = await db.sql<{ sample: Buffer; sample_status: string }[]>`
       select sample, sample_status from voices where id=${VOICE_ID}`;
     expect(voice).toMatchObject({ sample_status: "ready" });

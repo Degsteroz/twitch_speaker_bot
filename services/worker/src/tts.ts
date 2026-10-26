@@ -57,14 +57,15 @@ async function synthesizeElevenLabs(
   text: string,
   voiceId: string,
   config: WorkerConfig,
-  fetcher: typeof globalThis.fetch
+  fetcher: typeof globalThis.fetch,
+  timeoutMs: number
 ): Promise<Uint8Array> {
   const url = `${ELEVENLABS_URL}/${encodeURIComponent(voiceId)}?output_format=${ELEVENLABS_FORMAT}`;
   const response = await fetcher(url, {
     method: "POST",
     headers: { "xi-api-key": config.ELEVENLABS_API_KEY!, "Content-Type": "application/json" },
     body: JSON.stringify({ text, model_id: config.ELEVENLABS_MODEL }),
-    signal: AbortSignal.timeout(ELEVENLABS_TIMEOUT_MS)
+    signal: AbortSignal.timeout(timeoutMs)
   });
   if (!response.ok) throw new Error(`elevenlabs_tts_${response.status}`);
   const audio = new Uint8Array(await response.arrayBuffer());
@@ -126,6 +127,8 @@ export interface SpeakOptions {
   voiceId?: string | null;
   /** False stops after ElevenLabs: a voice sample must be that voice or nothing. */
   yandex?: boolean;
+  /** How long to wait for ElevenLabs; a sample is not live and can wait longer. */
+  elevenLabsTimeoutMs?: number;
   log?: (message: string) => void;
 }
 
@@ -163,6 +166,7 @@ export async function speak(
     piper = true,
     voiceId: customVoice,
     yandex = true,
+    elevenLabsTimeoutMs = ELEVENLABS_TIMEOUT_MS,
     log = console.warn
   }: SpeakOptions = {}
 ): Promise<Speech | null> {
@@ -179,7 +183,13 @@ export async function speak(
     const characters = Array.from(text).length;
     if (await reserve.elevenlabs(characters)) {
       try {
-        const audio = await synthesizeElevenLabs(text, voiceId, config, fetcher);
+        const audio = await synthesizeElevenLabs(
+          text,
+          voiceId,
+          config,
+          fetcher,
+          elevenLabsTimeoutMs
+        );
         return {
           audio,
           provider: "elevenlabs",

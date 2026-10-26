@@ -13,6 +13,10 @@ import type { WorkerConfig } from "./config.js";
 import { globalValue, reserveElevenLabsCharacters, type Sql } from "./pipeline.js";
 import { speak } from "./tts.js";
 
+// The first synthesis in a voice from the ElevenLabs library is slower than the live roast timeout;
+// nobody waits for a sample, so it gets much longer.
+const SAMPLE_TIMEOUT_MS = 60_000;
+
 export interface VoiceSampleDependencies {
   sql: Sql;
   config: WorkerConfig;
@@ -42,7 +46,13 @@ export async function recordVoiceSample(
       elevenlabs: (characters) =>
         reserveElevenLabsCharacters(deps.sql, deps.now?.() ?? new Date(), characters, limit)
     },
-    { best: "elevenlabs", voiceId, yandex: false, piper: false }
+    {
+      best: "elevenlabs",
+      voiceId,
+      yandex: false,
+      piper: false,
+      elevenLabsTimeoutMs: SAMPLE_TIMEOUT_MS
+    }
   );
   const status = speech?.provider === "elevenlabs" ? "ready" : "failed";
   await deps.sql`update voices set sample_status=${status},

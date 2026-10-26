@@ -1749,6 +1749,57 @@ td small {
 .showcase-grid small {
   color: var(--muted);
 }
+.reviews {
+  display: grid;
+  gap: 15px;
+}
+.review {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr);
+  gap: 25px;
+  align-items: start;
+}
+.review-clip {
+  aspect-ratio: 16 / 9;
+  border-radius: 12px;
+  overflow: hidden;
+  background: #0b0a10;
+}
+.review-clip iframe {
+  width: 100%;
+  height: 100%;
+  border: 0;
+}
+.review-body {
+  display: grid;
+  gap: 12px;
+}
+.review-body p {
+  color: #e4e0ee;
+  font-size: 16px;
+}
+.review-author {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 6px;
+  color: inherit;
+  font-weight: 700;
+  text-decoration: none;
+}
+.review-author img {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+}
+.review-author:hover span {
+  text-decoration: underline;
+}
+@media (max-width: 800px) {
+  .review {
+    grid-template-columns: 1fr;
+  }
+}
 .link-row {
   display: flex;
   align-items: center;

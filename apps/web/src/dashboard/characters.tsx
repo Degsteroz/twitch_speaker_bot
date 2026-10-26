@@ -355,7 +355,9 @@ export function CustomCharacters({
       {data.shop.length ? (
         <div className="character-grid">{data.shop.map(tile)}</div>
       ) : (
-        <p className="muted">Пока пусто. Станьте первой — отправьте свою героиню в магазин.</p>
+        <p className="muted">
+          Пока пусто. Отправьте свою героиню в магазин — она будет здесь первой.
+        </p>
       )}
     </Card>
   );

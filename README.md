@@ -604,6 +604,18 @@ Backup использует custom/compressed `pg_dump`, атомарно пер
 Например, hook может выполнять `rclone copy "$1" remote:roastbot/`. Проверяйте
 restore на отдельном окружении регулярно.
 
+Расписание на сервере (`crontab -e`), бэкап каждую ночь:
+
+```cron
+30 4 * * * cd /opt/roastbot && ./deploy/backup.sh >> deploy/backups/backup.log 2>&1
+```
+
+Копия вне сервера — на Mac: `./deploy/mac/install-backup-pull.sh user@host`. Mac каждый день в
+5:30 забирает архивы по SSH в `~/Backups/roastbot` (30 дней), уведомляет, если забрать не вышло
+или свежих архивов нет двое суток. Лог — `~/Library/Logs/roastbot-backup.log`. Без
+`TOKEN_ENCRYPTION_KEY` из `deploy/.env` токены Twitch из архива не расшифруются: храните копию
+`.env` отдельно, например в менеджере паролей.
+
 Restore требует явного guard, проверяет каталог архива через `pg_restore`,
 останавливает API/worker/Twitch, восстанавливает архив в отдельную базу `<db>_restore` и
 только после полного успеха подменяет ею рабочую. Прежняя база остаётся как

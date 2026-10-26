@@ -4,6 +4,7 @@ import { useEffect, useRef, useState, type SyntheticEvent } from "react";
 import { api, authUrl, CHARACTER_NAMES, post } from "./api.js";
 import tsundereArt from "./assets/tsundere.webp";
 import yandereArt from "./assets/yandere.webp";
+import { clipEmbedUrl, REVIEWS } from "./reviews.js";
 import { errorText, Logo } from "./ui.js";
 
 export const AUTH_ERRORS: Record<string, string> = {
@@ -33,6 +34,57 @@ interface ShowcaseRoast {
   /** A premium character's name; null for Mitsuki and Ai. */
   characterName: string | null;
   channel: string;
+}
+
+/** What streamers said after trying the bot, with a clip from that stream. */
+function Reviews() {
+  if (!REVIEWS.length) return null;
+  return (
+    <section className="landing-section">
+      <p className="eyebrow">ОТЗЫВЫ</p>
+      <h2>Что говорят стримеры</h2>
+      <div className="reviews">
+        {REVIEWS.map((review) => (
+          <article className="card review" key={review.channel}>
+            {review.clip && (
+              <div className="review-clip">
+                <iframe
+                  src={clipEmbedUrl(review.clip, location.hostname)}
+                  title={`Клип со стрима ${review.channel}`}
+                  loading="lazy"
+                  allowFullScreen
+                />
+              </div>
+            )}
+            <div className="review-body">
+              {review.text.map((paragraph) => (
+                <p key={paragraph}>{paragraph}</p>
+              ))}
+              <a
+                className="review-author"
+                href={`https://www.twitch.tv/${review.channel}`}
+                target="_blank"
+                rel="noreferrer"
+              >
+                <img
+                  src={review.avatar}
+                  alt=""
+                  width={40}
+                  height={40}
+                  loading="lazy"
+                  referrerPolicy="no-referrer"
+                  onError={(event) => {
+                    event.currentTarget.hidden = true;
+                  }}
+                />
+                <span>{review.channel}</span>
+              </a>
+            </div>
+          </article>
+        ))}
+      </div>
+    </section>
+  );
 }
 
 /** Real roasts the streamers starred and the owner approved; hidden while there are none. */
@@ -292,6 +344,7 @@ export function Landing() {
 
       <LandingDemo />
       <Showcase />
+      <Reviews />
 
       <section className="landing-section">
         <p className="eyebrow">ПО СМЫСЛУ</p>
