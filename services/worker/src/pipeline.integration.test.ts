@@ -6,6 +6,7 @@ import type Anthropic from "@anthropic-ai/sdk";
 import { createDatabase } from "@roastbot/db";
 import {
   BLOCKED_OUTPUT_FALLBACK,
+  DASHBOARD_TEST_DAILY_LIMIT,
   storedOverlayRoastSchema,
   type RoastSource
 } from "@roastbot/shared";
@@ -19,6 +20,7 @@ import {
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { processRoast, type PipelineDependencies } from "./pipeline.js";
+import { notifyStreamer, quotaNotice, sendStreamSummaries } from "./telegram.js";
 
 interface FakeReply {
   text: string;
@@ -268,7 +270,8 @@ describe("processRoast against PostgreSQL", () => {
     expect(
       (await processRoast(await job({ source: "dashboard_test" }), deps(anthropic.client))).status
     ).toBe("done");
-    expect(await usage()).toMatchObject({ roasts: 3 });
+    // The test does not spend the monthly quota.
+    expect(await usage()).toMatchObject({ roasts: 2 });
   });
 
   it("stops at the channel quota and then consumes gifted roasts", async () => {
@@ -277,8 +280,8 @@ describe("processRoast against PostgreSQL", () => {
       on conflict(code) do update set monthly_roast_limit=1 returning id`;
     await db.sql`update subscriptions set plan_id=${plan!.id} where user_id=${channel.userId}`;
     const anthropic = fakeAnthropic({ text: "Раз" });
-    const runJob = async () =>
-      processRoast(await job({ source: "dashboard_test" }), deps(anthropic.client));
+    // Raids skip cooldowns, so only the quota holds them back.
+    const runJob = async () => processRoast(await job({ source: "raid" }), deps(anthropic.client));
     expect((await runJob()).status).toBe("done");
     expect(await runJob()).toMatchObject({ status: "skipped", reason: "channel_quota_exceeded" });
     await db.sql`insert into gifted_quota(channel_id,month,amount)
@@ -286,6 +289,23 @@ describe("processRoast against PostgreSQL", () => {
     expect((await runJob()).status).toBe("done");
     expect(await runJob()).toMatchObject({ status: "skipped", reason: "channel_quota_exceeded" });
     await db.sql`update plans set monthly_roast_limit=1000 where code='basic'`;
+  });
+
+  it("gives dashboard tests a daily allowance apart from the monthly quota", async () => {
+    await db.sql`delete from test_usage_daily`;
+    const anthropic = fakeAnthropic({ text: "Раз" });
+    const runTest = async () =>
+      processRoast(await job({ source: "dashboard_test" }), deps(anthropic.client));
+    for (let index = 0; index < DASHBOARD_TEST_DAILY_LIMIT; index += 1) {
+      expect((await runTest()).status).toBe("done");
+    }
+    const calls = anthropic.create.mock.calls.length;
+    expect(await runTest()).toMatchObject({ status: "skipped", reason: "test_limit_reached" });
+    expect(anthropic.create.mock.calls.length).toBe(calls);
+    // Money still counts toward the budget; the roast counter stays untouched.
+    expect(await usage()).toMatchObject({ roasts: 0 });
+    expect(Number((await usage())!.cost_usd)).toBeGreaterThan(0);
+    await db.sql`delete from test_usage_daily`;
   });
 
   it("honours the kill switch and the monthly dollar budget", async () => {
@@ -586,5 +606,174 @@ describe("triggers and targets", () => {
     expect(
       (await processRoast(await job({ source: "reward" }), deps(anthropic.client))).status
     ).toBe("done");
+  });
+});
+
+describe("memory and context", () => {
+  it("tells the character about a regular viewer and the game, but not about a newcomer", async () => {
+    await db.sql`update settings set cooldown_sec=0, user_cooldown_sec=0
+      where channel_id=${channel.channelId}`;
+    const anthropic = fakeAnthropic({ text: "Снова ты." });
+    const run = async (viewerLogin: string) => {
+      anthropic.create.mockClear();
+      await processRoast(
+        { ...(await job({ source: "raid", viewerLogin })), game: "Dota 2" },
+        deps(anthropic.client)
+      );
+      return anthropic.create.mock.calls[0]![0].messages[0]!.content as string;
+    };
+    const first = await run("vasya");
+    expect(first).toContain("<game>Dota 2</game>");
+    expect(first).not.toContain("<history>");
+    const second = await run("vasya");
+    expect(second).toContain("<history>Сегодня: 1, за месяц: 1. Прошлая реплика: «Снова ты.»");
+    expect(await run("petya")).not.toContain("<history>");
+  });
+});
+
+describe("model and voice by plan", () => {
+  it("gives the free plan two premium roasts, then the economy pair, with the overlay address", async () => {
+    await db.sql`update subscriptions set plan_id=(select id from plans where code='free')
+      where user_id=${channel.userId}`;
+    await db.sql`update settings set tone='yandere' where channel_id=${channel.channelId}`;
+    await db.sql`delete from tts_usage_monthly`;
+    const anthropic = fakeAnthropic({ text: "Я всё запомнила." });
+    const pipeline = deps(anthropic.client, (url) =>
+      Promise.resolve(
+        (url as string).includes("yandex")
+          ? new Response(
+              `${JSON.stringify({ result: { audioChunk: { data: Buffer.from("RIFF").toString("base64") } } })}\n`
+            )
+          : new Response(new Uint8Array([82, 73, 70, 70, 1]))
+      )
+    );
+    pipeline.config = {
+      ...pipeline.config,
+      YANDEX_TTS_API_KEY: "test-key",
+      ELEVENLABS_API_KEY: "el-key",
+      ELEVENLABS_VOICE_YANDERE: "voice-ai"
+    };
+
+    const tiers = [];
+    for (let index = 0; index < 3; index += 1) {
+      pipeline.fetch.mockClear();
+      anthropic.create.mockClear();
+      // A test counts toward the premium allowance: the streamer's first roast sounds the best.
+      const outcome = await processRoast(
+        await job({ source: index === 0 ? "dashboard_test" : "raid" }),
+        pipeline
+      );
+      expect(outcome.status).toBe("done");
+      const [row] = await db.sql<{ tier: string; model: string; voice_provider: string }[]>`
+        select tier, model, voice_provider from roasts where id=${outcome.roastId}`;
+      const [generation, classifier] = anthropic.create.mock.calls.map(([request]) => request);
+      tiers.push({
+        ...row,
+        generation: generation!.model,
+        classifier: classifier!.model,
+        voiceUrl: String(pipeline.fetch.mock.calls[0]![0])
+      });
+      const [event] = await db.sql<{ payload: { branding?: boolean } }[]>`
+        select payload from overlay_events where roast_id=${outcome.roastId}`;
+      expect(event!.payload.branding).toBe(true);
+    }
+    expect(tiers.map(({ tier, model, voice_provider }) => [tier, model, voice_provider])).toEqual([
+      ["premium", "claude-opus-5-5", "elevenlabs"],
+      ["premium", "claude-opus-5-5", "elevenlabs"],
+      ["economy", "claude-haiku-5-5", "yandex"]
+    ]);
+    // Economy changes the writer and the voice, never the safety classifier.
+    expect(tiers.map((tier) => tier.classifier)).toEqual(Array(3).fill("claude-sonnet-5-5"));
+    expect(tiers[2]!.voiceUrl).toContain("tts.api.cloud.yandex.net");
+    expect(await usage()).toMatchObject({ roasts: 2 });
+  });
+
+  it("keeps paid plans on the premium pair without the overlay address", async () => {
+    const anthropic = fakeAnthropic({ text: "Раз" });
+    const outcome = await processRoast(await job({ source: "raid" }), deps(anthropic.client));
+    const [row] = await db.sql<{ tier: string; payload: { branding?: boolean } }[]>`
+      select r.tier, o.payload from roasts r join overlay_events o on o.roast_id=r.id
+      where r.id=${outcome.roastId}`;
+    expect(row!.tier).toBe("premium");
+    expect(row!.payload).not.toHaveProperty("branding");
+  });
+});
+
+describe("viewer opt-out", () => {
+  it("skips the viewer's chat triggers and turns their paid events on the streamer", async () => {
+    await db.sql`insert into viewer_optouts(channel_id,viewer_login)
+      values(${channel.channelId},'shy')`;
+    const anthropic = fakeAnthropic({ text: "Стример, держись." });
+    expect(
+      await processRoast(
+        await job({ source: "chat_keyword", viewerLogin: "Shy" }),
+        deps(anthropic.client)
+      )
+    ).toMatchObject({ status: "skipped", reason: "viewer_opted_out" });
+    expect(anthropic.create).not.toHaveBeenCalled();
+    await processRoast(await job({ source: "raid", viewerLogin: "shy" }), deps(anthropic.client));
+    expect(anthropic.create.mock.calls[0]![0].system as string).toContain(
+      "подколов стримера из <streamer>"
+    );
+  });
+});
+
+describe("streamer Telegram", () => {
+  const telegramDeps = () => {
+    const sent: { chat_id: unknown; text: string }[] = [];
+    const fetcher = vi.fn((_url: string | URL | Request, init?: RequestInit) => {
+      sent.push(JSON.parse(init!.body as string) as { chat_id: unknown; text: string });
+      return Promise.resolve(Response.json({ ok: true, result: true }));
+    });
+    const config = {
+      ...deps(fakeAnthropic({ text: "x" }).client).config,
+      TELEGRAM_BOT_TOKEN: "1:t"
+    };
+    return { sent, fetcher: fetcher as unknown as typeof globalThis.fetch, config };
+  };
+
+  it("warns about the quota at 80% and at the end, once a month each", () => {
+    expect(quotaNotice("c", "2026-10", 7, 10, undefined)).toBeNull();
+    expect(quotaNotice("c", "2026-10", 8, 10, "https://app")).toMatchObject({
+      kind: "quota_80",
+      text: expect.stringContaining("осталось 2 из 10") as unknown
+    });
+    expect(quotaNotice("c", "2026-10", 10, 10, undefined)?.kind).toBe("quota_100");
+  });
+
+  it("sends a notification once per period and only to a linked chat", async () => {
+    const { sent, fetcher, config } = telegramDeps();
+    const notice = {
+      channelId: channel.channelId,
+      kind: "quota_80",
+      period: "2026-10",
+      text: "Почти всё"
+    };
+    expect(await notifyStreamer(worker.client, config, notice, fetcher)).toBe(false);
+    await db.sql`insert into telegram_accounts(channel_id,chat_id) values(${channel.channelId},42)`;
+    expect(await notifyStreamer(worker.client, config, notice, fetcher)).toBe(true);
+    expect(await notifyStreamer(worker.client, config, notice, fetcher)).toBe(false);
+    expect(sent).toEqual([expect.objectContaining({ chat_id: "42", text: "Почти всё" })]);
+  });
+
+  it("sums up a stream after it has been quiet for 45 minutes, once", async () => {
+    const { sent, fetcher, config } = telegramDeps();
+    await db.sql`insert into telegram_accounts(channel_id,chat_id) values(${channel.channelId},43)`;
+    for (const viewer of ["vasya", "vasya", "petya"]) {
+      const eventId = await createTestEvent(db.sql, channel.channelId);
+      await db.sql`insert into roasts(channel_id,event_id,source,viewer_login,output_text,status,
+          tone,voice,toxicity,created_at,favorite_at)
+        values(${channel.channelId},${eventId},'chat_keyword',${viewer},'Ну и катка','done',
+          'tsundere','female',2,now()-interval '1 hour',
+          ${viewer === "petya" ? new Date() : null})`;
+    }
+    await sendStreamSummaries(worker.client, config, fetcher);
+    const mine = sent.filter((message) => message.chat_id === "43");
+    expect(mine).toHaveLength(1);
+    expect(mine[0]!.text).toContain("прозвучало роастов: 3");
+    expect(mine[0]!.text).toContain("@vasya: 2");
+    expect(mine[0]!.text).toContain("лучший: «Ну и катка»");
+    await sendStreamSummaries(worker.client, config, fetcher);
+    expect(sent.filter((message) => message.chat_id === "43")).toHaveLength(1);
   });
 });

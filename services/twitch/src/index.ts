@@ -4,8 +4,10 @@ import { createDatabase } from "@roastbot/db";
 import {
   COMMAND_PLANS,
   COOLDOWN_SOURCES,
+  gameContext,
   ROAST_REQUESTED_QUEUE,
   ROAST_REQUESTED_QUEUE_OPTIONS,
+  TELEGRAM_NOTIFY_QUEUE,
   triggerSettingsSchema,
   type TriggerSettings
 } from "@roastbot/shared";
@@ -27,6 +29,7 @@ import {
   chatTrigger,
   donationRoast,
   eventRoast,
+  optOutCommand,
   subscriptionSpecs,
   type SubscriptionSpec
 } from "./triggers.js";
@@ -39,7 +42,14 @@ const config = z
     TOKEN_ENCRYPTION_KEY: z.string().regex(/^[a-fA-F0-9]{64}$/u),
     // Optional: without both, connected DonationAlerts accounts are not listened to.
     DONATIONALERTS_CLIENT_ID: z.string().optional(),
-    DONATIONALERTS_CLIENT_SECRET: z.string().optional()
+    DONATIONALERTS_CLIENT_SECRET: z.string().optional(),
+    // Twitch CLI mock (`twitch event websocket start-server`) for local checks:
+    // ws://127.0.0.1:8080/ws and http://127.0.0.1:8080/eventsub/subscriptions.
+    TWITCH_EVENTSUB_WS_URL: z.string().url().default("wss://eventsub.wss.twitch.tv/ws"),
+    TWITCH_EVENTSUB_SUBSCRIPTIONS_URL: z
+      .string()
+      .url()
+      .default("https://api.twitch.tv/helix/eventsub/subscriptions")
   })
   .parse(process.env);
 
@@ -49,6 +59,7 @@ const boss = new PgBoss(config.DATABASE_URL);
 boss.on("error", (error) => console.error("pg-boss:", error));
 await boss.start();
 await boss.createQueue(ROAST_REQUESTED_QUEUE, { ...ROAST_REQUESTED_QUEUE_OPTIONS });
+await boss.createQueue(TELEGRAM_NOTIFY_QUEUE);
 
 interface ChannelRow {
   id: string;
@@ -124,6 +135,17 @@ chat.on("message", (channelName, tags, message, self) => {
   const channel = channelByLogin.get(channelName.replace(/^#/u, "").toLowerCase());
   if (!channel) return;
   const viewerLogin = tags.username ?? "viewer";
+  const optOut = optOutCommand(message);
+  if (optOut) {
+    // The viewer's own wish about themselves; the streamer sees the list in the panel.
+    void (
+      optOut === "stop"
+        ? sql`insert into viewer_optouts(channel_id,viewer_login) values(${channel.id},${viewerLogin})
+          on conflict do nothing`
+        : sql`delete from viewer_optouts where channel_id=${channel.id} and viewer_login=${viewerLogin}`
+    ).catch(console.error);
+    return;
+  }
   const roast = chatTrigger(
     {
       message,
@@ -148,11 +170,47 @@ chat.on("message", (channelName, tags, message, self) => {
       viewerLogin,
       inputText: roast.inputText,
       target: roast.target,
+      ...(await withGame(channel)),
       raw: { tags, message }
     });
   })().catch(console.error);
 });
 await chat.connect();
+
+// The channel's category, for the prompt. One Helix call per channel per 10 minutes at most, and
+// a failure only costs the context: the roast goes out without a game.
+const GAME_TTL_MS = 10 * 60_000;
+const gameCache = new Map<string, { game: string | undefined; at: number }>();
+async function channelGame(channel: Channel): Promise<string | undefined> {
+  const cached = gameCache.get(channel.id);
+  if (cached && Date.now() - cached.at < GAME_TTL_MS) return cached.game;
+  let game: string | undefined;
+  try {
+    const response = await fetch(
+      `https://api.twitch.tv/helix/channels?broadcaster_id=${encodeURIComponent(channel.twitchId)}`,
+      {
+        headers: {
+          Authorization: `Bearer ${await accessToken(channel)}`,
+          "Client-Id": config.TWITCH_CLIENT_ID
+        },
+        signal: AbortSignal.timeout(2_000)
+      }
+    );
+    if (response.ok) {
+      const body = (await response.json()) as { data?: { game_name?: unknown }[] };
+      const name = body.data?.[0]?.game_name;
+      game = gameContext(typeof name === "string" ? name : undefined);
+    }
+  } catch (error) {
+    console.warn(`Twitch category for ${channel.twitchLogin}:`, error);
+  }
+  gameCache.set(channel.id, { game, at: Date.now() });
+  return game;
+}
+const withGame = async (channel: Channel) => {
+  const game = await channelGame(channel);
+  return game ? { game } : {};
+};
 
 async function accessToken(channel: Channel): Promise<string> {
   if (channel.expiresAt.getTime() > Date.now() + 120_000) {
@@ -222,7 +280,7 @@ class EventSubConnection {
     return specsKey(this.channel);
   }
 
-  start(url = "wss://eventsub.wss.twitch.tv/ws", subscribeOnWelcome = true): void {
+  start(url = config.TWITCH_EVENTSUB_WS_URL, subscribeOnWelcome = true): void {
     if (this.stopped) return;
     const socket = new WebSocket(url);
     this.socket = socket;
@@ -287,6 +345,7 @@ class EventSubConnection {
           results[spec.type] = await this.subscribe(session.id, spec);
         }
         await saveEventSubState(this.channel.id, true, results);
+        await notifyRejected(this.channel, results);
       }
       this.failures = 0;
       return;
@@ -332,6 +391,7 @@ class EventSubConnection {
       inputText: roast.inputText,
       target: roast.target,
       ...(roast.eventSummary ? { eventSummary: roast.eventSummary } : {}),
+      ...(await withGame(this.channel)),
       raw: JSON.parse(raw) as JSONValue
     });
   }
@@ -343,7 +403,7 @@ class EventSubConnection {
     retryUnauthorized = true
   ): Promise<string> {
     const token = await accessToken(this.channel);
-    const response = await fetch("https://api.twitch.tv/helix/eventsub/subscriptions", {
+    const response = await fetch(config.TWITCH_EVENTSUB_SUBSCRIPTIONS_URL, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${token}`,
@@ -368,6 +428,22 @@ class EventSubConnection {
     const reason = `${String(response.status)}${typeof body.message === "string" ? ` ${body.message}` : ""}`;
     console.error(`EventSub ${this.channel.twitchLogin}: ${spec.type} rejected (${reason})`);
     return reason.slice(0, 200);
+  }
+}
+
+/** Tells the streamer's Telegram once a day per type that Twitch refused a subscription. */
+async function notifyRejected(channel: Channel, results: Record<string, string>): Promise<void> {
+  const day = new Date().toISOString().slice(0, 10);
+  for (const [type, result] of Object.entries(results)) {
+    if (result === "ok") continue;
+    await boss
+      .send(TELEGRAM_NOTIFY_QUEUE, {
+        channelId: channel.id,
+        kind: `eventsub:${type}`,
+        period: day,
+        text: `Twitch не принял подписку на ${type} (${result}). Награды и события могут не приходить: перезайдите в панель RoastBot через Twitch.`
+      })
+      .catch(console.error);
   }
 }
 
@@ -477,6 +553,7 @@ async function reconcileDonations(channels: Channel[]): Promise<void> {
           inputText: roast.inputText,
           target: roast.target,
           ...(roast.eventSummary ? { eventSummary: roast.eventSummary } : {}),
+          ...(await withGame(channel)),
           raw: donation as JSONValue
         });
       },

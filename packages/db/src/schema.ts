@@ -5,6 +5,7 @@ import {
   boolean,
   check,
   char,
+  date,
   index,
   integer,
   jsonb,
@@ -25,7 +26,11 @@ export const userStatusEnum = pgEnum("user_status", ["active", "suspended", "pen
 export const toneEnum = pgEnum("tone", ["tsundere", "yandere"]);
 export const voiceEnum = pgEnum("voice", ["male", "female"]);
 export const planCodeEnum = pgEnum("plan_code", ["free", "basic", "premium"]);
-export const subscriptionSourceEnum = pgEnum("subscription_source", ["manual"]);
+export const subscriptionSourceEnum = pgEnum("subscription_source", [
+  "manual",
+  "invite",
+  "telegram_stars"
+]);
 export const eventTypeEnum = pgEnum("event_type", [
   "chat_command",
   "reward",
@@ -140,12 +145,27 @@ export const plans = pgTable(
     code: planCodeEnum("code").notNull(),
     monthlyRoastLimit: integer("monthly_roast_limit").notNull(),
     monthlyTtsLimit: integer("monthly_tts_limit").notNull(),
+    // Roasts a month on the global model and the best voice; null means all of them.
+    premiumRoasts: integer("premium_roasts"),
+    economyModel: text("economy_model").notNull().default("claude-haiku-5-5"),
+    economyVoice: text("economy_voice").notNull().default("yandex"),
+    // Telegram Stars price of 30 days; null means the plan is not for sale.
+    starsPrice: integer("stars_price"),
     createdAt: createdAt()
   },
   (table) => [
     uniqueIndex("plans_code_uidx").on(table.code),
     check("plans_roast_limit_check", sql`${table.monthlyRoastLimit} >= 0`),
-    check("plans_tts_limit_check", sql`${table.monthlyTtsLimit} >= 0`)
+    check("plans_tts_limit_check", sql`${table.monthlyTtsLimit} >= 0`),
+    check(
+      "plans_premium_roasts_check",
+      sql`${table.premiumRoasts} is null or ${table.premiumRoasts} >= 0`
+    ),
+    check("plans_economy_voice_check", sql`${table.economyVoice} in ('yandex', 'piper')`),
+    check(
+      "plans_stars_price_check",
+      sql`${table.starsPrice} is null or ${table.starsPrice} between 1 and 10000`
+    )
   ]
 );
 
@@ -260,6 +280,13 @@ export const roasts = pgTable(
     error: text("error"),
     // Channel-points verdict; null for plain roasts.
     verdict: text("verdict"),
+    // What the roast used: premium or economy tier, the generating model, the voice that spoke.
+    tier: text("tier"),
+    model: text("model"),
+    voiceProvider: text("voice_provider"),
+    // The streamer starred it; the owner approved it for the landing page.
+    favoriteAt: timestamp("favorite_at", { withTimezone: true }),
+    showcaseApprovedAt: timestamp("showcase_approved_at", { withTimezone: true }),
     moderationReviewedAt: timestamp("moderation_reviewed_at", { withTimezone: true }),
     createdAt: createdAt()
   },
@@ -277,6 +304,10 @@ export const roasts = pgTable(
     check(
       "roasts_verdict_check",
       sql`${table.verdict} is null or ${table.verdict} in ('agree', 'mixed', 'refuse')`
+    ),
+    check(
+      "roasts_tier_check",
+      sql`${table.tier} is null or ${table.tier} in ('premium', 'economy')`
     )
   ]
 );
@@ -293,15 +324,34 @@ export const usageMonthly = pgTable(
     tokensOut: integer("tokens_out").notNull().default(0),
     ttsChars: integer("tts_chars").notNull().default(0),
     costUsd: numeric("cost_usd", { precision: 12, scale: 6 }).notNull().default("0"),
+    // Roasts this month on the premium tier, counted against plans.premium_roasts.
+    premiumRoasts: integer("premium_roasts").notNull().default(0),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow()
   },
   (table) => [
     primaryKey({ columns: [table.channelId, table.month] }),
+    check("usage_monthly_premium_roasts_check", sql`${table.premiumRoasts} >= 0`),
     check("usage_monthly_month_check", sql`${table.month} ~ '^[0-9]{4}-(0[1-9]|1[0-2])$'`),
     check(
       "usage_monthly_counters_check",
       sql`${table.roasts} >= 0 and ${table.tokensIn} >= 0 and ${table.tokensOut} >= 0 and ${table.ttsChars} >= 0 and ${table.costUsd} >= 0`
     )
+  ]
+);
+
+// Dashboard tests and simulated events per channel and UTC day, apart from the monthly quota.
+export const testUsageDaily = pgTable(
+  "test_usage_daily",
+  {
+    channelId: uuid("channel_id")
+      .notNull()
+      .references(() => channels.id, { onDelete: "cascade" }),
+    day: date("day").notNull(),
+    roasts: integer("roasts").notNull().default(0)
+  },
+  (table) => [
+    primaryKey({ name: "test_usage_daily_pk", columns: [table.channelId, table.day] }),
+    check("test_usage_daily_roasts_check", sql`${table.roasts} >= 0`)
   ]
 );
 
@@ -422,6 +472,147 @@ export const invites = pgTable(
     createdAt: createdAt()
   },
   (table) => [check("invites_login_check", sql`${table.login} ~ '^[a-z0-9_]{3,25}$'`)]
+);
+
+// Landing demo answers; the IP only as an HMAC with the day. Texts are redacted after a day.
+export const demoRequests = pgTable(
+  "demo_requests",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    ipHash: text("ip_hash").notNull(),
+    day: date("day").notNull(),
+    inputText: text("input_text"),
+    outputText: text("output_text"),
+    status: text("status").notNull().default("queued"),
+    error: text("error"),
+    audioFile: text("audio_file"),
+    costUsd: numeric("cost_usd", { precision: 10, scale: 6 }).notNull().default("0"),
+    createdAt: createdAt()
+  },
+  (table) => [
+    index("demo_requests_day_ip_idx").on(table.day, table.ipHash),
+    index("demo_requests_created_idx").on(table.createdAt),
+    check(
+      "demo_requests_status_check",
+      sql`${table.status} in ('queued', 'done', 'blocked', 'failed', 'skipped')`
+    ),
+    check("demo_requests_cost_check", sql`${table.costUsd} >= 0`)
+  ]
+);
+
+export const inviteLinks = pgTable(
+  "invite_links",
+  {
+    code: text("code").primaryKey(),
+    note: text("note"),
+    plan: planCodeEnum("plan"),
+    planDays: integer("plan_days"),
+    maxUses: integer("max_uses").notNull().default(1),
+    uses: integer("uses").notNull().default(0),
+    expiresAt: timestamp("expires_at", { withTimezone: true }),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    createdByUserId: uuid("created_by_user_id").references(() => users.id, {
+      onDelete: "set null"
+    }),
+    createdAt: createdAt()
+  },
+  (table) => [
+    check("invite_links_code_check", sql`${table.code} ~ '^[A-Za-z0-9_-]{8,64}$'`),
+    check(
+      "invite_links_uses_check",
+      sql`${table.maxUses} > 0 and ${table.uses} >= 0 and ${table.uses} <= ${table.maxUses}`
+    ),
+    check(
+      "invite_links_plan_check",
+      sql`(${table.plan} is null and ${table.planDays} is null) or (${table.plan} is not null and ${table.planDays} > 0)`
+    )
+  ]
+);
+
+export const inviteLinkUses = pgTable(
+  "invite_link_uses",
+  {
+    code: text("code")
+      .notNull()
+      .references(() => inviteLinks.code, { onDelete: "cascade" }),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    usedAt: timestamp("used_at", { withTimezone: true }).notNull().defaultNow()
+  },
+  (table) => [primaryKey({ name: "invite_link_uses_pk", columns: [table.code, table.userId] })]
+);
+
+export const telegramAccounts = pgTable("telegram_accounts", {
+  channelId: uuid("channel_id")
+    .primaryKey()
+    .references(() => channels.id, { onDelete: "cascade" }),
+  chatId: bigint("chat_id", { mode: "number" }).notNull(),
+  username: text("username"),
+  linkedAt: timestamp("linked_at", { withTimezone: true }).notNull().defaultNow(),
+  lastSummaryAt: timestamp("last_summary_at", { withTimezone: true })
+});
+
+export const telegramLinkTokens = pgTable("telegram_link_tokens", {
+  tokenHash: text("token_hash").primaryKey(),
+  channelId: uuid("channel_id")
+    .notNull()
+    .references(() => channels.id, { onDelete: "cascade" }),
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull()
+});
+
+export const notificationsSent = pgTable(
+  "notifications_sent",
+  {
+    channelId: uuid("channel_id")
+      .notNull()
+      .references(() => channels.id, { onDelete: "cascade" }),
+    kind: text("kind").notNull(),
+    period: text("period").notNull(),
+    sentAt: timestamp("sent_at", { withTimezone: true }).notNull().defaultNow()
+  },
+  (table) => [
+    primaryKey({
+      name: "notifications_sent_pk",
+      columns: [table.channelId, table.kind, table.period]
+    })
+  ]
+);
+
+export const viewerOptouts = pgTable(
+  "viewer_optouts",
+  {
+    channelId: uuid("channel_id")
+      .notNull()
+      .references(() => channels.id, { onDelete: "cascade" }),
+    viewerLogin: text("viewer_login").notNull(),
+    createdAt: createdAt()
+  },
+  (table) => [
+    primaryKey({ name: "viewer_optouts_pk", columns: [table.channelId, table.viewerLogin] })
+  ]
+);
+
+export const starPayments = pgTable(
+  "star_payments",
+  {
+    chargeId: text("charge_id").primaryKey(),
+    channelId: uuid("channel_id").references(() => channels.id, { onDelete: "set null" }),
+    plan: planCodeEnum("plan").notNull(),
+    stars: integer("stars").notNull(),
+    telegramUserId: bigint("telegram_user_id", { mode: "number" }).notNull(),
+    recurring: boolean("recurring").notNull().default(false),
+    validUntil: timestamp("valid_until", { withTimezone: true }).notNull(),
+    subscriptionId: uuid("subscription_id").references(() => subscriptions.id, {
+      onDelete: "set null"
+    }),
+    refundedAt: timestamp("refunded_at", { withTimezone: true }),
+    createdAt: createdAt()
+  },
+  (table) => [
+    index("star_payments_created_idx").on(table.createdAt),
+    check("star_payments_stars_check", sql`${table.stars} > 0`)
+  ]
 );
 
 export const globalSettings = pgTable("global_settings", {

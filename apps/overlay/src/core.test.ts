@@ -37,6 +37,12 @@ describe("overlay protocol", () => {
     expect(previewTone("?preview=tsundere")).toBe("tsundere");
     expect(previewTone("?preview=<script>")).toBeNull();
   });
+  it("shows the service address only when the free plan asks for it", () => {
+    const branded = parseEvent(JSON.stringify({ ...event(), branding: true })) as RoastEvent;
+    expect(branded.branding).toBe(true);
+    const odd = parseEvent(JSON.stringify({ ...event(), branding: "yes" })) as RoastEvent;
+    expect(odd).not.toHaveProperty("branding");
+  });
   it("deduplicates and expires FIFO events", () => {
     const queue = new EventQueue();
     const now = Date.parse("2026-01-01T00:01:00.000Z");

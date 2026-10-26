@@ -14,6 +14,8 @@ const schema = z.object({
   ELEVENLABS_VOICE_YANDERE: z.string().optional(),
   AUDIO_DIR: z.string().default("/data/audio"),
   TELEGRAM_BOT_TOKEN: z.string().optional(),
+  // Optional: the daily Telegram report links straight to failed roasts and the moderation queue.
+  DASHBOARD_URL: z.string().url().optional(),
   TELEGRAM_CHAT_ID: z.string().optional()
 });
 

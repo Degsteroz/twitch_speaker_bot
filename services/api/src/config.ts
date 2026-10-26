@@ -17,7 +17,14 @@ const envSchema = z.object({
   AUDIO_DIR: z.string().default("/data/audio"),
   // Optional integration: without both values the panel hides DonationAlerts.
   DONATIONALERTS_CLIENT_ID: z.string().optional(),
-  DONATIONALERTS_CLIENT_SECRET: z.string().optional()
+  DONATIONALERTS_CLIENT_SECRET: z.string().optional(),
+  // Optional Telegram bot for streamers (notifications, Stars payments); all three or nothing.
+  TELEGRAM_BOT_TOKEN: z.string().optional(),
+  TELEGRAM_BOT_USERNAME: z.string().optional(),
+  TELEGRAM_WEBHOOK_SECRET: z
+    .string()
+    .regex(/^[A-Za-z0-9_-]{16,256}$/u)
+    .optional()
 });
 
 export type ApiConfig = z.infer<typeof envSchema> & { ownerIds: ReadonlySet<string> };

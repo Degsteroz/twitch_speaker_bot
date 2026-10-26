@@ -1,10 +1,15 @@
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 
 import { describe, expect, it } from "vitest";
 
 import { TOUR_STEPS, TOUR_STORAGE_KEY, isTourDone, markTourDone } from "./tour-steps.js";
 
-const dashboardSource = readFileSync(new URL("./main.tsx", import.meta.url), "utf8");
+// The panel is split into dashboard/*.tsx; a tour target may live in any of them.
+const dashboardDir = new URL("./dashboard/", import.meta.url);
+const dashboardSource = readdirSync(dashboardDir)
+  .filter((name) => name.endsWith(".tsx"))
+  .map((name) => readFileSync(new URL(name, dashboardDir), "utf8"))
+  .join("\n");
 
 describe("streamer tour", () => {
   it("points every step at an element that exists on the dashboard", () => {

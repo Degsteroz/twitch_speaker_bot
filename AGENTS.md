@@ -21,7 +21,7 @@ RoastBot — Twitch-сервис: зритель пишет `!роаст` в ч�
 | `services/worker`  | pg-boss: генерация, модерация, квоты, TTS, outbox оверлея, очистка  |
 | `services/twitch`  | tmi.js (чат) и EventSub WebSocket (награды)                         |
 | `services/tts`     | FastAPI над Piper, `POST /synth` → WAV                              |
-| `apps/web`         | React + Vite: панель стримера, `/admin`, тур                        |
+| `apps/web`         | React + Vite: панель, `/admin` (`src/admin/`, файл на вкладку), тур |
 | `apps/overlay`     | Страница для OBS Browser Source                                     |
 | `packages/db`      | Схема Drizzle, миграции, seed, очистка данных                       |
 | `packages/shared`  | zod-схемы, константы, типы событий                                  |
@@ -49,7 +49,7 @@ pnpm lint
 pnpm format:check
 ```
 
-Ожидаемый результат на момент передачи: `pnpm test` — 245 тестов проходят;
+Ожидаемый результат на момент передачи: `pnpm test` — 279 тестов проходят;
 `pnpm lint` и `pnpm format:check` — без ошибок.
 
 Python-тесты TTS:
@@ -191,6 +191,29 @@ Docker для них не нужен. Anthropic и TTS в тестах заме�
     `services/twitch/src/triggers.ts`; кулдауны только для `COOLDOWN_SOURCES`. Кого жарить решает
     `targetMode` канала в воркере; `!роаст` — только для `COMMAND_PLANS`, проверка и в сервисе
     чата, и в воркере.
+15. **Тир роаста решает `reserve()`.** `bookTier()` под тем же lock бронирует
+    `usage_monthly.premium_roasts` до `plans.premium_roasts`; дальше — `economy_model` и
+    `economy_voice` тарифа, `speak()` начинает с разрешённого голоса. Классификатор на всех
+    тирах один и тот же.
+16. **Тесты из панели (`dashboard_test`) не тратят квоту канала** и не проверяют кулдауны, но
+    проходят kill switch, глобальный лимит и бюджет и бронируют `test_usage_daily` атомарным
+    upsert до `DASHBOARD_TEST_DAILY_LIMIT`. Симулятор формирует событие в API
+    (`services/api/src/simulator.ts`), формулировки — как в `services/twitch/src/triggers.ts`.
+17. **Память и игра — только данные.** История зрителя (`viewerHistory()` в воркере) и игра идут
+    в user-сообщение в `<history>` и `<game>`, экранированные; правило памяти в `system` есть
+    только когда история есть. «Just Chatting» не передаётся (`gameContext()`).
+18. **Оплата звёздами только по подтверждённому платежу.** `pre_checkout_query` проверяет канал
+    и цену, тариф даёт только `successful_payment`; `star_payments.charge_id` — первичный ключ,
+    повторный апдейт ничего не добавляет. Вебхук принимает запрос только с
+    `X-Telegram-Bot-Api-Secret-Token` (`timingSafeEqual`).
+19. **Уведомления стримеру — один раз за период** через `notifications_sent`; уведомление никогда
+    не задерживает и не роняет роаст. Telegram-коды привязки хранятся только как SHA-256.
+20. **Отказ зрителя** (`viewer_optouts`): `OPTOUT_SKIPPED_SOURCES` пропускаются, остальное — на
+    стримера, без истории. Витрина: звезду ставит стример (согласие), показывает владелец.
+21. **Демо на лендинге — те же проверки и общий бюджет.** `processDemo()` в
+    `services/worker/src/demo.ts`: стоп-лист и инъекции до модели, классификатор после, голос
+    только через `speak()` с `piper: false`. Лимиты на IP и в день — в API под advisory lock;
+    расход демо входит в бюджет в `reserve()` (`demoSpendSql`). IP хранится только как HMAC.
 
 ---
 
@@ -198,7 +221,7 @@ Docker для них не нужен. Anthropic и TTS в тестах заме�
 
 | Что                                                                                         | Статус                                          |
 | ------------------------------------------------------------------------------------------- | ----------------------------------------------- |
-| Сборка, lint, format, 245 тестов                                                            | ✅                                              |
+| Сборка, lint, format, 279 тестов                                                            | ✅                                              |
 | Python-тесты TTS                                                                            | ✅                                              |
 | Синтез Piper в Linux-контейнере (arm64, оба голоса)                                         | ✅                                              |
 | Регистрация по заявке и 2FA в браузере                                                      | ⬜ покрыто API-тестами, вживую не проверялось   |

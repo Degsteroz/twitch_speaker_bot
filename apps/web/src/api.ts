@@ -162,6 +162,12 @@ export interface Status {
   plan: string | null;
   /** `!роаст` is a paid feature. */
   commandAvailable: boolean;
+  /** Free plan: the overlay shows the service address under the card. */
+  branding: boolean;
+  /** Roasts left this month on the best model and voice; null when all of them are. */
+  premium: { total: number; remaining: number } | null;
+  /** Dashboard tests today; they never spend the monthly quota. */
+  tests: { limit: number; remaining: number };
   /** The overlay page is open right now (in OBS or a browser tab). */
   overlayConnected: boolean;
   /** Twitch's answer to our EventSub subscriptions; null when the channel needs none. */
@@ -190,10 +196,24 @@ export interface RewardsResponse {
 export interface RoastResult {
   id: string;
   status: "queued" | "blocked_input" | "blocked_output" | "done" | "failed" | "skipped";
+  source: string;
+  viewerLogin: string | null;
+  inputText: string | null;
   outputText: string | null;
   error: string | null;
   latencyMs: number | null;
+  createdAt: string;
+  tier: "premium" | "economy" | null;
+  model: string | null;
+  voiceProvider: "elevenlabs" | "yandex" | "piper" | null;
+  costUsd: number;
+  channelLogin: string;
   overlayStatus: "pending" | "delivered" | "expired" | null;
+  testKind: string | null;
+  /** The streamer starred it: the best of the stream, may go to the landing page. */
+  favorite: boolean;
+  /** The owner approved it for the landing page. */
+  onShowcase: boolean;
 }
 
 export interface ActivityRoast {
@@ -206,6 +226,9 @@ export interface ActivityRoast {
   status: RoastResult["status"];
   error: string | null;
   overlayStatus: RoastResult["overlayStatus"];
+  /** What a dashboard test pretended to be. */
+  testKind: string | null;
+  favorite: boolean;
 }
 export interface Activity {
   roasts: ActivityRoast[];
@@ -227,6 +250,120 @@ export const SOURCE_TEXT: Record<string, string> = {
   donation: "Донат",
   dashboard_test: "Тест"
 };
+
+/** The event simulator: what a dashboard test pretends happened. */
+export type SimulatedKind =
+  | "plain"
+  | "reward"
+  | "keyword"
+  | "donation"
+  | "raid"
+  | "prediction"
+  | "cheer"
+  | "subscription"
+  | "follow";
+export interface SimulatedKindInfo {
+  label: string;
+  /** Whether the viewer writes a text with this event. */
+  text: boolean;
+  placeholder?: string;
+  /** Label of the number field (sum, viewers, bits), if the event has one. */
+  amount?: { label: string; value: number };
+  /** Label of the login field. */
+  who: string;
+}
+export const SIMULATED_KINDS: Record<SimulatedKind, SimulatedKindInfo> = {
+  plain: { label: "Сообщение", text: true, placeholder: "опять проиграл катку", who: "Зритель" },
+  reward: {
+    label: "Награда с текстом",
+    text: true,
+    placeholder: "скажи стримеру, что он плохо стреляет",
+    who: "Зритель"
+  },
+  keyword: {
+    label: "Слово в чате",
+    text: true,
+    placeholder: "ну всё, слился стример",
+    who: "Зритель"
+  },
+  donation: {
+    label: "Донат",
+    text: true,
+    placeholder: "на новую мышку, старая промахивается",
+    amount: { label: "Сумма, ₽", value: 100 },
+    who: "Донатер"
+  },
+  raid: { label: "Рейд", text: false, amount: { label: "Зрителей", value: 40 }, who: "Канал" },
+  prediction: {
+    label: "Итог прогноза",
+    text: false,
+    amount: { label: "Проиграли зрителей", value: 12 },
+    who: "Главный проигравший"
+  },
+  cheer: {
+    label: "Битсы",
+    text: true,
+    placeholder: "держи на патроны",
+    amount: { label: "Битсов", value: 100 },
+    who: "Зритель"
+  },
+  subscription: { label: "Подписка", text: true, placeholder: "", who: "Подписчик" },
+  follow: { label: "Фоллоу", text: false, who: "Фолловер" }
+};
+
+// Rough rates for a small channel, events per minute of stream. They only have to show the
+// order of magnitude: "the quota lasts ten minutes" versus "the whole stream".
+const RATES = {
+  keywordPerWord: 0.5,
+  maxKeywords: 6,
+  reward: 0.3,
+  command: 0.5,
+  follow: 0.5,
+  cheer: 0.05,
+  subscription: 0.05,
+  giftSub: 0.02,
+  raid: 0.01,
+  prediction: 0.03,
+  adBreak: 0.03,
+  donation: 0.05
+};
+
+/** Expected roasts per minute of stream with these triggers; cooldowns cap chat and rewards. */
+export function roastsPerMinute(
+  triggers: Triggers,
+  cooldownSec: number,
+  commandAvailable: boolean
+): number {
+  const chance = (percent: number) => Math.max(0, Math.min(100, percent)) / 100;
+  let throttled =
+    Math.min(triggers.keywords.length, RATES.maxKeywords) *
+    RATES.keywordPerWord *
+    chance(triggers.keywordChancePercent);
+  if (triggers.rewardId) throttled += RATES.reward;
+  if (commandAvailable && triggers.command) throttled += RATES.command;
+  const events = triggers.events;
+  if (events.follow.enabled) throttled += RATES.follow * chance(events.follow.chancePercent);
+  if (cooldownSec > 0) throttled = Math.min(throttled, 60 / cooldownSec);
+  let always = 0;
+  for (const key of [
+    "cheer",
+    "subscription",
+    "giftSub",
+    "raid",
+    "prediction",
+    "adBreak",
+    "donation"
+  ] as const) {
+    if (events[key].enabled) always += RATES[key];
+  }
+  return throttled + always;
+}
+
+/** Minutes of stream the remaining quota lasts, or null when nothing is switched on. */
+export function quotaMinutes(remaining: number, perMinute: number): number | null {
+  if (perMinute <= 0) return null;
+  return Math.floor(remaining / perMinute);
+}
 
 export const SUBSCRIPTION_TEXT: Record<string, string> = {
   "channel.channel_points_custom_reward_redemption.add": "Награда за баллы",
@@ -327,5 +464,6 @@ export const SKIP_REASON_TEXT: Record<string, string> = {
   channel_quota_exceeded: "квота канала закончилась",
   cooldown_active: "действует пауза из «Тонкой настройки»",
   command_not_in_plan: "!роаст недоступен на бесплатном тарифе",
+  test_limit_reached: "тесты на сегодня закончились",
   stale_job: "задача устарела"
 };

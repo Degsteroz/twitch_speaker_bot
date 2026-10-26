@@ -48,6 +48,9 @@ beforeAll(async () => {
     AUDIO_DIR: audioDir,
     DONATIONALERTS_CLIENT_ID: "123",
     DONATIONALERTS_CLIENT_SECRET: "da-secret",
+    TELEGRAM_BOT_TOKEN: "123:test-token",
+    TELEGRAM_BOT_USERNAME: "roastbot_test_bot",
+    TELEGRAM_WEBHOOK_SECRET: "w".repeat(24),
     ownerIds: new Set([OWNER_TWITCH_ID])
   };
   app = await buildApp(config);
@@ -367,6 +370,78 @@ describe("test roast", () => {
       400
     );
   });
+  it("dresses a test as a real event and stops at the daily test allowance", async () => {
+    const response = await call("POST", "/roasts/test", streamer, {
+      kind: "raid",
+      viewerLogin: "raider",
+      inputText: "ignored",
+      amount: 40
+    });
+    expect(response.statusCode).toBe(200);
+    const [job] = await db.sql<{ data: Record<string, unknown> }[]>`
+      select data from pgboss.job where name='roast.requested'
+      and data->>'channelId'=${streamer.channelId}`;
+    expect(job!.data).toMatchObject({
+      source: "dashboard_test",
+      viewerLogin: "raider",
+      inputText: "",
+      target: "viewer",
+      eventSummary: "Рейд с канала raider: 40 зрителей"
+    });
+    const { roastId } = response.json<{ roastId: string }>();
+    expect((await call("GET", `/roasts/${roastId}`, streamer)).json()).toMatchObject({
+      testKind: "raid",
+      channelLogin: streamer.login
+    });
+    // The owner opens any channel's roast through the admin endpoint.
+    expect((await call("GET", `/admin/roasts/${roastId}`, owner)).statusCode).toBe(200);
+
+    expect((await call("GET", "/status", streamer)).json()).toMatchObject({
+      tests: { limit: 5, remaining: 5 },
+      premium: { total: 2, remaining: 2 },
+      branding: true
+    });
+    await db.sql`insert into test_usage_daily(channel_id,day,roasts)
+      values(${streamer.channelId},${new Date().toISOString().slice(0, 10)},5)`;
+    const limited = await call("POST", "/roasts/test", streamer, { viewerLogin: "tester" });
+    expect(limited.statusCode).toBe(429);
+    expect(limited.json()).toMatchObject({ error: { code: "test_limit_reached" } });
+  });
+});
+
+describe("plan tiers in /admin", () => {
+  it("lets the owner change the premium allowance, model and voice, but not the limit", async () => {
+    const plans = (await call("GET", "/admin/plans", owner)).json<{ code: string }[]>();
+    expect(plans).toContainEqual({
+      code: "free",
+      monthlyRoastLimit: 10,
+      premiumRoasts: 2,
+      economyModel: "claude-haiku-5-5",
+      economyVoice: "yandex"
+    });
+    const body = { premiumRoasts: 3, economyModel: "claude-sonnet-5-5", economyVoice: "piper" };
+    expect((await call("PUT", "/admin/plans/free", owner, body)).statusCode).toBe(200);
+    expect(
+      (await call("PUT", "/admin/plans/free", owner, { ...body, monthlyRoastLimit: 99 })).statusCode
+    ).toBe(400);
+    expect(
+      (await call("PUT", "/admin/plans/free", owner, { ...body, economyVoice: "elevenlabs" }))
+        .statusCode
+    ).toBe(400);
+    expect((await call("PUT", "/admin/plans/free", streamer, body)).statusCode).toBe(403);
+    const [free] = await db.sql`select premium_roasts, economy_model, economy_voice
+      from plans where code='free'`;
+    expect(free).toEqual({
+      premium_roasts: 3,
+      economy_model: "claude-sonnet-5-5",
+      economy_voice: "piper"
+    });
+    await call("PUT", "/admin/plans/free", owner, {
+      premiumRoasts: 2,
+      economyModel: "claude-haiku-5-5",
+      economyVoice: "yandex"
+    });
+  });
 });
 
 describe("overlay websocket", () => {
@@ -499,7 +574,7 @@ describe("back-office", () => {
 });
 
 /** Runs the OAuth callback with Twitch mocked and returns the issued session cookie. */
-async function twitchLogin(user: { id: string; login: string }) {
+async function twitchLogin(user: { id: string; login: string }, extraCookie = "") {
   globalThis.fetch = vi.fn((url: string | URL | Request) =>
     Promise.resolve(
       (url instanceof Request ? url.url : url.toString()).includes("oauth2/token")
@@ -515,7 +590,7 @@ async function twitchLogin(user: { id: string; login: string }) {
   const response = await app.inject({
     method: "GET",
     url: "/auth/twitch/callback?code=code&state=state",
-    headers: { cookie: "oauth_state=state" }
+    headers: { cookie: `oauth_state=state${extraCookie ? `; ${extraCookie}` : ""}` }
   });
   expect(response.headers.location).toBe("https://app.test");
   return sessionCookie(response);
@@ -782,5 +857,256 @@ describe("DonationAlerts integration", () => {
     const [count] = await db.sql<{ n: number }[]>`
       select count(*)::int n from donationalerts_accounts where channel_id in (${streamer.channelId}, ${owner.channelId})`;
     expect(count!.n).toBe(0);
+  });
+});
+
+describe("landing demo", () => {
+  const ask = (text: string, ip = "203.0.113.7") =>
+    app.inject({ method: "POST", url: "/demo", payload: { text }, remoteAddress: ip });
+
+  it("answers anonymous visitors three times a day per IP and only shows the answer to them", async () => {
+    await db.sql`delete from demo_requests`;
+    expect(
+      (await app.inject({ method: "GET", url: "/demo", remoteAddress: "203.0.113.7" })).json()
+    ).toEqual({ enabled: true, remaining: 3, perDay: 3 });
+    const first = await ask("стример опять слил");
+    expect(first.statusCode).toBe(200);
+    const { id } = first.json<{ id: string }>();
+    const [job] = await db.sql<{ data: { demoId: string } }[]>`
+      select data from pgboss.job where name='demo.requested' and data->>'demoId'=${id}`;
+    expect(job).toBeDefined();
+    await ask("раз");
+    await ask("два");
+    const limited = await ask("три");
+    expect(limited.statusCode).toBe(429);
+    expect(limited.json()).toMatchObject({ error: { code: "demo_limit" } });
+    expect((await ask("с другого адреса", "198.51.100.1")).statusCode).toBe(200);
+
+    expect(
+      (await app.inject({ method: "GET", url: `/demo/${id}`, remoteAddress: "203.0.113.7" })).json()
+    ).toEqual({ status: "queued", text: null, audioUrl: null });
+    expect(
+      (await app.inject({ method: "GET", url: `/demo/${id}`, remoteAddress: "198.51.100.1" }))
+        .statusCode
+    ).toBe(404);
+    // The IP is never stored as it is.
+    const stored = await db.sql`select 1 from demo_requests where ip_hash like '%203.0.113%'`;
+    expect(stored).toHaveLength(0);
+  });
+
+  it("is hidden when the owner sets the daily limit to zero", async () => {
+    await db.sql`insert into global_settings(key,value) values('demo_daily_limit','0'::jsonb)
+      on conflict(key) do update set value=excluded.value`;
+    expect((await app.inject({ method: "GET", url: "/demo" })).json()).toMatchObject({
+      enabled: false
+    });
+    expect((await ask("привет")).statusCode).toBe(404);
+    await db.sql`update global_settings set value='30'::jsonb where key='demo_daily_limit'`;
+  });
+});
+
+describe("invite links", () => {
+  it("let a new streamer in without review and grant the plan once", async () => {
+    const created = await call("POST", "/admin/invite-links", owner, {
+      note: "promo",
+      plan: "premium",
+      planDays: 30,
+      maxUses: 1
+    });
+    expect(created.statusCode).toBe(200);
+    const { code } = created.json<{ code: string }>();
+    expect((await call("GET", `/invite-links/${code}`)).json()).toEqual({
+      plan: "premium",
+      planDays: 30
+    });
+    expect((await call("POST", "/admin/invite-links", streamer, {})).statusCode).toBe(403);
+
+    const id = randomTwitchId();
+    const cookie = await twitchLogin({ id, login: `promo_${id}` }, `invite_link=${code}`);
+    expect((await call("GET", "/me/session", cookie)).json()).toMatchObject({ status: "active" });
+    expect((await call("GET", "/status", cookie)).json()).toMatchObject({
+      plan: "premium",
+      commandAvailable: true
+    });
+
+    // The only use is spent: the next newcomer waits for review as usual.
+    const other = randomTwitchId();
+    const late = await twitchLogin({ id: other, login: `late_${other}` }, `invite_link=${code}`);
+    expect((await call("GET", "/me/session", late)).json()).toMatchObject({ status: "pending" });
+    expect((await call("GET", `/invite-links/${code}`)).statusCode).toBe(404);
+    const links = (await call("GET", "/admin/invite-links", owner)).json<
+      { code: string; uses: number; usedBy: string[] }[]
+    >();
+    expect(links.find((link) => link.code === code)).toMatchObject({
+      uses: 1,
+      usedBy: [`promo_${id}`]
+    });
+  });
+});
+
+describe("favorites and opt-outs", () => {
+  async function playedRoast(channel: TestChannel, text: string) {
+    const eventId = await createTestEvent(db.sql, channel.channelId);
+    const [roast] = await db.sql<{ id: string }[]>`
+      insert into roasts(channel_id,event_id,source,viewer_login,input_text,output_text,status,
+        tone,voice,toxicity)
+      values(${channel.channelId},${eventId},'chat_command','secret_viewer','вход',${text},'done',
+        'yandere','female',2) returning id`;
+    return roast!.id;
+  }
+
+  it("shows a starred roast on the landing only after the owner approves it", async () => {
+    const id = await playedRoast(streamer, "Опять ты, мой хороший.");
+    expect(
+      (await call("POST", `/roasts/${id}/favorite`, owner, { favorite: true })).statusCode
+    ).toBe(404);
+    expect(
+      (await call("POST", `/roasts/${id}/favorite`, streamer, { favorite: true })).json()
+    ).toEqual({ id, favorite: true });
+    const showcase = async () => (await call("GET", "/showcase")).json<{ id: string }[]>();
+    expect((await showcase()).some((roast) => roast.id === id)).toBe(false);
+    expect(
+      (await call("POST", `/admin/roasts/${id}/showcase`, owner, { approved: true })).statusCode
+    ).toBe(200);
+    const shown = (await showcase()).find((roast) => roast.id === id);
+    expect(shown).toEqual({
+      id,
+      text: "Опять ты, мой хороший.",
+      tone: "yandere",
+      channel: streamer.login
+    });
+    // Taking the star back takes it off the landing page.
+    await call("POST", `/roasts/${id}/favorite`, streamer, { favorite: false });
+    expect((await showcase()).some((roast) => roast.id === id)).toBe(false);
+  });
+
+  it("lists viewers who opted out and lets the streamer clear one", async () => {
+    await db.sql`insert into viewer_optouts(channel_id,viewer_login)
+      values(${streamer.channelId},'shy_viewer')`;
+    expect((await call("GET", "/optouts", streamer)).json()).toEqual([
+      expect.objectContaining({ viewerLogin: "shy_viewer" })
+    ]);
+    expect((await call("GET", "/optouts", owner)).json()).toEqual([]);
+    await call("DELETE", "/optouts/shy_viewer", streamer);
+    expect((await call("GET", "/optouts", streamer)).json()).toEqual([]);
+  });
+});
+
+describe("Telegram bot and Stars", () => {
+  const SECRET = "w".repeat(24);
+  const calls: { method: string; body: Record<string, unknown> }[] = [];
+  const telegram = (results: Record<string, unknown> = {}) => {
+    calls.length = 0;
+    globalThis.fetch = vi.fn((url: string | URL | Request, init?: RequestInit) => {
+      const method = (url instanceof Request ? url.url : url.toString()).split("/").pop()!;
+      calls.push({
+        method,
+        body: JSON.parse((init?.body as string | undefined) ?? "{}") as Record<string, unknown>
+      });
+      return Promise.resolve(Response.json({ ok: true, result: results[method] ?? true }));
+    });
+  };
+  const webhook = (update: unknown, secret = SECRET) =>
+    app.inject({
+      method: "POST",
+      url: "/telegram/webhook",
+      headers: { "content-type": "application/json", "x-telegram-bot-api-secret-token": secret },
+      payload: JSON.stringify(update)
+    });
+
+  it("links the streamer's chat with a one-time code", async () => {
+    telegram();
+    const { url } = (await call("POST", "/integrations/telegram/link", streamer)).json<{
+      url: string;
+    }>();
+    expect(url).toMatch(/^https:\/\/t\.me\/roastbot_test_bot\?start=[\w-]+$/u);
+    const code = url.split("start=")[1]!;
+    expect(
+      (await webhook({ message: { chat: { id: 1 }, text: "/start x" } }, "nope")).statusCode
+    ).toBe(403);
+    const start = {
+      message: {
+        chat: { id: 555 },
+        from: { id: 555, username: "streamer_tg" },
+        text: `/start ${code}`
+      }
+    };
+    expect((await webhook(start)).statusCode).toBe(200);
+    expect(calls[0]).toMatchObject({ method: "sendMessage", body: { chat_id: 555 } });
+    expect(String(calls[0]!.body.text)).toContain(`#${streamer.login}`);
+    expect((await call("GET", "/integrations/telegram", streamer)).json()).toMatchObject({
+      connected: true,
+      username: "streamer_tg"
+    });
+    // The code works once.
+    await webhook(start);
+    expect(String(calls[1]!.body.text)).toContain("устарела");
+  });
+
+  it("sells a 30-day Stars plan, books each payment once and refunds it", async () => {
+    telegram({ createInvoiceLink: "https://t.me/$invoice" });
+    const checkout = await call("POST", "/billing/checkout", streamer, { plan: "basic" });
+    expect(checkout.json()).toEqual({ url: "https://t.me/$invoice" });
+    const invoice = calls[0]!.body;
+    expect(invoice).toMatchObject({
+      currency: "XTR",
+      prices: [{ amount: 600 }],
+      subscription_period: 2_592_000,
+      payload: `rb1:${streamer.channelId}:basic`
+    });
+
+    telegram();
+    const precheck = (amount: number) =>
+      webhook({
+        pre_checkout_query: {
+          id: "q1",
+          from: { id: 777 },
+          currency: "XTR",
+          total_amount: amount,
+          invoice_payload: invoice.payload
+        }
+      });
+    await precheck(600);
+    expect(calls[0]).toMatchObject({ method: "answerPreCheckoutQuery", body: { ok: true } });
+    await precheck(1);
+    expect(calls[1]).toMatchObject({ method: "answerPreCheckoutQuery", body: { ok: false } });
+
+    const expires = Math.floor(Date.now() / 1000) + 30 * 86_400;
+    const paid = {
+      message: {
+        chat: { id: 777 },
+        from: { id: 777 },
+        successful_payment: {
+          currency: "XTR",
+          total_amount: 600,
+          invoice_payload: invoice.payload,
+          telegram_payment_charge_id: `charge-${streamer.channelId}`,
+          subscription_expiration_date: expires,
+          is_recurring: true
+        }
+      }
+    };
+    await webhook(paid);
+    await webhook(paid);
+    const payments = await db.sql`select plan, stars from star_payments
+      where channel_id=${streamer.channelId}`;
+    expect(payments).toEqual([{ plan: "basic", stars: 600 }]);
+    expect((await call("GET", "/status", streamer)).json()).toMatchObject({
+      plan: "basic",
+      commandAvailable: true
+    });
+
+    telegram();
+    const refund = await call(
+      "POST",
+      `/admin/payments/${encodeURIComponent(`charge-${streamer.channelId}`)}/refund`,
+      owner
+    );
+    expect(refund.statusCode).toBe(200);
+    expect(calls.map((item) => item.method)).toEqual([
+      "editUserStarSubscription",
+      "refundStarPayment"
+    ]);
+    expect((await call("GET", "/status", streamer)).json()).toMatchObject({ plan: "free" });
   });
 });

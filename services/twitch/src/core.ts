@@ -41,6 +41,8 @@ export async function enqueueEvent(
     inputText: string;
     target: RoastTarget;
     eventSummary?: string;
+    /** The channel's Twitch category, already filtered with gameContext(). */
+    game?: string;
     raw: JSONValue;
   }
 ): Promise<boolean> {
@@ -59,6 +61,7 @@ export async function enqueueEvent(
     inputText: input.inputText.slice(0, 2_000),
     target: input.target,
     ...(input.eventSummary ? { eventSummary: input.eventSummary.slice(0, 500) } : {}),
+    ...(input.game ? { game: input.game.slice(0, 100) } : {}),
     requestedAt: new Date().toISOString()
   });
   return true;

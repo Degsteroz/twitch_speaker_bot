@@ -327,3 +327,16 @@ blockquote {
     font-size: 17px;
   }
 }
+
+/* Free plan: a small service address under the card. */
+#branding {
+  position: absolute;
+  right: 18px;
+  bottom: -30px;
+  margin: 0;
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: #fffb;
+  text-shadow: 0 1px 6px #000c;
+}

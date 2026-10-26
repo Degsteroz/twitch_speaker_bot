@@ -7,6 +7,7 @@ import {
   eventRoast,
   extractDonations,
   matchKeyword,
+  optOutCommand,
   subscriptionSpecs
 } from "./triggers.js";
 
@@ -338,5 +339,15 @@ describe("DonationAlerts", () => {
       push("$alerts:donation_7", 13)
     ].join("\n");
     expect(extractDonations(frame, "$alerts:donation_7").map((item) => item.id)).toEqual([11, 13]);
+  });
+});
+
+describe("optOutCommand", () => {
+  it("recognises the viewer's stop and start in either spelling", () => {
+    expect(optOutCommand("!роаст-стоп")).toBe("stop");
+    expect(optOutCommand("  !Roast-Stop пожалуйста")).toBe("stop");
+    expect(optOutCommand("!роаст-старт")).toBe("start");
+    expect(optOutCommand("!роаст стоп")).toBeNull();
+    expect(optOutCommand("стоп")).toBeNull();
   });
 });

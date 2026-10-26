@@ -1,22 +1,31 @@
 import { createReadStream } from "node:fs";
 import { stat } from "node:fs/promises";
 import { basename, join } from "node:path";
-import { randomBytes, randomUUID } from "node:crypto";
+import { createHmac, randomBytes, randomUUID } from "node:crypto";
 
 import cookie from "@fastify/cookie";
 import jwt from "@fastify/jwt";
 import websocket, { type WebSocket } from "@fastify/websocket";
 import { createDatabase } from "@roastbot/db";
 import {
+  BRANDED_PLANS,
   COMMAND_PLANS,
+  DASHBOARD_TEST_DAILY_LIMIT,
+  DEFAULT_DEMO_DAILY_LIMIT,
+  DEMO_PER_IP_DAILY,
+  DEMO_REQUESTED_QUEUE,
+  DEMO_REQUESTED_QUEUE_OPTIONS,
+  demoRequestSchema,
   DEFAULT_GLOBAL_MONTHLY_ROAST_CAP,
   DEFAULT_MONTHLY_BUDGET_USD,
   DEFAULT_ELEVENLABS_MONTHLY_CHAR_LIMIT,
   DEFAULT_YANDEX_TTS_MONTHLY_LIMIT_RUB,
+  gameContext,
   ROAST_REQUESTED_QUEUE,
   ROAST_REQUESTED_QUEUE_OPTIONS,
   TWITCH_SCOPES,
   channelSettingsSchema,
+  economyVoiceSchema,
   overlayClientEventSchema,
   roastStatusSchema,
   storedOverlayRoastSchema,
@@ -31,6 +40,10 @@ import type { JSONValue, TransactionSql } from "postgres";
 import { z, ZodError } from "zod";
 
 import type { ApiConfig } from "./config.js";
+import { denied, session, type RouteContext, type Session } from "./context.js";
+import { applyInviteLink, inviteCodeSchema, registerInviteRoutes } from "./invites.js";
+import { registerShowcaseRoutes } from "./showcase.js";
+import { registerTelegramRoutes } from "./telegram-bot.js";
 import {
   authorizeUrl as authorizeDonationAlerts,
   exchangeCode as exchangeDonationAlertsCode,
@@ -38,6 +51,7 @@ import {
   type DonationAlertsConfig
 } from "./donationalerts.js";
 import { decryptValue, encryptValue, signAudioPath, verifyAudioSignature } from "./security.js";
+import { simulatedRoast } from "./simulator.js";
 import {
   generateRecoveryCodes,
   generateTotpSecret,
@@ -49,18 +63,11 @@ import {
 import {
   TwitchApiError,
   exchangeCode,
+  getChannelGame,
   getRewards,
   getTwitchUser,
   refreshTwitchToken
 } from "./twitch.js";
-
-interface Session {
-  userId: string;
-  channelId: string;
-  role: "owner" | "user";
-  /** Epoch ms when the second factor was confirmed in this session; absent until then. */
-  mfaAt?: number;
-}
 
 interface OverlayConnection {
   socket: WebSocket;
@@ -69,12 +76,11 @@ interface OverlayConnection {
 }
 
 const SESSION_COOKIE = "roastbot_session";
-
-function session(request: FastifyRequest): Session {
-  return request.user as Session;
-}
+const INVITE_COOKIE = "invite_link";
 
 const currentMonth = () => new Date().toISOString().slice(0, 7);
+const currentDay = () => new Date().toISOString().slice(0, 10);
+const modelSchema = z.string().regex(/^claude-[a-z0-9-]+$/u);
 
 // Global settings the owner may edit, each with its own validation so a typo in /admin can never
 // store a value the worker cannot use.
@@ -82,11 +88,13 @@ const globalSettingSchemas = {
   kill_switch: z.boolean(),
   global_monthly_limit: z.number().int().min(0).max(1_000_000),
   monthly_budget_usd: z.number().min(0).max(10_000),
-  model: z.string().regex(/^claude-[a-z0-9-]+$/u),
-  classifier_model: z.string().regex(/^claude-[a-z0-9-]+$/u),
+  model: modelSchema,
+  classifier_model: modelSchema,
   input_retention_days: z.number().int().min(1).max(30),
   yandex_tts_monthly_limit_rub: z.number().min(0).max(100_000),
-  elevenlabs_monthly_char_limit: z.number().int().min(0).max(10_000_000)
+  elevenlabs_monthly_char_limit: z.number().int().min(0).max(10_000_000),
+  // Landing demo answers a day for the whole service; 0 hides the demo.
+  demo_daily_limit: z.number().int().min(0).max(1_000)
 } as const;
 type GlobalSettingKey = keyof typeof globalSettingSchemas;
 
@@ -107,9 +115,6 @@ type FactorCheck =
   | { ok: true; via: "totp" | "recovery" }
   | { ok: false; status: number; code: string; message: string };
 
-const denied = (reply: FastifyReply, status: number, code: string, message: string) =>
-  reply.code(status).send({ error: { code, message } });
-
 export async function buildApp(config: ApiConfig) {
   const app = Fastify({ logger: config.NODE_ENV !== "test", trustProxy: true });
   const database = createDatabase(config.DATABASE_URL, { applicationName: "roastbot-api" });
@@ -118,6 +123,7 @@ export async function buildApp(config: ApiConfig) {
   boss.on("error", (error) => app.log.error(error, "pg-boss error"));
   await boss.start();
   await boss.createQueue(ROAST_REQUESTED_QUEUE, { ...ROAST_REQUESTED_QUEUE_OPTIONS });
+  await boss.createQueue(DEMO_REQUESTED_QUEUE, { ...DEMO_REQUESTED_QUEUE_OPTIONS });
 
   await app.register(cookie);
   await app.register(jwt, {
@@ -179,6 +185,10 @@ export async function buildApp(config: ApiConfig) {
       return denied(reply, 403, "mfa_required", "Подтвердите вход кодом 2FA");
     }
   };
+
+  // Landing demo money of this month, part of the same budget as the roasts.
+  const demoSpend = (month: string) => sql`(select coalesce(sum(cost_usd),0) from demo_requests
+    where to_char(created_at at time zone 'UTC','YYYY-MM')=${month})`;
 
   // ---- overlay delivery -------------------------------------------------------------------
   const overlayConnections = new Set<OverlayConnection>();
@@ -291,9 +301,14 @@ export async function buildApp(config: ApiConfig) {
     return reply.redirect(url.toString());
   };
 
-  app.get("/auth/twitch", async (_request, reply) => {
+  app.get("/auth/twitch", async (request, reply) => {
     const state = randomBytes(24).toString("base64url");
     reply.setCookie("oauth_state", state, { ...cookieOptions, maxAge: 600 });
+    // /i/<code> sends the visitor here with the link; the callback applies it after login.
+    const invite = inviteCodeSchema.safeParse((request.query as { invite?: unknown }).invite);
+    if (invite.success) {
+      reply.setCookie(INVITE_COOKIE, invite.data, { ...cookieOptions, maxAge: 600 });
+    }
     const url = new URL("https://id.twitch.tv/oauth2/authorize");
     url.search = new URLSearchParams({
       client_id: config.TWITCH_CLIENT_ID,
@@ -322,6 +337,8 @@ export async function buildApp(config: ApiConfig) {
       return dashboardRedirect(reply, "invalid_oauth_state");
     }
     reply.clearCookie("oauth_state", { path: "/" });
+    const inviteLink = inviteCodeSchema.safeParse(request.cookies[INVITE_COOKIE]);
+    reply.clearCookie(INVITE_COOKIE, { path: "/" });
     let token;
     let twitchUser;
     try {
@@ -371,6 +388,8 @@ export async function buildApp(config: ApiConfig) {
         insert into subscriptions (user_id, plan_id)
         select ${user.id}, id from plans where code='free'
         and not exists (select 1 from subscriptions where user_id=${user.id})`;
+      // After the free plan, so a plan the link grants is the newest subscription.
+      if (inviteLink.success) await applyInviteLink(tx, inviteLink.data, user);
       await tx`
         insert into twitch_tokens (channel_id, access_token_ciphertext, refresh_token_ciphertext,
           access_token_iv, access_token_tag, refresh_token_iv, refresh_token_tag, scopes, expires_at)
@@ -815,10 +834,16 @@ export async function buildApp(config: ApiConfig) {
         limit: number;
         gifted: number;
         plan: string | null;
+        premiumRoasts: number | null;
+        premiumUsed: number;
+        testsUsed: number;
       }[]
     >`
       select s.enabled, u.status "userStatus", coalesce(um.roasts,0)::int used, p.code plan,
-        coalesce(p.monthly_roast_limit,0)::int "limit",
+        coalesce(p.monthly_roast_limit,0)::int "limit", p.premium_roasts "premiumRoasts",
+        coalesce(um.premium_roasts,0)::int "premiumUsed",
+        coalesce((select roasts from test_usage_daily
+          where channel_id=c.id and day=${currentDay()}),0)::int "testsUsed",
         coalesce((select sum(amount-used) from gifted_quota
           where channel_id=c.id and month=${month}),0)::int gifted
       from channels c join users u on u.id=c.user_id join settings s on s.channel_id=c.id
@@ -833,7 +858,8 @@ export async function buildApp(config: ApiConfig) {
     const [global] = await sql<
       { used: number; spent: number; cap: number; budget: number; kill: boolean }[]
     >`
-      select coalesce(sum(roasts),0)::int used, coalesce(sum(cost_usd),0)::float8 spent,
+      select coalesce(sum(roasts),0)::int used,
+        (coalesce(sum(cost_usd),0) + ${demoSpend(month)})::float8 spent,
         coalesce((select (value #>> '{}')::int from global_settings where key='global_monthly_limit'),
           ${DEFAULT_GLOBAL_MONTHLY_ROAST_CAP})::int cap,
         coalesce((select (value #>> '{}')::float8 from global_settings where key='monthly_budget_usd'),
@@ -876,6 +902,19 @@ export async function buildApp(config: ApiConfig) {
         : null,
       // `!роаст` is a paid feature; the panel shows the switch disabled on the free plan.
       commandAvailable: COMMAND_PLANS.has(row.plan ?? ""),
+      branding: BRANDED_PLANS.has(row.plan ?? ""),
+      // Best model and voice left this month; null when every roast gets them.
+      premium:
+        row.premiumRoasts === null
+          ? null
+          : {
+              total: row.premiumRoasts,
+              remaining: Math.max(0, row.premiumRoasts - row.premiumUsed)
+            },
+      tests: {
+        limit: DASHBOARD_TEST_DAILY_LIMIT,
+        remaining: Math.max(0, DASHBOARD_TEST_DAILY_LIMIT - row.testsUsed)
+      },
       enabled: row.enabled,
       used: row.used,
       limit: row.limit,
@@ -889,9 +928,30 @@ export async function buildApp(config: ApiConfig) {
   app.get("/status", { preHandler: requireUser }, channelStatus);
   app.get("/quota", { preHandler: requireUser }, channelStatus);
 
-  app.post("/roasts/test", { preHandler: requireUser }, async (request) => {
+  app.post("/roasts/test", { preHandler: requireUser }, async (request, reply) => {
     const body = testRoastRequestSchema.parse(request.body ?? {});
     const { channelId } = session(request);
+    // A quick answer for the panel; the worker's booking under its lock is the real limit.
+    const [tests] = await sql<{ roasts: number }[]>`
+      select roasts from test_usage_daily where channel_id=${channelId} and day=${currentDay()}`;
+    if ((tests?.roasts ?? 0) >= DASHBOARD_TEST_DAILY_LIMIT) {
+      return denied(
+        reply,
+        429,
+        "test_limit_reached",
+        `Тесты на сегодня закончились: ${String(DASHBOARD_TEST_DAILY_LIMIT)} в день. Квоту эфира они не тратят.`
+      );
+    }
+    const simulated = simulatedRoast(body);
+    // The same context as a live roast; a test never waits on Twitch for more than 2 seconds.
+    const game = await channelAccessToken(channelId)
+      .then((credentials) =>
+        credentials
+          ? getChannelGame(credentials.token, config.TWITCH_CLIENT_ID, credentials.twitchId)
+          : ""
+      )
+      .then(gameContext)
+      .catch(() => undefined);
     const { eventId, roastId } = await sql.begin(async (tx) => {
       const [event] = await tx<{ id: string }[]>`
         insert into events (channel_id,type,provider_event_id,raw)
@@ -899,8 +959,8 @@ export async function buildApp(config: ApiConfig) {
       if (!event) throw new Error("Event insert failed");
       const [roast] = await tx<{ id: string }[]>`
         insert into roasts(channel_id,event_id,source,viewer_login,input_text,tone,voice,toxicity)
-        select ${channelId},${event.id},'dashboard_test',${body.viewerLogin},
-          ${body.inputText},tone,voice,toxicity from settings
+        select ${channelId},${event.id},'dashboard_test',${simulated.viewerLogin},
+          ${simulated.inputText},tone,voice,toxicity from settings
         where channel_id=${channelId} returning id`;
       if (!roast) throw new Error("Roast insert failed");
       return { eventId: event.id, roastId: roast.id };
@@ -911,7 +971,11 @@ export async function buildApp(config: ApiConfig) {
       eventId,
       channelId,
       source: "dashboard_test",
-      ...body,
+      viewerLogin: simulated.viewerLogin,
+      inputText: simulated.inputText,
+      target: simulated.target,
+      ...(simulated.eventSummary ? { eventSummary: simulated.eventSummary } : {}),
+      ...(game ? { game } : {}),
       requestedAt: new Date().toISOString()
     });
     return { roastId, status: "queued" };
@@ -924,8 +988,10 @@ export async function buildApp(config: ApiConfig) {
     const roasts = await sql`
       select r.id, r.created_at "createdAt", r.source, r.viewer_login "viewerLogin",
         left(r.input_text, 120) "inputText", r.output_text "outputText", r.status, r.error,
-        o.status "overlayStatus"
+        o.status "overlayStatus", r.favorite_at is not null favorite,
+        case when r.source='dashboard_test' then e.raw->>'kind' end "testKind"
       from roasts r left join overlay_events o on o.roast_id=r.id
+      left join events e on e.id=r.event_id
       where r.channel_id=${channelId} order by r.created_at desc limit 15`;
     const [eventsub] = await sql`
       select connected, subscriptions, updated_at "updatedAt" from eventsub_state
@@ -933,16 +999,95 @@ export async function buildApp(config: ApiConfig) {
     return { roasts, eventsub: eventsub ?? null };
   });
 
+  // One roast for its page (/roasts/<id>) and the test poll. The owner reads any channel's roast
+  // through /admin/roasts/:id.
+  const roastDetail = (id: string, channelId: string | null) => sql`
+      select r.id, r.status, r.source, r.viewer_login "viewerLogin", r.input_text "inputText",
+        r.output_text "outputText", r.error, r.latency_ms "latencyMs", r.created_at "createdAt",
+        r.tier, r.model, r.voice_provider "voiceProvider", r.cost_usd::float8 "costUsd",
+        c.twitch_login "channelLogin", o.status "overlayStatus",
+        r.favorite_at is not null favorite, r.showcase_approved_at is not null "onShowcase",
+        case when r.source='dashboard_test' then e.raw->>'kind' end "testKind"
+      from roasts r join channels c on c.id=r.channel_id
+      left join overlay_events o on o.roast_id=r.id
+      left join events e on e.id=r.event_id
+      where r.id=${id} and (${channelId}::uuid is null or r.channel_id=${channelId})`;
+  const roastIdParams = z.object({ id: z.string().uuid() });
   app.get("/roasts/:id", { preHandler: requireUser }, async (request, reply) => {
-    const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
-    const [row] = await sql`
-      select r.id, r.status, r.output_text "outputText", r.error, r.latency_ms "latencyMs",
-        r.created_at "createdAt", o.status "overlayStatus"
-      from roasts r left join overlay_events o on o.roast_id=r.id
-      where r.id=${id} and r.channel_id=${session(request).channelId}`;
-    if (!row)
-      return reply.code(404).send({ error: { code: "not_found", message: "Роаст не найден" } });
+    const { id } = roastIdParams.parse(request.params);
+    const [row] = await roastDetail(id, session(request).channelId);
+    if (!row) return denied(reply, 404, "not_found", "Роаст не найден");
     return row;
+  });
+
+  // ---- landing demo -------------------------------------------------------------------------
+  // Anyone may try Ai without logging in: DEMO_PER_IP_DAILY answers per IP and a daily cap for
+  // the service. The IP is stored only as an HMAC with the day, so it cannot be read back.
+  const demoKey = (request: FastifyRequest, day: string) =>
+    createHmac("sha256", config.SESSION_SECRET).update(`demo:${day}:${request.ip}`).digest("hex");
+  const demoLimit = async () => {
+    const [row] = await sql<{ limit: number }[]>`
+      select coalesce((select (value #>> '{}')::int from global_settings
+        where key='demo_daily_limit'), ${DEFAULT_DEMO_DAILY_LIMIT})::int "limit"`;
+    return row?.limit ?? DEFAULT_DEMO_DAILY_LIMIT;
+  };
+
+  app.get("/demo", async (request) => {
+    const day = currentDay();
+    const limit = await demoLimit();
+    const [usage] = await sql<{ mine: number; total: number }[]>`
+      select count(*) filter (where ip_hash=${demoKey(request, day)})::int mine,
+        count(*)::int total from demo_requests where day=${day}`;
+    const remaining =
+      (usage?.total ?? 0) >= limit ? 0 : Math.max(0, DEMO_PER_IP_DAILY - (usage?.mine ?? 0));
+    return { enabled: limit > 0, remaining, perDay: DEMO_PER_IP_DAILY };
+  });
+
+  app.post("/demo", async (request, reply) => {
+    const { text } = demoRequestSchema.parse(request.body);
+    const day = currentDay();
+    const ipHash = demoKey(request, day);
+    const limit = await demoLimit();
+    if (limit <= 0) return denied(reply, 404, "demo_disabled", "Демо сейчас выключено");
+    const result = await sql.begin(async (tx) => {
+      // One lock for both counters: parallel requests cannot slip past either cap.
+      await tx`select pg_advisory_xact_lock(hashtext('roastbot-demo'))`;
+      const [usage] = await tx<{ mine: number; total: number }[]>`
+        select count(*) filter (where ip_hash=${ipHash})::int mine, count(*)::int total
+        from demo_requests where day=${day}`;
+      if ((usage?.mine ?? 0) >= DEMO_PER_IP_DAILY) return "ip_limit" as const;
+      if ((usage?.total ?? 0) >= limit) return "service_limit" as const;
+      const [row] = await tx<{ id: string }[]>`
+        insert into demo_requests(ip_hash,day,input_text) values(${ipHash},${day},${text})
+        returning id`;
+      return row!.id;
+    });
+    if (result === "ip_limit") {
+      return denied(reply, 429, "demo_limit", "На сегодня всё. Завтра Аи ответит снова.");
+    }
+    if (result === "service_limit") {
+      return denied(reply, 429, "demo_busy", "Аи на сегодня наговорилась. Загляните завтра.");
+    }
+    await boss.send(DEMO_REQUESTED_QUEUE, { demoId: result });
+    return { id: result, status: "queued" };
+  });
+
+  app.get("/demo/:id", async (request, reply) => {
+    const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
+    // Only from the same IP and day that asked: a leaked id shows nothing to others.
+    const [row] = await sql<
+      { status: string; output: string | null; audioFile: string | null; createdAt: Date }[]
+    >`
+      select status, output_text "output", audio_file "audioFile", created_at "createdAt"
+      from demo_requests where id=${id} and ip_hash=${demoKey(request, currentDay())}`;
+    if (!row) return denied(reply, 404, "not_found", "Ответ не найден");
+    return {
+      status: row.status,
+      text: row.status === "done" || row.status === "blocked" ? row.output : null,
+      audioUrl: row.audioFile
+        ? `${config.PUBLIC_URL}${signAudioPath(row.audioFile, config.AUDIO_SIGNING_SECRET)}`
+        : null
+    };
   });
 
   app.get("/audio/:filename", async (request, reply) => {
@@ -1046,6 +1191,11 @@ export async function buildApp(config: ApiConfig) {
       values(${session(request).userId},${action},${target},${sql.json(payload)})`;
   }
 
+  const routeContext: RouteContext = { sql, boss, config, requireUser, requireOwner, audit };
+  registerInviteRoutes(app, routeContext);
+  registerShowcaseRoutes(app, routeContext);
+  registerTelegramRoutes(app, routeContext);
+
   app.get("/admin/overview", { preHandler: requireOwner }, async () => {
     const month = currentMonth();
     const [row] = await sql<
@@ -1060,6 +1210,9 @@ export async function buildApp(config: ApiConfig) {
         skippedToday: number;
         roastsMonth: number;
         spentMonth: number;
+        demoSpentMonth: number;
+        demoToday: number;
+        demoLimit: number;
         roastCap: number;
         budget: number;
         killSwitch: boolean;
@@ -1081,7 +1234,12 @@ export async function buildApp(config: ApiConfig) {
         (select count(*) from roasts where created_at>=date_trunc('day',now())
           and status='skipped')::int "skippedToday",
         (select coalesce(sum(roasts),0) from usage_monthly where month=${month})::int "roastsMonth",
-        (select coalesce(sum(cost_usd),0) from usage_monthly where month=${month})::float8 "spentMonth",
+        ((select coalesce(sum(cost_usd),0) from usage_monthly where month=${month})
+          + ${demoSpend(month)})::float8 "spentMonth",
+        ${demoSpend(month)}::float8 "demoSpentMonth",
+        (select count(*) from demo_requests where day=${currentDay()})::int "demoToday",
+        coalesce((select (value #>> '{}')::int from global_settings where key='demo_daily_limit'),
+          ${DEFAULT_DEMO_DAILY_LIMIT})::int "demoLimit",
         coalesce((select (value #>> '{}')::int from global_settings where key='global_monthly_limit'),
           ${DEFAULT_GLOBAL_MONTHLY_ROAST_CAP})::int "roastCap",
         coalesce((select (value #>> '{}')::float8 from global_settings where key='monthly_budget_usd'),
@@ -1250,6 +1408,13 @@ export async function buildApp(config: ApiConfig) {
     const q = z
       .object({
         channelId: z.string().uuid().optional(),
+        // A login is easier to share in a link than a UUID.
+        channel: z
+          .string()
+          .trim()
+          .max(64)
+          .transform((value) => value.replace(/^[@#]/u, "").toLowerCase())
+          .optional(),
         status: roastStatusSchema.optional(),
         from: z.string().datetime().optional(),
         to: z.string().datetime().optional(),
@@ -1258,10 +1423,50 @@ export async function buildApp(config: ApiConfig) {
       .parse(request.query);
     return sql`select r.*, c.twitch_login from roasts r join channels c on c.id=r.channel_id
       where (${q.channelId ?? null}::uuid is null or r.channel_id=${q.channelId ?? null})
+      and (${q.channel || null}::text is null or c.twitch_login=${q.channel || null})
       and (${q.status ?? null}::text is null or r.status::text=${q.status ?? null})
       and (${q.from ?? null}::timestamptz is null or r.created_at>=${q.from ?? null})
       and (${q.to ?? null}::timestamptz is null or r.created_at<=${q.to ?? null})
       order by r.created_at desc limit ${q.limit}`;
+  });
+
+  app.get("/admin/roasts/:id", { preHandler: requireOwner }, async (request, reply) => {
+    const { id } = roastIdParams.parse(request.params);
+    const [row] = await roastDetail(id, null);
+    if (!row) return denied(reply, 404, "not_found", "Роаст не найден");
+    return row;
+  });
+
+  // Plans: limits and the model and voice tiers (the free plan's first roasts sound the best).
+  app.get(
+    "/admin/plans",
+    { preHandler: requireOwner },
+    async () =>
+      sql`select code, monthly_roast_limit "monthlyRoastLimit", premium_roasts "premiumRoasts",
+        economy_model "economyModel", economy_voice "economyVoice"
+      from plans order by monthly_roast_limit`
+  );
+  app.put("/admin/plans/:code", { preHandler: requireOwner }, async (request, reply) => {
+    const { code } = z.object({ code: z.enum(["free", "basic", "premium"]) }).parse(request.params);
+    // The monthly limit stays in code: the seed refreshes it on every deploy.
+    const body = z
+      .object({
+        premiumRoasts: z.number().int().min(0).max(1_000_000).nullable(),
+        economyModel: modelSchema,
+        economyVoice: economyVoiceSchema
+      })
+      .strict()
+      .parse(request.body);
+    const updated = await sql.begin(async (tx) => {
+      const rows =
+        await tx`update plans set premium_roasts=${body.premiumRoasts}, economy_model=${body.economyModel},
+          economy_voice=${body.economyVoice}
+        where code=${code} returning code`;
+      if (rows.length) await audit(tx, request, "plan.update", code, body);
+      return rows.length > 0;
+    });
+    if (!updated) return denied(reply, 404, "not_found", "Тариф не найден");
+    return { code, ...body };
   });
 
   app.get("/admin/moderation", { preHandler: requireOwner }, async () => {
@@ -1333,11 +1538,21 @@ export async function buildApp(config: ApiConfig) {
     return { key, value };
   });
   app.get("/admin/audit", { preHandler: requireOwner }, async (request) => {
-    const { limit } = z
-      .object({ limit: z.coerce.number().int().min(1).max(200).default(100) })
+    const { limit, action } = z
+      .object({
+        limit: z.coerce.number().int().min(1).max(200).default(100),
+        action: z
+          .string()
+          .regex(/^[a-z_.]{1,64}$/u)
+          .optional()
+      })
       .parse(request.query);
-    return sql`select a.*, u.login actor_login from audit_log a
-      left join users u on u.id=a.actor_user_id order by a.created_at desc limit ${limit}`;
+    // Most targets are user ids: show the login next to them.
+    return sql`select a.*, u.login actor_login, t.login target_login from audit_log a
+      left join users u on u.id=a.actor_user_id
+      left join users t on t.id::text=a.target
+      where (${action ?? null}::text is null or a.action=${action ?? null})
+      order by a.created_at desc limit ${limit}`;
   });
 
   app.addHook("onClose", async () => {

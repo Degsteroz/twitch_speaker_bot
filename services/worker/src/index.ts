@@ -3,10 +3,19 @@ import { join } from "node:path";
 
 import Anthropic from "@anthropic-ai/sdk";
 import { cleanupExpiredData, createDatabase } from "@roastbot/db";
-import { ROAST_REQUESTED_QUEUE, ROAST_REQUESTED_QUEUE_OPTIONS } from "@roastbot/shared";
+import {
+  DEMO_REQUESTED_QUEUE,
+  DEMO_REQUESTED_QUEUE_OPTIONS,
+  ROAST_REQUESTED_QUEUE,
+  ROAST_REQUESTED_QUEUE_OPTIONS,
+  TELEGRAM_NOTIFY_QUEUE,
+  telegramNotifyJobSchema
+} from "@roastbot/shared";
 import { PgBoss } from "pg-boss";
 
 import { loadConfig } from "./config.js";
+import { processDemo } from "./demo.js";
+import { notifyStreamer, sendStreamSummaries } from "./telegram.js";
 import { processRoast } from "./pipeline.js";
 
 // Audio stays on disk well past the 2-minute overlay TTL plus the 60-second signed URL window.
@@ -35,6 +44,31 @@ await boss.work(ROAST_REQUESTED_QUEUE, workOptions, async (jobs) => {
   }
 });
 
+// The landing demo has its own queue, so a burst of visitors never delays a roast on stream.
+await boss.createQueue(DEMO_REQUESTED_QUEUE, { ...DEMO_REQUESTED_QUEUE_OPTIONS });
+await boss.work(DEMO_REQUESTED_QUEUE, workOptions, async (jobs) => {
+  for (const job of jobs) {
+    const outcome = await processDemo(job.data, { sql: database.client, anthropic, config });
+    console.log(JSON.stringify({ msg: "demo.processed", ...outcome }));
+  }
+});
+
+// The streamer's Telegram: notifications queued by other services, and the summary after a stream.
+await boss.createQueue(TELEGRAM_NOTIFY_QUEUE);
+await boss.work(TELEGRAM_NOTIFY_QUEUE, async (jobs) => {
+  for (const job of jobs) {
+    await notifyStreamer(database.client, config, telegramNotifyJobSchema.parse(job.data));
+  }
+});
+if (config.TELEGRAM_BOT_TOKEN) {
+  await boss.createQueue("stream.summary");
+  await boss.schedule("stream.summary", "*/15 * * * *");
+  await boss.work("stream.summary", async () => {
+    const sent = await sendStreamSummaries(database.client, config);
+    if (sent) console.log(JSON.stringify({ msg: "stream.summary", sent }));
+  });
+}
+
 await boss.createQueue("maintenance.cleanup");
 await boss.schedule("maintenance.cleanup", "*/10 * * * *");
 await boss.work("maintenance.cleanup", async () => {
@@ -61,6 +95,7 @@ await boss.work("maintenance.cleanup", async () => {
 if (config.TELEGRAM_BOT_TOKEN && config.TELEGRAM_CHAT_ID) {
   await boss.createQueue("summary.daily");
   await boss.schedule("summary.daily", "0 9 * * *");
+  const dashboard = config.DASHBOARD_URL?.replace(/\/$/u, "");
   await boss.work("summary.daily", async () => {
     const [stats] = await database.client<
       { roasts: number; failed: number; blocked: number; cost: string; month: string }[]
@@ -84,7 +119,14 @@ if (config.TELEGRAM_BOT_TOKEN && config.TELEGRAM_CHAT_ID) {
             `роастов: ${String(stats?.roasts ?? 0)}`,
             `ошибок: ${String(stats?.failed ?? 0)}`,
             `заблокировано: ${String(stats?.blocked ?? 0)}`,
-            `расход: $${stats?.cost ?? "0"} (за месяц $${stats?.month ?? "0"})`
+            `расход: $${stats?.cost ?? "0"} (за месяц $${stats?.month ?? "0"})`,
+            ...(dashboard
+              ? [
+                  "",
+                  `ошибки: ${dashboard}/admin/roasts?status=failed`,
+                  `модерация: ${dashboard}/admin/moderation`
+                ]
+              : [])
           ].join("\n")
         })
       }

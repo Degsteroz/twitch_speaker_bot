@@ -32,6 +32,9 @@ const VERDICT_TEXT: Readonly<Record<Verdict, string>> = {
   refuse: "✗ не согласна"
 };
 const viewer = element("#viewer") as HTMLElement;
+// The overlay is served from the service's own domain, so its host is the address to advertise.
+const branding = element("#branding") as HTMLElement;
+branding.textContent = location.hostname;
 const roastText = element("#text") as HTMLElement;
 const audio = element("#audio") as HTMLAudioElement;
 const recover = element("#recover") as HTMLButtonElement;
@@ -85,6 +88,7 @@ function next() {
   roastText.textContent = event.text;
   showCharacter(event.tone);
   showVerdict(event.verdict);
+  branding.hidden = event.branding !== true;
   audio.src = event.audioUrl;
   card.hidden = false;
   requestAnimationFrame(() => card.classList.add("visible"));

@@ -1,4 +1,4 @@
-import { yandexTtsRequestsFor, type Tone } from "@roastbot/shared";
+import { yandexTtsRequestsFor, type Tone, type VoiceProvider } from "@roastbot/shared";
 
 import type { WorkerConfig } from "./config.js";
 
@@ -26,7 +26,7 @@ const ELEVENLABS_TIMEOUT_MS = 6_000;
 
 export interface Speech {
   audio: Uint8Array;
-  provider: "elevenlabs" | "yandex" | "piper";
+  provider: VoiceProvider;
   costUsd: number;
   /** Why the cloud voice was skipped, if it was. */
   fallbackReason?: string;
@@ -107,11 +107,23 @@ async function synthesizePiper(
   return new Uint8Array(await response.arrayBuffer());
 }
 
+// Best first: a roast starts at the voice its tier allows and falls through the rest.
+const VOICE_ORDER: readonly VoiceProvider[] = ["elevenlabs", "yandex", "piper"];
+
+export interface SpeakOptions {
+  /** The first voice this roast may use: economy roasts start at Yandex or Piper. */
+  best?: VoiceProvider;
+  /** False skips the local Piper: the landing demo stays silent rather than load the server. */
+  piper?: boolean;
+  log?: (message: string) => void;
+}
+
 /**
  * The best voice the owner pays for, within its monthly cap: ElevenLabs (when a key and a voice for
  * this character are set), then Yandex SpeechKit, then the local Piper. Any failure or slow answer
  * moves on to the next one: an outage of a cloud voice must not silence the stream. Usage is
- * reserved before each call, so failed and timed-out attempts count toward the caps.
+ * reserved before each call, so failed and timed-out attempts count toward the caps. Without
+ * Piper and without a cloud voice, the result is null.
  */
 export async function speak(
   text: string,
@@ -119,10 +131,29 @@ export async function speak(
   config: WorkerConfig,
   fetcher: typeof globalThis.fetch,
   reserve: VoiceReservations,
-  log: (message: string) => void = console.warn
-): Promise<Speech> {
-  let fallbackReason = "no_cloud_voice";
-  const voiceId = config.ELEVENLABS_API_KEY ? elevenLabsVoice(tone, config) : undefined;
+  options: SpeakOptions & { piper: false }
+): Promise<Speech | null>;
+export async function speak(
+  text: string,
+  tone: Tone,
+  config: WorkerConfig,
+  fetcher: typeof globalThis.fetch,
+  reserve: VoiceReservations,
+  options?: SpeakOptions
+): Promise<Speech>;
+export async function speak(
+  text: string,
+  tone: Tone,
+  config: WorkerConfig,
+  fetcher: typeof globalThis.fetch,
+  reserve: VoiceReservations,
+  { best = "elevenlabs", piper = true, log = console.warn }: SpeakOptions = {}
+): Promise<Speech | null> {
+  const allowed = (provider: VoiceProvider) =>
+    VOICE_ORDER.indexOf(provider) >= VOICE_ORDER.indexOf(best);
+  let fallbackReason = allowed("yandex") ? "no_cloud_voice" : "plan_voice";
+  const voiceId =
+    config.ELEVENLABS_API_KEY && allowed("elevenlabs") ? elevenLabsVoice(tone, config) : undefined;
   if (voiceId) {
     const characters = Array.from(text).length;
     if (await reserve.elevenlabs(characters)) {
@@ -141,7 +172,7 @@ export async function speak(
       fallbackReason = "elevenlabs_tts_monthly_limit";
     }
   }
-  if (config.YANDEX_TTS_API_KEY) {
+  if (config.YANDEX_TTS_API_KEY && allowed("yandex")) {
     const requests = yandexTtsRequestsFor(text);
     if (await reserve.yandex(requests)) {
       try {
@@ -155,6 +186,7 @@ export async function speak(
       fallbackReason = "yandex_tts_monthly_limit";
     }
   }
+  if (!piper) return null;
   return {
     audio: await synthesizePiper(text, config, fetcher),
     provider: "piper",

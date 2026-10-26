@@ -31,7 +31,10 @@ export class TwitchApiError extends Error {
 }
 
 async function twitchRequest<T>(url: string, init: RequestInit): Promise<T> {
-  const response = await fetch(url, { ...init, signal: AbortSignal.timeout(10_000) });
+  const response = await fetch(url, {
+    ...init,
+    signal: init.signal ?? AbortSignal.timeout(10_000)
+  });
   if (!response.ok) {
     throw new TwitchApiError(response.status, `Twitch request failed: ${response.status}`);
   }
@@ -88,4 +91,19 @@ export async function getRewards(
     is_enabled,
     is_user_input_required
   }));
+}
+
+/** The channel's current category name; empty when Twitch has none. */
+export async function getChannelGame(
+  accessToken: string,
+  clientId: string,
+  broadcasterId: string
+): Promise<string> {
+  const url = new URL("https://api.twitch.tv/helix/channels");
+  url.searchParams.set("broadcaster_id", broadcasterId);
+  const result = await twitchRequest<{ data: { game_name?: string }[] }>(url.toString(), {
+    headers: { Authorization: `Bearer ${accessToken}`, "Client-Id": clientId },
+    signal: AbortSignal.timeout(2_000)
+  });
+  return result.data[0]?.game_name ?? "";
 }

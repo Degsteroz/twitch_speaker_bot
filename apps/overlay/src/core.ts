@@ -19,6 +19,8 @@ export interface RoastEvent {
   tone?: Tone;
   /** Channel-points verdict, shown as a badge; absent for plain roasts. */
   verdict?: Verdict;
+  /** Free plan: show the service address under the card. */
+  branding?: boolean;
   audioUrl: string;
   expiresAt: string;
   sentAt: string;
@@ -68,11 +70,12 @@ export function parseEvent(raw: string): ServerEvent | null {
     return null;
   }
   // An unknown tone only loses the character, never the roast itself.
-  const { tone, verdict, ...rest } = value;
+  const { tone, verdict, branding, ...rest } = value;
   return {
     ...(rest as unknown as RoastEvent),
     ...(isTone(tone) ? { tone } : {}),
-    ...(isVerdict(verdict) ? { verdict } : {})
+    ...(isVerdict(verdict) ? { verdict } : {}),
+    ...(branding === true ? { branding: true } : {})
   };
 }
 

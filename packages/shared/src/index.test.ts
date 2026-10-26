@@ -4,7 +4,9 @@ import {
   DEFAULT_TRIGGERS,
   channelSettingsSchema,
   overlayServerEventSchema,
+  parseStarsPayload,
   roastRequestedJobSchema,
+  starsPayload,
   triggerSettingsSchema
 } from "./index.js";
 
@@ -81,5 +83,17 @@ describe("wire contracts", () => {
       sentAt: new Date().toISOString()
     });
     expect(result.type).toBe("roast.play");
+  });
+});
+
+describe("Telegram Stars payload", () => {
+  it("round-trips a channel and a paid plan and rejects anything else", () => {
+    const channelId = "0b7c1c1e-4f0a-4c55-9a8e-1d2f3a4b5c6d";
+    expect(parseStarsPayload(starsPayload(channelId, "basic"))).toEqual({
+      channelId,
+      plan: "basic"
+    });
+    expect(parseStarsPayload(starsPayload(channelId, "free"))).toBeNull();
+    expect(parseStarsPayload("rb1:not-a-uuid:basic")).toBeNull();
   });
 });

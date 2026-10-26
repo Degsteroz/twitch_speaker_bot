@@ -4,6 +4,11 @@ export const APP_NAME = "RoastBot";
 export const DEFAULT_CHANNEL_MONTHLY_ROASTS = 10;
 // `!роаст` is a paid feature: on the free plan the command is ignored.
 export const COMMAND_PLANS: ReadonlySet<string> = new Set(["basic", "premium"]);
+// Free channels advertise the service: the overlay shows its address under the roast card.
+export const BRANDED_PLANS: ReadonlySet<string> = new Set(["free"]);
+// Dashboard tests and the event simulator have their own daily allowance per channel (UTC day)
+// and never spend the monthly quota: a streamer must be able to try the bot before going live.
+export const DASHBOARD_TEST_DAILY_LIMIT = 5;
 export const DEFAULT_CHANNEL_COOLDOWN_SECONDS = 30;
 export const DEFAULT_USER_COOLDOWN_SECONDS = 60;
 export const DEFAULT_GLOBAL_MONTHLY_ROAST_CAP = 4_000;
@@ -32,7 +37,18 @@ export const yandexBillingMonth = (date: Date) =>
 // Opus writes the roast (it has to understand what the viewer meant); Sonnet checks the reply.
 export const DEFAULT_ANTHROPIC_MODEL = "claude-opus-5-5";
 export const DEFAULT_CLASSIFIER_MODEL = "claude-sonnet-5-5";
+// Plans with a premium allowance (free) write the rest of the month's roasts with this model and
+// a simpler voice; the owner changes both per plan in /admin. The classifier never changes.
+export const DEFAULT_ECONOMY_MODEL = "claude-haiku-5-5";
+export const FREE_PREMIUM_ROASTS = 2;
 export const BLOCKED_OUTPUT_FALLBACK = "Даже мне за такое стыдно";
+// Twitch's "talking, no game" category says nothing about the stream: it is not passed on.
+export const JUST_CHATTING = "Just Chatting";
+/** The category worth telling the model, or undefined. */
+export const gameContext = (name: string | null | undefined) => {
+  const game = name?.trim().slice(0, 100);
+  return game && game !== JUST_CHATTING ? game : undefined;
+};
 export const ROAST_REQUESTED_QUEUE = "roast.requested";
 // A roast older than the overlay TTL is useless on stream, so jobs are never retried or kept long.
 // notify=true wakes the worker through LISTEN/NOTIFY instead of its 2-second poll.
@@ -42,6 +58,25 @@ export const ROAST_REQUESTED_QUEUE_OPTIONS = Object.freeze({
   expireInSeconds: 60,
   retentionSeconds: OVERLAY_EVENT_TTL_SECONDS
 });
+
+// Landing demo: anyone may try Ai without logging in, a few times a day. The per-IP and service
+// caps are checked by the API before a job is queued; the worker still checks the budget.
+export const DEMO_REQUESTED_QUEUE = "demo.requested";
+export const DEMO_REQUESTED_QUEUE_OPTIONS = Object.freeze({
+  notify: true,
+  retryLimit: 0,
+  expireInSeconds: 60,
+  retentionSeconds: 600
+});
+export const DEMO_PER_IP_DAILY = 3;
+export const DEFAULT_DEMO_DAILY_LIMIT = 30;
+export const DEMO_MAX_CHARACTERS = 200;
+export const demoRequestSchema = z
+  .object({ text: z.string().trim().min(1).max(DEMO_MAX_CHARACTERS) })
+  .strict();
+export const demoJobSchema = z.object({ demoId: z.string().uuid() }).strict();
+export const demoStatusSchema = z.enum(["queued", "done", "blocked", "failed", "skipped"]);
+export type DemoStatus = z.infer<typeof demoStatusSchema>;
 
 export const toneSchema = z.enum(["tsundere", "yandere"]);
 export const voiceSchema = z.enum(["male", "female"]);
@@ -91,6 +126,11 @@ export const TWITCH_SCOPES = Object.freeze([
   "channel:read:predictions",
   "channel:read:ads"
 ] as const);
+/** Premium: the global model and the best voice. Economy: the plan's cheaper model and voice. */
+export const roastTierSchema = z.enum(["premium", "economy"]);
+export const voiceProviderSchema = z.enum(["elevenlabs", "yandex", "piper"]);
+/** The best voice an economy roast may use; the next ones still take over on failure. */
+export const economyVoiceSchema = z.enum(["yandex", "piper"]);
 export const roastStatusSchema = z.enum([
   "queued",
   "blocked_input",
@@ -218,6 +258,8 @@ export const roastRequestedJobSchema = z
     // What happened, in our own words ("Рейд с канала x: 40 зрителей"); viewer text stays in
     // inputText. Built by the twitch service from typed event fields.
     eventSummary: z.string().max(500).optional(),
+    // The channel's current Twitch category, for context; never "Just Chatting" (see JUST_CHATTING).
+    game: z.string().min(1).max(100).optional(),
     requestedAt: z.string().datetime()
   })
   .strict();
@@ -264,10 +306,26 @@ export const quotaResponseSchema = z
   })
   .strict();
 
+// What the dashboard simulator pretends happened. "plain" is the classic test message.
+export const simulatedEventSchema = z.enum([
+  "plain",
+  "reward",
+  "keyword",
+  "donation",
+  "raid",
+  "prediction",
+  "cheer",
+  "subscription",
+  "follow"
+]);
+
 export const testRoastRequestSchema = z
   .object({
     inputText: z.string().trim().max(2_000).default(""),
-    viewerLogin: z.string().trim().min(1).max(64).default("test_viewer")
+    viewerLogin: z.string().trim().min(1).max(64).default("test_viewer"),
+    kind: simulatedEventSchema.default("plain"),
+    // Donation sum, raid viewers, bits or prediction losers, depending on the kind.
+    amount: z.number().int().min(0).max(1_000_000).optional()
   })
   .strict();
 
@@ -300,6 +358,8 @@ export const overlayRoastEventSchema = z
     tone: toneSchema.optional(),
     // Channel-points verdict, shown as a badge next to the text.
     verdict: verdictSchema.optional(),
+    // Free plan: the overlay shows the service address under the card.
+    branding: z.boolean().optional(),
     audioUrl: z.string().url(),
     expiresAt: z.string().datetime(),
     sentAt: z.string().datetime()
@@ -356,6 +416,10 @@ export type TriggerSettings = z.infer<typeof triggerSettingsSchema>;
 export type EventTriggers = z.infer<typeof eventTriggersSchema>;
 export type RoastTarget = z.infer<typeof roastTargetSchema>;
 export type Verdict = z.infer<typeof verdictSchema>;
+export type RoastTier = z.infer<typeof roastTierSchema>;
+export type VoiceProvider = z.infer<typeof voiceProviderSchema>;
+export type EconomyVoice = z.infer<typeof economyVoiceSchema>;
+export type SimulatedEvent = z.infer<typeof simulatedEventSchema>;
 export type TargetMode = z.infer<typeof targetModeSchema>;
 export type ChannelSettings = z.infer<typeof channelSettingsSchema>;
 export type RoastRequestedJob = z.infer<typeof roastRequestedJobSchema>;
@@ -367,3 +431,57 @@ export type QuotaResponse = z.infer<typeof quotaResponseSchema>;
 export type StoredOverlayRoast = z.infer<typeof storedOverlayRoastSchema>;
 export type OverlayServerEvent = z.infer<typeof overlayServerEventSchema>;
 export type OverlayClientEvent = z.infer<typeof overlayClientEventSchema>;
+
+// ---- growth and payments ----------------------------------------------------------------------
+
+// Viewers may ask the bot to leave them alone: chat triggers from them are skipped, paid events
+// still play but roast the streamer. "!роаст-старт" undoes it.
+export const OPTOUT_SKIPPED_SOURCES: ReadonlySet<RoastSource> = new Set<RoastSource>([
+  "chat_command",
+  "chat_keyword",
+  "follow"
+]);
+
+// Notifications to the streamer's Telegram: sent by the worker, queued by other services.
+export const TELEGRAM_NOTIFY_QUEUE = "telegram.notify";
+export const telegramNotifyJobSchema = z
+  .object({
+    channelId: z.string().uuid(),
+    // Sent once per kind and period: "eventsub:channel.cheer" + "2026-10-26".
+    kind: z.string().min(1).max(100),
+    period: z.string().min(1).max(20),
+    text: z.string().min(1).max(1_000)
+  })
+  .strict();
+export type TelegramNotifyJob = z.infer<typeof telegramNotifyJobSchema>;
+
+// Telegram Stars subscriptions renew every 30 days; it is the only period Telegram allows.
+export const STARS_SUBSCRIPTION_SECONDS = 2_592_000;
+/** Invoice payload: which channel buys which plan. Telegram returns it on payment. */
+export const starsPayload = (channelId: string, plan: string) => `rb1:${channelId}:${plan}`;
+export function parseStarsPayload(payload: string): { channelId: string; plan: string } | null {
+  const match = /^rb1:([0-9a-f-]{36}):(basic|premium)$/u.exec(payload);
+  return match ? { channelId: match[1]!, plan: match[2]! } : null;
+}
+
+/** One Telegram Bot API call; throws with Telegram's description when it says no. */
+export async function telegramCall<T>(
+  token: string,
+  method: string,
+  body: Record<string, unknown>,
+  fetcher: typeof globalThis.fetch = globalThis.fetch
+): Promise<T> {
+  const response = await fetcher(`https://api.telegram.org/bot${token}/${method}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(5_000)
+  });
+  const result = (await response.json().catch(() => ({}))) as {
+    ok?: boolean;
+    result?: T;
+    description?: string;
+  };
+  if (!result.ok) throw new Error(`telegram_${method}: ${result.description ?? response.status}`);
+  return result.result as T;
+}

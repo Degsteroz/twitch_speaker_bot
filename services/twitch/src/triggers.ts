@@ -28,6 +28,19 @@ export function matchKeyword(message: string, keywords: readonly string[]): stri
   return null;
 }
 
+/**
+ * "!роаст-стоп" asks the bot to leave this viewer alone on the channel, "!роаст-старт" undoes it
+ * (English spellings work too). Anything else is null.
+ */
+export function optOutCommand(message: string): "stop" | "start" | null {
+  const command = fold(message.trim()).split(/\s+/u)[0] ?? "";
+  if (["!роаст-стоп", "!роастстоп", "!roast-stop", "!roaststop"].includes(command)) return "stop";
+  if (["!роаст-старт", "!роастстарт", "!roast-start", "!roaststart"].includes(command)) {
+    return "start";
+  }
+  return null;
+}
+
 /** `random` is in [0, 1): below the percentage means "yes". */
 export const rollPercent = (percent: number, random: number) => random * 100 < percent;
 

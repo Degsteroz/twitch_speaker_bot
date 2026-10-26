@@ -1,7 +1,15 @@
-import { and, eq, isNotNull, lt, or, sql } from "drizzle-orm";
+import { and, eq, isNotNull, isNull, lt, or, sql } from "drizzle-orm";
 
 import { createDatabase, type Database } from "./client.js";
-import { cooldownState, events, overlayEvents, roasts } from "./schema.js";
+import {
+  cooldownState,
+  demoRequests,
+  events,
+  overlayEvents,
+  roasts,
+  telegramLinkTokens,
+  testUsageDaily
+} from "./schema.js";
 
 export interface CleanupResult {
   readonly redactedRoasts: number;
@@ -9,6 +17,9 @@ export interface CleanupResult {
   readonly expiredOverlayEvents: number;
   readonly deletedOverlayEvents: number;
   readonly deletedCooldowns: number;
+  readonly deletedTestUsage: number;
+  readonly redactedDemos: number;
+  readonly deletedDemos: number;
 }
 
 export async function cleanupExpiredData(
@@ -23,13 +34,22 @@ export async function cleanupExpiredData(
   const overlayDeleteCutoff = new Date(now.getTime() - 7 * 86_400_000);
 
   return db.transaction(async (tx) => {
+    // The viewer's text always goes; the bot's reply stays only on the landing showcase, which
+    // the streamer starred and the owner approved (shown there without the viewer's name).
     const redacted = await tx
       .update(roasts)
-      .set({ inputText: null, outputText: null })
+      .set({
+        inputText: null,
+        outputText: sql`case when ${roasts.showcaseApprovedAt} is null then null
+          else ${roasts.outputText} end`
+      })
       .where(
         and(
           lt(roasts.createdAt, roastCutoff),
-          or(isNotNull(roasts.inputText), isNotNull(roasts.outputText))
+          or(
+            isNotNull(roasts.inputText),
+            and(isNotNull(roasts.outputText), isNull(roasts.showcaseApprovedAt))
+          )
         )
       )
       .returning({ id: roasts.id });
@@ -62,12 +82,39 @@ export async function cleanupExpiredData(
       .where(lt(cooldownState.nextAllowedAt, now))
       .returning({ channelId: cooldownState.channelId });
 
+    // Only today's row limits tests; a week of history is plenty for support questions.
+    const deletedTestUsage = await tx
+      .delete(testUsageDaily)
+      .where(lt(testUsageDaily.day, overlayDeleteCutoff.toISOString().slice(0, 10)))
+      .returning({ channelId: testUsageDaily.channelId });
+
+    // Anonymous landing texts live a day; the rows keep their cost until the month is over.
+    const redactedDemos = await tx
+      .update(demoRequests)
+      .set({ inputText: null, outputText: null })
+      .where(
+        and(
+          lt(demoRequests.createdAt, new Date(now.getTime() - 86_400_000)),
+          or(isNotNull(demoRequests.inputText), isNotNull(demoRequests.outputText))
+        )
+      )
+      .returning({ id: demoRequests.id });
+    const deletedDemos = await tx
+      .delete(demoRequests)
+      .where(lt(demoRequests.createdAt, new Date(now.getTime() - 40 * 86_400_000)))
+      .returning({ id: demoRequests.id });
+
+    await tx.delete(telegramLinkTokens).where(lt(telegramLinkTokens.expiresAt, now));
+
     return {
       redactedRoasts: redacted.length,
       redactedEvents: redactedEvents.length,
       expiredOverlayEvents: expired.length,
       deletedOverlayEvents: deletedEvents.length,
-      deletedCooldowns: deletedCooldowns.length
+      deletedCooldowns: deletedCooldowns.length,
+      deletedTestUsage: deletedTestUsage.length,
+      redactedDemos: redactedDemos.length,
+      deletedDemos: deletedDemos.length
     };
   });
 }
