@@ -2,6 +2,7 @@
 import { useState, type SyntheticEvent } from "react";
 import QRCode from "qrcode";
 
+import { ask, tell } from "./ask.js";
 import { api, post, type Session } from "./api.js";
 import { Card, errorText, Field, logout, Shell } from "./ui.js";
 
@@ -51,9 +52,9 @@ export function MfaChallenge({
         post({ code })
       );
       if (result.via === "recovery") {
-        alert(
-          `Вход по резервному коду. Осталось кодов: ${String(result.recoveryCodesLeft)}. ` +
-            "Создайте новые на странице «Безопасность»."
+        await tell(
+          "Вход по резервному коду",
+          `Осталось кодов: ${String(result.recoveryCodesLeft)}. Создайте новые на странице «Безопасность».`
         );
       }
       onDone();
@@ -300,9 +301,18 @@ export function Security({ session, onChange }: { session: Session; onChange: ()
               <button
                 className="button secondary danger"
                 disabled={code.trim().length < 6}
-                onClick={() => {
-                  if (confirm("Отключить двухфакторную защиту?")) void run("/me/mfa/disable");
-                }}
+                onClick={() =>
+                  void (async () => {
+                    if (
+                      await ask({
+                        title: "Отключить двухфакторную защиту?",
+                        confirm: "Отключить",
+                        danger: true
+                      })
+                    )
+                      void run("/me/mfa/disable");
+                  })()
+                }
               >
                 Отключить 2FA
               </button>

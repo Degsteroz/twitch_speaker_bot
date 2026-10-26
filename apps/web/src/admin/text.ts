@@ -119,7 +119,7 @@ export function auditText(row: AuditRow): { action: string; detail: string } {
     case "plan.update":
       return {
         action,
-        detail: `${row.target}: лучших ${typeof payload.premiumRoasts === "number" ? String(payload.premiumRoasts) : "все"}, потом ${String(payload.economyModel)} и ${String(payload.economyVoice)}`
+        detail: `${row.target}: ${typeof payload.starsPrice === "number" ? `${String(payload.starsPrice)} ⭐, ` : payload.starsPrice === null ? "не продаётся, " : ""}лучших ${typeof payload.premiumRoasts === "number" ? String(payload.premiumRoasts) : "все"}, потом ${String(payload.economyModel)} и ${String(payload.economyVoice)}`
       };
     case "payment.stars":
       return { action, detail: `${String(payload.plan)}: ${String(payload.stars)} ⭐` };

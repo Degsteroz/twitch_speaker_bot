@@ -109,6 +109,13 @@ export function previewTone(search: string): Tone | null {
   return isTone(value) ? value : null;
 }
 
+/** True when version.json names another build than the running page: a release happened. */
+export function isOutdated(running: string, served: unknown): boolean {
+  if (typeof served !== "object" || served === null) return false;
+  const build = (served as { build?: unknown }).build;
+  return typeof build === "string" && build.length > 0 && build !== running;
+}
+
 export function getToken(location: Pick<Location, "search" | "pathname">): string | null {
   const query = new URLSearchParams(location.search).get("token");
   if (query?.trim()) return query.trim();

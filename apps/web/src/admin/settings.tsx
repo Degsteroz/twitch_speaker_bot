@@ -1,6 +1,7 @@
 // Settings: kill switch, limits and budget, models, voices; plans in their own file.
 import { useState } from "react";
 
+import { ask } from "../ask.js";
 import { api, put } from "../api.js";
 import { Card, Field, Link, State, errorText } from "../ui.js";
 import { ModelSelect, useAdmin } from "./common.js";
@@ -112,7 +113,16 @@ export function AdminSettings() {
 function KillSwitch({ on, reload }: { on: boolean; reload: () => Promise<void> }) {
   const [notice, setNotice] = useState("");
   const toggle = async () => {
-    if (!on && !confirm("Остановить генерацию на всех каналах?")) return;
+    if (
+      !on &&
+      !(await ask({
+        title: "Остановить генерацию на всех каналах?",
+        text: "Бот замолчит у всех стримеров, пока вы не включите его снова.",
+        confirm: "Остановить",
+        danger: true
+      }))
+    )
+      return;
     try {
       await api("/admin/settings/kill_switch", put(!on));
       await reload();

@@ -419,9 +419,15 @@ describe("plan tiers in /admin", () => {
       monthlyRoastLimit: 10,
       premiumRoasts: 2,
       economyModel: "claude-haiku-5-5",
-      economyVoice: "yandex"
+      economyVoice: "yandex",
+      starsPrice: null
     });
-    const body = { premiumRoasts: 3, economyModel: "claude-sonnet-5-5", economyVoice: "piper" };
+    const body = {
+      premiumRoasts: 3,
+      economyModel: "claude-sonnet-5-5",
+      economyVoice: "piper",
+      starsPrice: 570
+    };
     expect((await call("PUT", "/admin/plans/free", owner, body)).statusCode).toBe(200);
     expect(
       (await call("PUT", "/admin/plans/free", owner, { ...body, monthlyRoastLimit: 99 })).statusCode
@@ -430,18 +436,25 @@ describe("plan tiers in /admin", () => {
       (await call("PUT", "/admin/plans/free", owner, { ...body, economyVoice: "elevenlabs" }))
         .statusCode
     ).toBe(400);
+    for (const starsPrice of [0, 10_001, 5.5]) {
+      expect(
+        (await call("PUT", "/admin/plans/free", owner, { ...body, starsPrice })).statusCode
+      ).toBe(400);
+    }
     expect((await call("PUT", "/admin/plans/free", streamer, body)).statusCode).toBe(403);
-    const [free] = await db.sql`select premium_roasts, economy_model, economy_voice
+    const [free] = await db.sql`select premium_roasts, economy_model, economy_voice, stars_price
       from plans where code='free'`;
     expect(free).toEqual({
       premium_roasts: 3,
       economy_model: "claude-sonnet-5-5",
-      economy_voice: "piper"
+      economy_voice: "piper",
+      stars_price: 570
     });
     await call("PUT", "/admin/plans/free", owner, {
       premiumRoasts: 2,
       economyModel: "claude-haiku-5-5",
-      economyVoice: "yandex"
+      economyVoice: "yandex",
+      starsPrice: null
     });
   });
 });
@@ -1128,6 +1141,15 @@ describe("Telegram bot and Stars", () => {
       plan: "basic",
       commandAvailable: true
     });
+
+    // The owner raises the price: the paying channel still renews at its own, others pay the new.
+    await db.sql`update plans set stars_price=570 where code='basic'`;
+    telegram();
+    await precheck(170);
+    await precheck(570);
+    await precheck(300);
+    expect(calls.map((item) => item.body.ok)).toEqual([true, true, false]);
+    await db.sql`update plans set stars_price=170 where code='basic'`;
 
     telegram();
     const refund = await call(

@@ -1455,7 +1455,7 @@ export async function buildApp(config: ApiConfig) {
     { preHandler: requireOwner },
     async () =>
       sql`select code, monthly_roast_limit "monthlyRoastLimit", premium_roasts "premiumRoasts",
-        economy_model "economyModel", economy_voice "economyVoice"
+        economy_model "economyModel", economy_voice "economyVoice", stars_price "starsPrice"
       from plans order by monthly_roast_limit`
   );
   app.put("/admin/plans/:code", { preHandler: requireOwner }, async (request, reply) => {
@@ -1465,14 +1465,17 @@ export async function buildApp(config: ApiConfig) {
       .object({
         premiumRoasts: z.number().int().min(0).max(1_000_000).nullable(),
         economyModel: modelSchema,
-        economyVoice: economyVoiceSchema
+        economyVoice: economyVoiceSchema,
+        // Telegram Stars for 30 days; null takes the plan off sale. Paid subscriptions keep the
+        // price they were bought at: the new one applies to new invoices.
+        starsPrice: z.number().int().min(1).max(10_000).nullable()
       })
       .strict()
       .parse(request.body);
     const updated = await sql.begin(async (tx) => {
       const rows =
         await tx`update plans set premium_roasts=${body.premiumRoasts}, economy_model=${body.economyModel},
-          economy_voice=${body.economyVoice}
+          economy_voice=${body.economyVoice}, stars_price=${body.starsPrice}
         where code=${code} returning code`;
       if (rows.length) await audit(tx, request, "plan.update", code, body);
       return rows.length > 0;

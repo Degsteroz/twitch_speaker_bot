@@ -13,6 +13,7 @@ import {
   type Triggers,
   twitchLogin
 } from "../api.js";
+import { ask } from "../ask.js";
 import { KEYWORD_CHANCE_STEPS, ScaleChoice } from "./controls.js";
 import { Card, Tags } from "../ui.js";
 
@@ -83,7 +84,15 @@ export function DonationAlertsLink() {
   }, []);
   if (!status?.configured) return null;
   const disconnect = async () => {
-    if (!confirm("Отключить DonationAlerts? Донаты перестанут приходить боту.")) return;
+    if (
+      !(await ask({
+        title: "Отключить DonationAlerts?",
+        text: "Донаты перестанут приходить боту.",
+        confirm: "Отключить",
+        danger: true
+      }))
+    )
+      return;
     await api("/integrations/donationalerts/disconnect", post());
     setStatus({ ...status, connected: false, name: null });
   };

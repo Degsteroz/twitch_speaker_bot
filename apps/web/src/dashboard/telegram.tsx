@@ -1,6 +1,7 @@
 // The Telegram card: connect the streamer's chat with the bot for notifications and summaries.
 import { useEffect, useState } from "react";
 
+import { ask } from "../ask.js";
 import { api, post } from "../api.js";
 import { Card, errorText } from "../ui.js";
 import { usePolling } from "./poll.js";
@@ -39,7 +40,14 @@ export function TelegramCard() {
     }
   };
   const disconnect = async () => {
-    if (!confirm("Отключить уведомления в Telegram?")) return;
+    if (
+      !(await ask({
+        title: "Отключить уведомления в Telegram?",
+        confirm: "Отключить",
+        danger: true
+      }))
+    )
+      return;
     await api("/integrations/telegram/disconnect", post());
     await load();
   };

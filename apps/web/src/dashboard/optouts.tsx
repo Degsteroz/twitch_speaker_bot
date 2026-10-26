@@ -1,6 +1,7 @@
 // Viewers who wrote "!роаст-стоп": the bot leaves them alone; the streamer may clear an entry.
 import { useEffect, useState } from "react";
 
+import { ask } from "../ask.js";
 import { api, del } from "../api.js";
 
 export function OptOuts() {
@@ -13,7 +14,13 @@ export function OptOuts() {
     void load();
   }, []);
   const remove = async (login: string) => {
-    if (!confirm(`Снова разрешить роасты для @${login}? Обычно зритель сам пишет !роаст-старт.`)) {
+    if (
+      !(await ask({
+        title: `Снова разрешить роасты для @${login}?`,
+        text: "Обычно зритель сам пишет !роаст-старт.",
+        confirm: "Разрешить"
+      }))
+    ) {
       return;
     }
     await api(`/optouts/${encodeURIComponent(login)}`, del());

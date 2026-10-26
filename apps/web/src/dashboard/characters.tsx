@@ -20,6 +20,7 @@ import {
   type CharacterView,
   type VoiceOption
 } from "../api.js";
+import { ask } from "../ask.js";
 import { Card, errorText, Field } from "../ui.js";
 
 const ARCHETYPES = Object.keys(ARCHETYPE_TEXT) as Archetype[];
@@ -265,15 +266,20 @@ export function CustomCharacters({
                 className="mini"
                 type="button"
                 disabled={busy}
-                onClick={() => {
-                  if (
-                    confirm(
-                      `Удалить «${character.name}»? Каналы, которые её выбрали, вернутся к встроенной.`
-                    )
-                  ) {
-                    void run(() => api(`/characters/${character.id}`, del()), "Удалено");
-                  }
-                }}
+                onClick={() =>
+                  void (async () => {
+                    if (
+                      await ask({
+                        title: `Удалить «${character.name}»?`,
+                        text: "Каналы, которые её выбрали, вернутся к встроенной героине.",
+                        confirm: "Удалить",
+                        danger: true
+                      })
+                    ) {
+                      void run(() => api(`/characters/${character.id}`, del()), "Удалено");
+                    }
+                  })()
+                }
               >
                 Удалить
               </button>

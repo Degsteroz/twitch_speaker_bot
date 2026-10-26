@@ -1,6 +1,7 @@
 import { StrictMode, useCallback, useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 
+import { AskHost } from "./ask.js";
 import { Admin } from "./admin/index.js";
 import { api, ApiError, type Session } from "./api.js";
 import { MfaChallenge, MfaSetup, Pending, Security } from "./auth.js";
@@ -79,5 +80,6 @@ if (!root) throw new Error("Root element is missing");
 createRoot(root).render(
   <StrictMode>
     <App />
+    <AskHost />
   </StrictMode>
 );

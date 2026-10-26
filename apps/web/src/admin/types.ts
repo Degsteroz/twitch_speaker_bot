@@ -66,6 +66,8 @@ export interface PlanRow {
   premiumRoasts: number | null;
   economyModel: string;
   economyVoice: "yandex" | "piper";
+  /** Telegram Stars for 30 days; null means not for sale. */
+  starsPrice: number | null;
 }
 
 export interface Invite {

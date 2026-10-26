@@ -11,6 +11,7 @@ import {
   voiceSampleUrl,
   type CharacterView
 } from "../api.js";
+import { ask, askText } from "../ask.js";
 import { Card, errorText, Field } from "../ui.js";
 import { useAdmin } from "./common.js";
 
@@ -45,7 +46,24 @@ function ShopReview() {
   const { data, error, load } = useAdmin<AdminCharacter[]>("/admin/characters");
   const [notice, setNotice] = useState("");
   const review = async (row: AdminCharacter, approve: boolean) => {
-    const note = approve ? undefined : (prompt("Причина для автора (необязательно)") ?? undefined);
+    let note: string | undefined;
+    if (!approve) {
+      const answer = await askText({
+        title:
+          row.status === "published"
+            ? `Снять «${row.name}» с магазина?`
+            : `Отклонить «${row.name}»?`,
+        text:
+          row.status === "published"
+            ? "Каналы, которые её выбрали, вернутся к встроенной героине."
+            : undefined,
+        input: { label: "Причина для автора", placeholder: "Необязательно", maxLength: 200 },
+        confirm: row.status === "published" ? "Снять" : "Отклонить",
+        danger: true
+      });
+      if (answer === null) return;
+      note = answer || undefined;
+    }
     try {
       await api(`/admin/characters/${row.id}/review`, post({ approve, ...(note ? { note } : {}) }));
       await load();
@@ -169,11 +187,20 @@ function Voices() {
             </button>
             <button
               className="mini"
-              onClick={() => {
-                if (confirm(`Удалить голос «${voice.label}»?`)) {
-                  void run(() => api(`/admin/voices/${voice.id}`, del()));
-                }
-              }}
+              onClick={() =>
+                void (async () => {
+                  if (
+                    await ask({
+                      title: `Удалить голос «${voice.label}»?`,
+                      text: "Героини с этим голосом заговорят голосом Yandex своего характера.",
+                      confirm: "Удалить",
+                      danger: true
+                    })
+                  ) {
+                    void run(() => api(`/admin/voices/${voice.id}`, del()));
+                  }
+                })()
+              }
             >
               Удалить
             </button>

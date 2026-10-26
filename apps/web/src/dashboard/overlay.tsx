@@ -1,6 +1,7 @@
 // The OBS overlay card: the secret link and how to add it.
 import { useState } from "react";
 
+import { ask, tell } from "../ask.js";
 import { api, overlayUrl, post } from "../api.js";
 import { Card, errorText } from "../ui.js";
 
@@ -22,7 +23,12 @@ export function OverlaySetup({
   };
   const rotate = async () => {
     if (
-      !confirm("Старая ссылка перестанет работать. В OBS нужно будет вставить новую. Продолжить?")
+      !(await ask({
+        title: "Перевыпустить ссылку оверлея?",
+        text: "Старая ссылка перестанет работать. В OBS нужно будет вставить новую.",
+        confirm: "Перевыпустить",
+        danger: true
+      }))
     )
       return;
     const result = await api<{ overlayToken: string }>("/me/overlay-token/rotate", post());
@@ -68,7 +74,9 @@ export function OverlaySetup({
       )}
       <button
         className="mini danger"
-        onClick={() => void rotate().catch((reason: unknown) => alert(errorText(reason)))}
+        onClick={() =>
+          void rotate().catch((reason: unknown) => tell("Не получилось", errorText(reason)))
+        }
       >
         Перевыпустить ссылку
       </button>

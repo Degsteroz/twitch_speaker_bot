@@ -350,9 +350,13 @@ async function checkoutProblem(
     left join users u on u.id=c.user_id where p.code=${payload.plan}`;
   if (!row?.status) return "Канал не найден";
   if (row.status !== "active") return "Аккаунт RoastBot не активен";
-  if (row.price !== checkout.total_amount)
-    return "Цена изменилась, откройте оплату в панели заново";
-  return null;
+  if (row.price === checkout.total_amount) return null;
+  // A subscription renews at the price it was bought at: after the owner changes the price, a
+  // channel that already paid that amount for this plan may still be charged it.
+  const [paid] = await sql`select 1 from star_payments
+    where channel_id=${payload.channelId} and plan=${payload.plan}
+      and stars=${checkout.total_amount} and refunded_at is null limit 1`;
+  return paid ? null : "Цена изменилась, откройте оплату в панели заново";
 }
 
 /** Books a payment once per charge id and extends the plan to Telegram's expiration date. */

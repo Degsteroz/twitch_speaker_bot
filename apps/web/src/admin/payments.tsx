@@ -1,6 +1,7 @@
 // Payments: Telegram Stars subscriptions, with a refund that also stops the renewals.
 import { useState } from "react";
 
+import { ask } from "../ask.js";
 import { api, post } from "../api.js";
 import { Card, State, date, errorText } from "../ui.js";
 import { useAdmin } from "./common.js";
@@ -19,7 +20,7 @@ interface Payment {
 }
 
 // What a Star brings after Fragment and the TON exchange (README, «Оплата звёздами»).
-const USD_PER_STAR = 0.0124;
+export const USD_PER_STAR = 0.0124;
 
 export function Payments() {
   const { data, error, load } = useAdmin<Payment[]>("/admin/payments");
@@ -31,9 +32,12 @@ export function Payments() {
   const stars = thisMonth.reduce((sum, row) => sum + row.stars, 0);
   const refund = async (row: Payment) => {
     if (
-      !confirm(
-        `Вернуть ${String(row.stars)} ⭐ за #${row.channel ?? "?"}? Тариф закончится сразу, продления прекратятся.`
-      )
+      !(await ask({
+        title: `Вернуть ${String(row.stars)} ⭐ за #${row.channel ?? "?"}?`,
+        text: "Тариф закончится сразу, продления прекратятся.",
+        confirm: "Вернуть звёзды",
+        danger: true
+      }))
     ) {
       return;
     }

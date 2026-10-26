@@ -3,6 +3,7 @@ import yandereUrl from "./assets/yandere.webp";
 import {
   EventQueue,
   getToken,
+  isOutdated,
   parseEvent,
   previewTone,
   readingTimeMs,
@@ -55,6 +56,19 @@ let active: RoastEvent | undefined;
 let attempt = 0;
 let reconnectTimer: number | undefined;
 let stopped = false;
+let outdated = false;
+
+/** After a release the overlay reloads itself between roasts: OBS never reloads it on its own. */
+async function checkVersion() {
+  if (import.meta.env.DEV) return;
+  try {
+    const response = await fetch(new URL("version.json", location.href), { cache: "no-store" });
+    if (response.ok && isOutdated(__OVERLAY_BUILD__, await response.json())) outdated = true;
+  } catch {
+    return;
+  }
+  if (outdated && !active) location.reload();
+}
 
 function send(value: unknown) {
   if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(value));
@@ -84,7 +98,11 @@ function showCharacter(tone: Tone | undefined, custom?: Character) {
 function next() {
   if (active) return;
   const event = queue.shift();
-  if (!event) return;
+  if (!event) {
+    // Reload only with nothing left to play: queued roasts are already acknowledged.
+    if (outdated) location.reload();
+    return;
+  }
   active = event;
   viewer.textContent = `@${event.viewerLogin}`;
   roastText.textContent = event.text;
@@ -156,6 +174,8 @@ function connect() {
   connection.textContent = attempt ? "Переподключение…" : "Подключение…";
   socket = new WebSocket(websocketUrl(token, location, configured));
   socket.addEventListener("open", () => {
+    // A release restarts the API, so every reconnect is a good moment to look for a new overlay.
+    if (attempt > 0) void checkVersion();
     attempt = 0;
     connection.hidden = true;
     send({

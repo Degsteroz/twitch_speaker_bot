@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   EventQueue,
   getToken,
+  isOutdated,
   parseEvent,
   previewTone,
   readingTimeMs,
@@ -81,5 +82,15 @@ describe("overlay protocol", () => {
     expect(readingTimeMs("")).toBe(4_000);
     expect(readingTimeMs("а".repeat(100))).toBe(11_000);
     expect(readingTimeMs("а".repeat(1_000))).toBe(15_000);
+  });
+});
+
+describe("isOutdated", () => {
+  it("reloads only for another build named in version.json", () => {
+    expect(isOutdated("b1", { build: "b2" })).toBe(true);
+    expect(isOutdated("b1", { build: "b1" })).toBe(false);
+    for (const broken of [null, "b2", {}, { build: "" }, { build: 2 }]) {
+      expect(isOutdated("b1", broken)).toBe(false);
+    }
   });
 });

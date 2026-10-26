@@ -1,6 +1,7 @@
 // Invite links: roast.recursia.online/i/<code>, optionally with a plan for some days.
 import { useState, type SyntheticEvent } from "react";
 
+import { ask } from "../ask.js";
 import { api, post } from "../api.js";
 import { Card, Field, date, errorText } from "../ui.js";
 import { useAdmin } from "./common.js";
@@ -50,7 +51,15 @@ export function InviteLinks() {
     }
   };
   const revoke = async (row: InviteLinkRow) => {
-    if (!confirm("Отозвать ссылку? По ней больше никто не войдёт.")) return;
+    if (
+      !(await ask({
+        title: "Отозвать ссылку?",
+        text: "По ней больше никто не войдёт.",
+        confirm: "Отозвать",
+        danger: true
+      }))
+    )
+      return;
     try {
       await api(`/admin/invite-links/${row.code}/revoke`, post());
       await load();

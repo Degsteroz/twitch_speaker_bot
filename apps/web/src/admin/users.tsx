@@ -1,6 +1,7 @@
 // Users: requests waiting for approval, invites, accounts with plan and quota dialogs.
 import { useEffect, useState } from "react";
 
+import { ask } from "../ask.js";
 import { api, post } from "../api.js";
 import { Card, Dialog, Field, Link, State, date, errorText, navigate } from "../ui.js";
 import { useAdmin } from "./common.js";
@@ -151,9 +152,18 @@ function Requests({
               </button>
               <button
                 className="mini danger"
-                onClick={() => {
-                  if (confirm(`Отклонить заявку @${user.login}?`)) onReject(user);
-                }}
+                onClick={() =>
+                  void (async () => {
+                    if (
+                      await ask({
+                        title: `Отклонить заявку @${user.login}?`,
+                        confirm: "Отклонить",
+                        danger: true
+                      })
+                    )
+                      onReject(user);
+                  })()
+                }
               >
                 Отклонить
               </button>
@@ -220,13 +230,22 @@ function AccountRow({
         {!self && (
           <button
             className="mini danger"
-            onClick={() => {
-              const suspend = user.status === "active";
-              if (!suspend) onMutate("activate", "доступ возвращён");
-              else if (confirm(`Приостановить @${user.login}? Бот замолчит на его канале.`)) {
-                onMutate("suspend", "приостановлен");
-              }
-            }}
+            onClick={() =>
+              void (async () => {
+                const suspend = user.status === "active";
+                if (!suspend) onMutate("activate", "доступ возвращён");
+                else if (
+                  await ask({
+                    title: `Приостановить @${user.login}?`,
+                    text: "Бот замолчит на его канале.",
+                    confirm: "Приостановить",
+                    danger: true
+                  })
+                ) {
+                  onMutate("suspend", "приостановлен");
+                }
+              })()
+            }
           >
             {user.status === "active" ? "Приостановить" : "Вернуть"}
           </button>
@@ -234,15 +253,20 @@ function AccountRow({
         {user.mfa_enabled && !self && (
           <button
             className="mini"
-            onClick={() => {
-              if (
-                confirm(
-                  `Сбросить 2FA для @${user.login}? Делайте это, только убедившись, что пишет сам стример.`
-                )
-              ) {
-                onMutate("mfa/reset", "2FA сброшена");
-              }
-            }}
+            onClick={() =>
+              void (async () => {
+                if (
+                  await ask({
+                    title: `Сбросить 2FA для @${user.login}?`,
+                    text: "Делайте это, только убедившись, что пишет сам стример.",
+                    confirm: "Сбросить",
+                    danger: true
+                  })
+                ) {
+                  onMutate("mfa/reset", "2FA сброшена");
+                }
+              })()
+            }
           >
             Сбросить 2FA
           </button>
