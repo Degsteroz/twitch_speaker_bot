@@ -6,6 +6,7 @@ export const ADMIN_TABS = [
   ["users", "Пользователи"],
   ["roasts", "Роасты"],
   ["moderation", "Модерация"],
+  ["characters", "Героини"],
   ["payments", "Платежи"],
   ["settings", "Глобальные"],
   ["audit", "Аудит"]

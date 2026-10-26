@@ -59,24 +59,31 @@ export interface ChatRoast {
 
 /**
  * Decides whether a chat message triggers a roast: `!роаст` when the channel enabled it and its
- * plan includes it, or a keyword with `keywordChancePercent`. Other commands and known bots are
- * ignored. Who is roasted is the channel's targetMode, applied by the worker; the streamer's own
+ * plan includes it, or a keyword (or the premium character's name, when `nameMention` is on) with
+ * `keywordChancePercent`. Other commands, known bots and
+ * the channel's `ignoredUsers` are ignored. Who is roasted is the channel's targetMode, applied by the worker; the streamer's own
  * message has no other author, so it always roasts the streamer.
  */
 export function chatTrigger(
   chat: ChatMessage,
   triggers: TriggerSettings,
-  options: { commandAllowed?: boolean; random?: () => number } = {}
+  options: { commandAllowed?: boolean; characterName?: string; random?: () => number } = {}
 ): ChatRoast | null {
-  const { commandAllowed = false, random = Math.random } = options;
-  if (KNOWN_BOTS.has(chat.username.toLowerCase())) return null;
+  const { commandAllowed = false, characterName, random = Math.random } = options;
+  const login = chat.username.toLowerCase();
+  if (KNOWN_BOTS.has(login) || triggers.ignoredUsers.includes(login)) return null;
   const target: RoastTarget = chat.isBroadcaster ? "streamer" : "viewer";
   if (triggers.command && commandAllowed) {
     const inputText = parseRoastCommand(chat.message, chat.displayName);
     if (inputText !== null) return { source: "chat_command", inputText, target };
   }
   if (chat.message.trimStart().startsWith("!")) return null;
-  if (!triggers.keywords.length || !matchKeyword(chat.message, triggers.keywords)) return null;
+  // A premium character's name works like one more keyword, with the same chance and pauses.
+  const words =
+    triggers.nameMention && characterName
+      ? [...triggers.keywords, characterName]
+      : triggers.keywords;
+  if (!words.length || !matchKeyword(chat.message, words)) return null;
   if (!rollPercent(triggers.keywordChancePercent, random())) return null;
   return { source: "chat_keyword", inputText: chat.message, target };
 }

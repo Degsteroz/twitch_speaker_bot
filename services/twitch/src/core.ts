@@ -43,6 +43,8 @@ export async function enqueueEvent(
     eventSummary?: string;
     /** The channel's Twitch category, already filtered with gameContext(). */
     game?: string;
+    /** Hold the job this long, e.g. until a donation alert has been read out. */
+    delaySeconds?: number;
     raw: JSONValue;
   }
 ): Promise<boolean> {
@@ -51,19 +53,23 @@ export async function enqueueEvent(
     values(${input.channelId},${input.source},${input.providerEventId},${sql.json(input.raw)})
     on conflict(channel_id,provider_event_id) where provider_event_id is not null do nothing returning id`;
   if (!event) return false;
-  await boss.send(ROAST_REQUESTED_QUEUE, {
-    jobVersion: 1,
-    eventId: event.id,
-    channelId: input.channelId,
-    source: input.source,
-    ...(input.viewerId ? { viewerId: input.viewerId } : {}),
-    viewerLogin: input.viewerLogin,
-    inputText: input.inputText.slice(0, 2_000),
-    target: input.target,
-    ...(input.eventSummary ? { eventSummary: input.eventSummary.slice(0, 500) } : {}),
-    ...(input.game ? { game: input.game.slice(0, 100) } : {}),
-    requestedAt: new Date().toISOString()
-  });
+  await boss.send(
+    ROAST_REQUESTED_QUEUE,
+    {
+      jobVersion: 1,
+      eventId: event.id,
+      channelId: input.channelId,
+      source: input.source,
+      ...(input.viewerId ? { viewerId: input.viewerId } : {}),
+      viewerLogin: input.viewerLogin,
+      inputText: input.inputText.slice(0, 2_000),
+      target: input.target,
+      ...(input.eventSummary ? { eventSummary: input.eventSummary.slice(0, 500) } : {}),
+      ...(input.game ? { game: input.game.slice(0, 100) } : {}),
+      requestedAt: new Date().toISOString()
+    },
+    input.delaySeconds ? { startAfter: input.delaySeconds } : {}
+  );
   return true;
 }
 

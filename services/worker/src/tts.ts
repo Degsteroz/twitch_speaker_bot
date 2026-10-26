@@ -1,11 +1,16 @@
-import { yandexTtsRequestsFor, type Tone, type VoiceProvider } from "@roastbot/shared";
+import { yandexTtsRequestsFor, type Archetype, type VoiceProvider } from "@roastbot/shared";
 
 import type { WorkerConfig } from "./config.js";
 
-// Each character has its own Yandex SpeechKit voice; picked by ear from samples (2026-10).
-export const CHARACTER_VOICES: Readonly<Record<Tone, { voice: string; role: string }>> = {
+// Each archetype has its own Yandex SpeechKit voice: the voice after the ElevenLabs cap, on
+// economy roasts and when ElevenLabs fails. Mitsuki and Ai were picked by ear from samples
+// (2026-10); the other three from the SpeechKit voice list.
+export const CHARACTER_VOICES: Readonly<Record<Archetype, { voice: string; role: string }>> = {
   tsundere: { voice: "julia", role: "strict" },
-  yandere: { voice: "jane", role: "good" }
+  yandere: { voice: "jane", role: "good" },
+  kuudere: { voice: "julia", role: "neutral" },
+  dandere: { voice: "marina", role: "whisper" },
+  himedere: { voice: "dasha", role: "strict" }
 };
 
 // 0.1626 ₽ with VAT per request is about $0.00133 without VAT (pricing page, 2026-10); rounded up
@@ -41,9 +46,11 @@ export interface VoiceReservations {
   elevenlabs: ReserveRequests;
 }
 
-/** The ElevenLabs voice for this character, when the owner configured one. */
-function elevenLabsVoice(tone: Tone, config: WorkerConfig): string | undefined {
-  return tone === "yandere" ? config.ELEVENLABS_VOICE_YANDERE : config.ELEVENLABS_VOICE_TSUNDERE;
+/** The ElevenLabs voice of a built-in character, when the owner configured one. */
+function elevenLabsVoice(tone: Archetype, config: WorkerConfig): string | undefined {
+  if (tone === "tsundere") return config.ELEVENLABS_VOICE_TSUNDERE;
+  if (tone === "yandere") return config.ELEVENLABS_VOICE_YANDERE;
+  return undefined;
 }
 
 async function synthesizeElevenLabs(
@@ -67,7 +74,7 @@ async function synthesizeElevenLabs(
 
 async function synthesizeYandex(
   text: string,
-  tone: Tone,
+  tone: Archetype,
   apiKey: string,
   fetcher: typeof globalThis.fetch
 ): Promise<Uint8Array> {
@@ -115,6 +122,10 @@ export interface SpeakOptions {
   best?: VoiceProvider;
   /** False skips the local Piper: the landing demo stays silent rather than load the server. */
   piper?: boolean;
+  /** A premium character's ElevenLabs voice instead of the built-in one; null means none. */
+  voiceId?: string | null;
+  /** False stops after ElevenLabs: a voice sample must be that voice or nothing. */
+  yandex?: boolean;
   log?: (message: string) => void;
 }
 
@@ -127,7 +138,7 @@ export interface SpeakOptions {
  */
 export async function speak(
   text: string,
-  tone: Tone,
+  tone: Archetype,
   config: WorkerConfig,
   fetcher: typeof globalThis.fetch,
   reserve: VoiceReservations,
@@ -135,7 +146,7 @@ export async function speak(
 ): Promise<Speech | null>;
 export async function speak(
   text: string,
-  tone: Tone,
+  tone: Archetype,
   config: WorkerConfig,
   fetcher: typeof globalThis.fetch,
   reserve: VoiceReservations,
@@ -143,17 +154,27 @@ export async function speak(
 ): Promise<Speech>;
 export async function speak(
   text: string,
-  tone: Tone,
+  tone: Archetype,
   config: WorkerConfig,
   fetcher: typeof globalThis.fetch,
   reserve: VoiceReservations,
-  { best = "elevenlabs", piper = true, log = console.warn }: SpeakOptions = {}
+  {
+    best = "elevenlabs",
+    piper = true,
+    voiceId: customVoice,
+    yandex = true,
+    log = console.warn
+  }: SpeakOptions = {}
 ): Promise<Speech | null> {
   const allowed = (provider: VoiceProvider) =>
     VOICE_ORDER.indexOf(provider) >= VOICE_ORDER.indexOf(best);
   let fallbackReason = allowed("yandex") ? "no_cloud_voice" : "plan_voice";
   const voiceId =
-    config.ELEVENLABS_API_KEY && allowed("elevenlabs") ? elevenLabsVoice(tone, config) : undefined;
+    config.ELEVENLABS_API_KEY && allowed("elevenlabs")
+      ? customVoice === undefined
+        ? elevenLabsVoice(tone, config)
+        : (customVoice ?? undefined)
+      : undefined;
   if (voiceId) {
     const characters = Array.from(text).length;
     if (await reserve.elevenlabs(characters)) {
@@ -172,7 +193,7 @@ export async function speak(
       fallbackReason = "elevenlabs_tts_monthly_limit";
     }
   }
-  if (config.YANDEX_TTS_API_KEY && allowed("yandex")) {
+  if (config.YANDEX_TTS_API_KEY && yandex && allowed("yandex")) {
     const requests = yandexTtsRequestsFor(text);
     if (await reserve.yandex(requests)) {
       try {

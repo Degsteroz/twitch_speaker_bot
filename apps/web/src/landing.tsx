@@ -30,6 +30,8 @@ interface ShowcaseRoast {
   id: string;
   text: string;
   tone: "tsundere" | "yandere";
+  /** A premium character's name; null for Mitsuki and Ai. */
+  characterName: string | null;
   channel: string;
 }
 
@@ -51,7 +53,7 @@ function Showcase() {
           <article className="card" key={roast.id}>
             <blockquote>«{roast.text}»</blockquote>
             <small>
-              {CHARACTER_NAMES[roast.tone]} на канале{" "}
+              {roast.characterName ?? CHARACTER_NAMES[roast.tone]} на канале{" "}
               <a href={`https://twitch.tv/${roast.channel}`} target="_blank" rel="noreferrer">
                 {roast.channel}
               </a>

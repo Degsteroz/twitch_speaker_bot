@@ -4,6 +4,8 @@ import { createDatabase } from "@roastbot/db";
 import {
   COMMAND_PLANS,
   COOLDOWN_SOURCES,
+  CUSTOM_CHARACTER_PLANS,
+  donationDelaySeconds,
   gameContext,
   ROAST_REQUESTED_QUEUE,
   ROAST_REQUESTED_QUEUE_OPTIONS,
@@ -68,6 +70,8 @@ interface ChannelRow {
   triggers: unknown;
   scopes: string[];
   planCode: string | null;
+  /** The premium character's name on this channel, when she is usable. */
+  characterName: string | null;
   accessCiphertext: string;
   accessIv: string;
   accessTag: string;
@@ -89,9 +93,12 @@ async function activeChannels(): Promise<Channel[]> {
       t.access_token_ciphertext "accessCiphertext",
       t.access_token_iv "accessIv",t.access_token_tag "accessTag",
       t.refresh_token_ciphertext "refreshCiphertext",t.refresh_token_iv "refreshIv",
-      t.refresh_token_tag "refreshTag",t.expires_at "expiresAt",p.code "planCode"
+      t.refresh_token_tag "refreshTag",t.expires_at "expiresAt",p.code "planCode",
+      coalesce(s.character_name, ch.name) "characterName"
     from channels c join users u on u.id=c.user_id join settings s on s.channel_id=c.id
     join twitch_tokens t on t.channel_id=c.id
+    left join characters ch on ch.id=s.character_id and ch.image_hash is not null
+      and (ch.author_channel_id=c.id or ch.status='published')
     left join lateral (
       select sub.plan_id from subscriptions sub
       where sub.user_id=u.id and (sub.valid_until is null or sub.valid_until>now())
@@ -154,7 +161,12 @@ chat.on("message", (channelName, tags, message, self) => {
       isBroadcaster: tags["user-id"] === channel.twitchId
     },
     channel.triggers,
-    { commandAllowed: COMMAND_PLANS.has(channel.planCode ?? "") }
+    {
+      commandAllowed: COMMAND_PLANS.has(channel.planCode ?? ""),
+      ...(channel.characterName && CUSTOM_CHARACTER_PLANS.has(channel.planCode ?? "")
+        ? { characterName: channel.characterName }
+        : {})
+    }
   );
   if (!roast) return;
   void (async () => {
@@ -554,6 +566,11 @@ async function reconcileDonations(channels: Channel[]): Promise<void> {
           target: roast.target,
           ...(roast.eventSummary ? { eventSummary: roast.eventSummary } : {}),
           ...(await withGame(channel)),
+          // DonationAlerts plays its alert and reads the message first; answer after it.
+          delaySeconds: donationDelaySeconds(
+            roast.inputText,
+            channel.triggers.events.donation.delaySec
+          ),
           raw: donation as JSONValue
         });
       },

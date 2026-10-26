@@ -10,7 +10,8 @@ import {
   type DonationAlertsStatus,
   type EventTriggers,
   type RewardsResponse,
-  type Triggers
+  type Triggers,
+  twitchLogin
 } from "../api.js";
 import { KEYWORD_CHANCE_STEPS, ScaleChoice } from "./controls.js";
 import { Card, Tags } from "../ui.js";
@@ -20,34 +21,34 @@ export interface EventRow {
   key: EventKey;
   title: string;
   hint: string;
-  /** Rendered inline: "{before} [input] {after}". */
-  threshold?: { field: string; before: string; after: string; min: number; max: number };
+  /** Each rendered inline: "{before} [input] {after}". */
+  thresholds?: { field: string; before: string; after: string; min: number; max: number }[];
 }
 export const EVENT_ROWS: EventRow[] = [
   {
     key: "cheer",
     title: "Битсы",
     hint: "по тексту cheer",
-    threshold: { field: "minBits", before: "от", after: "битсов", min: 1, max: 1_000_000 }
+    thresholds: [{ field: "minBits", before: "от", after: "битсов", min: 1, max: 1_000_000 }]
   },
   { key: "subscription", title: "Подписки и ресабы", hint: "учитывает стаж" },
   {
     key: "giftSub",
     title: "Подарочные сабы",
     hint: "привет щедрому дарителю",
-    threshold: { field: "minCount", before: "от", after: "сабов", min: 1, max: 1_000 }
+    thresholds: [{ field: "minCount", before: "от", after: "сабов", min: 1, max: 1_000 }]
   },
   {
     key: "raid",
     title: "Рейды",
     hint: "встречает рейдера",
-    threshold: { field: "minViewers", before: "от", after: "зрителей", min: 0, max: 1_000_000 }
+    thresholds: [{ field: "minViewers", before: "от", after: "зрителей", min: 0, max: 1_000_000 }]
   },
   {
     key: "follow",
     title: "Фоллоу",
     hint: "фоллоу бывает много, шанс лучше держать небольшим",
-    threshold: { field: "chancePercent", before: "шанс", after: "%", min: 0, max: 100 }
+    thresholds: [{ field: "chancePercent", before: "шанс", after: "%", min: 0, max: 100 }]
   },
   { key: "prediction", title: "Итоги прогнозов", hint: "про главного проигравшего" },
   { key: "adBreak", title: "Реклама", hint: "пока идёт реклама" },
@@ -55,13 +56,17 @@ export const EVENT_ROWS: EventRow[] = [
     key: "donation",
     title: "Донаты DonationAlerts",
     hint: "по тексту доната",
-    threshold: {
-      field: "minAmount",
-      before: "от",
-      after: "в валюте доната",
-      min: 0,
-      max: 10_000_000
-    }
+    thresholds: [
+      { field: "minAmount", before: "от", after: "в валюте доната", min: 0, max: 10_000_000 },
+      // The time to read the message is added on top (donationDelaySeconds in packages/shared).
+      {
+        field: "delaySec",
+        before: "пауза после алерта",
+        after: "сек + время на чтение текста",
+        min: 0,
+        max: 60
+      }
+    ]
   }
 ];
 
@@ -111,11 +116,14 @@ export function TriggerSettings({
   triggers,
   rewards,
   commandAvailable,
+  characterName,
   onChange
 }: {
   triggers: Triggers;
   rewards: RewardsResponse | undefined;
   commandAvailable: boolean;
+  /** The premium character on air; her name can work as a trigger word. */
+  characterName: string | null;
   onChange: (triggers: Triggers) => void;
 }) {
   const set = (patch: Partial<Triggers>) => onChange({ ...triggers, ...patch });
@@ -175,6 +183,19 @@ export function TriggerSettings({
             </small>
           </span>
         </label>
+        {characterName && (
+          <label className="check">
+            <input
+              type="checkbox"
+              checked={triggers.nameMention}
+              onChange={(event) => set({ nameMention: event.target.checked })}
+            />
+            <span>
+              Откликаться на имя «{characterName}»{" "}
+              <small>— как на слово-триггер: с тем же шансом и паузами</small>
+            </span>
+          </label>
+        )}
         <Tags
           legend="Слова-триггеры"
           placeholder="Например: слился ↵"
@@ -186,7 +207,7 @@ export function TriggerSettings({
           сообщения ботов пропускаются, на сообщение самого стримера достаётся стримеру. Проверяете
           сами — поставьте «Всегда» и учтите паузы из «Тонкой настройки».
         </small>
-        {triggers.keywords.length > 0 && (
+        {(triggers.keywords.length > 0 || (characterName && triggers.nameMention)) && (
           <ScaleChoice
             label="Как часто отвечать на слово"
             value={triggers.keywordChancePercent}
@@ -194,6 +215,22 @@ export function TriggerSettings({
             onChange={(keywordChancePercent) => set({ keywordChancePercent })}
           />
         )}
+        <Tags
+          legend="Игнорировать в чате"
+          placeholder="Логин бота, например: moobot ↵"
+          value={triggers.ignoredUsers}
+          onChange={(list) =>
+            set({
+              ignoredUsers: [
+                ...new Set(list.map(twitchLogin).filter((login): login is string => !!login))
+              ]
+            })
+          }
+        />
+        <small className="hint below">
+          Боты канала и спамеры: их сообщения не запускают роаст, даже если в них слово-триггер или{" "}
+          <code>!роаст</code>. Nightbot, StreamElements и другие известные боты пропускаются и так.
+        </small>
       </Card>
       <Card tour="events">
         <p className="label">СОБЫТИЯ</p>
@@ -201,7 +238,6 @@ export function TriggerSettings({
         <DonationAlertsLink />
         {EVENT_ROWS.map((row) => {
           const value = triggers.events[row.key] as { enabled: boolean } & Record<string, number>;
-          const threshold = row.threshold;
           return (
             <div className="event-row" key={row.key}>
               <label className="check">
@@ -214,26 +250,27 @@ export function TriggerSettings({
                   {row.title} <small>— {row.hint}</small>
                 </span>
               </label>
-              {threshold && value.enabled && (
-                <label className="threshold">
-                  {threshold.before}
-                  <input
-                    type="number"
-                    min={threshold.min}
-                    max={threshold.max}
-                    value={value[threshold.field]}
-                    onChange={(event) =>
-                      setEvent(row.key, {
-                        [threshold.field]: Math.max(
-                          threshold.min,
-                          Math.min(threshold.max, Math.round(Number(event.target.value) || 0))
-                        )
-                      })
-                    }
-                  />
-                  {threshold.after}
-                </label>
-              )}
+              {value.enabled &&
+                row.thresholds?.map((threshold) => (
+                  <label className="threshold" key={threshold.field}>
+                    {threshold.before}
+                    <input
+                      type="number"
+                      min={threshold.min}
+                      max={threshold.max}
+                      value={value[threshold.field]}
+                      onChange={(event) =>
+                        setEvent(row.key, {
+                          [threshold.field]: Math.max(
+                            threshold.min,
+                            Math.min(threshold.max, Math.round(Number(event.target.value) || 0))
+                          )
+                        })
+                      }
+                    />
+                    {threshold.after}
+                  </label>
+                ))}
             </div>
           );
         })}

@@ -15,11 +15,14 @@ import {
   inspectOutput,
   parseClassifierVerdict,
   pricingForModel,
+  spokenText,
   type ViewerHistory
 } from "@roastbot/prompts";
 import {
+  ARCHETYPE_THEME,
   BLOCKED_OUTPUT_FALLBACK,
   BRANDED_PLANS,
+  CUSTOM_CHARACTER_PLANS,
   COOLDOWN_SOURCES,
   DASHBOARD_TEST_DAILY_LIMIT,
   OPTOUT_SKIPPED_SOURCES,
@@ -32,6 +35,7 @@ import {
   roastRequestedJobSchema,
   triggerSettingsSchema,
   COMMAND_PLANS,
+  type Archetype,
   type RoastRequestedJob,
   type EconomyVoice,
   type RoastStatus,
@@ -68,6 +72,13 @@ interface ChannelContext {
   premiumRoasts: number | null;
   economyModel: string;
   economyVoice: EconomyVoice;
+  /** The chosen premium character, when it is usable: own or published, with a picture. */
+  characterId: string | null;
+  characterName: string | null;
+  archetype: Archetype | null;
+  /** Her ElevenLabs voice, when the owner still offers it. */
+  characterVoiceId: string | null;
+  imageHash: string | null;
 }
 
 export interface PipelineDependencies {
@@ -118,7 +129,9 @@ async function loadContext(sql: Sql, channelId: string): Promise<ChannelContext 
       s.cooldown_sec "cooldownSec", s.user_cooldown_sec "userCooldownSec",
       s.stop_words "stopWords", s.triggers, p.monthly_roast_limit "monthlyLimit",
       p.code "planCode", p.premium_roasts "premiumRoasts", p.economy_model "economyModel",
-      p.economy_voice "economyVoice"
+      p.economy_voice "economyVoice", ch.id "characterId",
+      coalesce(s.character_name, ch.name) "characterName", ch.archetype,
+      v.id "characterVoiceId", ch.image_hash "imageHash"
     from channels c join users u on u.id=c.user_id join settings s on s.channel_id=c.id
     left join lateral (
       select sub.plan_id from subscriptions sub
@@ -126,6 +139,9 @@ async function loadContext(sql: Sql, channelId: string): Promise<ChannelContext 
       order by sub.created_at desc limit 1
     ) sub on true
     left join plans p on p.id=sub.plan_id
+    left join characters ch on ch.id=s.character_id and ch.image_hash is not null
+      and (ch.author_channel_id=c.id or ch.status='published')
+    left join voices v on v.id=ch.voice_id and v.enabled
     where c.id=${channelId}`;
   return context;
 }
@@ -259,9 +275,13 @@ async function bookTier(
  * Atomically reserves Yandex requests for the Moscow-time billing month. The upsert only grows
  * the counter while it stays within the cap, so parallel roasts cannot overshoot it together.
  */
+// Enough for the thread of a conversation; older lines only add tokens.
+const HISTORY_EXCHANGES = 3;
+
 /**
- * What the character remembers of this viewer on this channel: roasts in the last 12 hours and
- * 30 days, and her last reply. The streamer's own events (ads, anonymous gifts) have no memory.
+ * What the character remembers of this viewer on this channel: the last few exchanges in the last
+ * 12 hours (roughly this stream), what they wrote and what she answered. No counts: "your 24th
+ * time" is not a joke. The streamer's own events (ads, anonymous gifts) have no memory.
  */
 async function viewerHistory(
   sql: Sql,
@@ -270,20 +290,12 @@ async function viewerHistory(
   streamerLogin: string
 ): Promise<ViewerHistory | undefined> {
   if (job.viewerLogin.toLowerCase() === streamerLogin.toLowerCase()) return undefined;
-  const [row] = await sql<{ today: number; month: number; lastReply: string | null }[]>`
-    select count(*) filter (where created_at > now()-interval '12 hours')::int "today",
-      count(*)::int "month",
-      (array_agg(output_text order by created_at desc)
-        filter (where status='done' and output_text is not null))[1] "lastReply"
-    from roasts where channel_id=${job.channelId} and viewer_login=${job.viewerLogin}
-      and id<>${roastId} and status in ('done','blocked_output')
-      and created_at > now()-interval '30 days'`;
-  if (!row?.month) return undefined;
-  return {
-    today: row.today,
-    month: row.month,
-    ...(row.lastReply ? { lastReply: row.lastReply } : {})
-  };
+  const rows = await sql<{ message: string; reply: string }[]>`
+    select input_text "message", output_text "reply" from roasts
+    where channel_id=${job.channelId} and viewer_login=${job.viewerLogin} and id<>${roastId}
+      and status='done' and output_text is not null and created_at > now()-interval '12 hours'
+    order by created_at desc limit ${HISTORY_EXCHANGES}`;
+  return rows.length ? { exchanges: rows.reverse() } : undefined;
 }
 
 export async function reserveYandexRequests(
@@ -306,7 +318,12 @@ export async function reserveYandexRequests(
 
 // ElevenLabs counts characters per calendar month; same atomic upsert as Yandex, the row
 // stores characters in `requests`.
-async function reserveElevenLabsCharacters(sql: Sql, now: Date, characters: number, limit: number) {
+export async function reserveElevenLabsCharacters(
+  sql: Sql,
+  now: Date,
+  characters: number,
+  limit: number
+) {
   if (characters > limit) return false;
   const reserved = await sql`
     insert into tts_usage_monthly(provider,month,requests)
@@ -412,7 +429,25 @@ export async function processRoast(
     const model = tier === "premium" ? globalModel : context.economyModel;
     // The classifier is the safety net: it stays the same on every tier.
     const classifierModel = await globalValue(deps.sql, "classifier_model", globalModel);
-    await deps.sql`update roasts set tier=${tier}, model=${model} where id=${roastId}`;
+    // A premium character only on a plan that includes her; after a downgrade the built-in one
+    // speaks again, and the choice waits in settings for an upgrade.
+    const character =
+      context.characterId &&
+      context.characterName &&
+      context.archetype &&
+      context.imageHash &&
+      CUSTOM_CHARACTER_PLANS.has(context.planCode ?? "")
+        ? {
+            id: context.characterId,
+            name: context.characterName,
+            archetype: context.archetype,
+            voiceId: context.characterVoiceId,
+            imagePath: `/characters/${context.characterId}/image?v=${context.imageHash.slice(0, 16)}`
+          }
+        : undefined;
+    const archetype: Archetype = character?.archetype ?? context.tone;
+    await deps.sql`update roasts set tier=${tier}, model=${model}, tone=${archetype},
+      character_id=${character?.id ?? null} where id=${roastId}`;
     // Instructions go in `system`, the viewer's data alone in the user turn. Thinking and effort
     // per model live in modelRequest().
     // The channel's switch picks the target; a job without an author (anonymous gift, ad break,
@@ -431,6 +466,7 @@ export async function processRoast(
       viewer: job.viewerLogin,
       message: job.inputText,
       tone: context.tone,
+      ...(character ? { character: { name: character.name, archetype } } : {}),
       toxicity: context.toxicity,
       target,
       streamer: context.streamerLogin,
@@ -488,9 +524,10 @@ export async function processRoast(
       "elevenlabs_monthly_char_limit",
       DEFAULT_ELEVENLABS_MONTHLY_CHAR_LIMIT
     );
+    const spoken = spokenText(output);
     const speech = await speak(
-      output,
-      context.tone,
+      spoken,
+      archetype,
       deps.config,
       deps.fetch ?? globalThis.fetch,
       {
@@ -498,7 +535,11 @@ export async function processRoast(
         elevenlabs: (characters) =>
           reserveElevenLabsCharacters(deps.sql, clock(), characters, elevenLabsLimit)
       },
-      { best: tier === "premium" ? "elevenlabs" : context.economyVoice }
+      {
+        best: tier === "premium" ? "elevenlabs" : context.economyVoice,
+        // A premium character speaks in her own voice; without one, the archetype's voice.
+        ...(character ? { voiceId: character.voiceId } : {})
+      }
     );
     if (speech.costUsd > 0) {
       spends.push({
@@ -511,7 +552,7 @@ export async function processRoast(
     const audioFile = await storeAudio(speech.audio, deps.config.AUDIO_DIR);
     const now = clock();
     const expiresAt = new Date(now.getTime() + OVERLAY_EVENT_TTL_SECONDS * 1000);
-    const ttsChars = Array.from(output).length;
+    const ttsChars = Array.from(spoken).length;
     const currentRoastId = roastId;
 
     await deps.sql.begin(async (tx) => {
@@ -533,7 +574,10 @@ export async function processRoast(
         roastId: currentRoastId,
         viewerLogin: job.viewerLogin,
         text: output,
-        tone: context.tone,
+        tone: ARCHETYPE_THEME[archetype],
+        ...(character
+          ? { character: { name: character.name, imagePath: character.imagePath } }
+          : {}),
         ...(BRANDED_PLANS.has(context.planCode ?? "") ? { branding: true } : {}),
         audioFile,
         expiresAt: expiresAt.toISOString(),

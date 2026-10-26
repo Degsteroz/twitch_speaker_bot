@@ -1766,3 +1766,87 @@ td small {
     grid-template-columns: 1fr;
   }
 }
+
+/* Premium characters: own heroines and the shop. */
+.character-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 240px), 1fr));
+  gap: 10px;
+  margin-bottom: 12px;
+}
+.character-tile {
+  display: flex;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 13px;
+  background: #111018;
+  min-width: 0;
+}
+.character-tile.active {
+  border-color: #8f65da;
+  background: #1b1725;
+}
+.character-portrait {
+  flex: none;
+  width: 64px;
+  height: 128px;
+  object-fit: contain;
+  object-position: bottom;
+}
+.character-portrait.empty {
+  display: grid;
+  place-items: center;
+  border: 1px dashed var(--line);
+  border-radius: 9px;
+  color: var(--muted);
+  font-size: 11px;
+  text-align: center;
+}
+.character-info {
+  display: grid;
+  align-content: start;
+  gap: 4px;
+  min-width: 0;
+}
+.character-info small {
+  color: var(--muted);
+}
+.character-info small.archetype {
+  color: inherit;
+}
+.character-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+.file-button {
+  position: relative;
+  overflow: hidden;
+}
+.file-button input {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+.character-form,
+.character-rename {
+  display: grid;
+  gap: 10px;
+  margin: 12px 0;
+}
+.voice-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.voice-option span {
+  flex: 1;
+}
+@media (max-width: 560px) {
+  .character-form .choice-grid {
+    grid-template-columns: 1fr;
+  }
+}

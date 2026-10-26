@@ -17,6 +17,8 @@ export interface RoastEvent {
   text: string;
   /** Character to show; absent on events from before characters existed. */
   tone?: Tone;
+  /** A premium character: her picture replaces the built-in one, `tone` stays the card theme. */
+  character?: Character;
   /** Channel-points verdict, shown as a badge; absent for plain roasts. */
   verdict?: Verdict;
   /** Free plan: show the service address under the card. */
@@ -25,6 +27,23 @@ export interface RoastEvent {
   expiresAt: string;
   sentAt: string;
 }
+export interface Character {
+  name: string;
+  imageUrl: string;
+}
+
+/** Only a name and an http(s) picture; anything else is dropped, never the roast. */
+function parseCharacter(value: unknown): Character | null {
+  if (!isRecord(value) || !text(value.name, 20) || !text(value.imageUrl, 500)) return null;
+  try {
+    const url = new URL(value.imageUrl);
+    if (url.protocol !== "https:" && url.protocol !== "http:") return null;
+  } catch {
+    return null;
+  }
+  return { name: value.name, imageUrl: value.imageUrl };
+}
+
 export interface PingEvent {
   version: 1;
   type: "overlay.ping";
@@ -70,10 +89,12 @@ export function parseEvent(raw: string): ServerEvent | null {
     return null;
   }
   // An unknown tone only loses the character, never the roast itself.
-  const { tone, verdict, branding, ...rest } = value;
+  const { tone, character, verdict, branding, ...rest } = value;
+  const custom = parseCharacter(character);
   return {
     ...(rest as unknown as RoastEvent),
     ...(isTone(tone) ? { tone } : {}),
+    ...(custom ? { character: custom } : {}),
     ...(isVerdict(verdict) ? { verdict } : {}),
     ...(branding === true ? { branding: true } : {})
   };

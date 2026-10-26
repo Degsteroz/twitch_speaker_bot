@@ -3,7 +3,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { TWITCH_SCOPES, type StoredOverlayRoast } from "@roastbot/shared";
+import { TWITCH_SCOPES, VOICE_SAMPLE_QUEUE, type StoredOverlayRoast } from "@roastbot/shared";
 import {
   createTestChannel,
   createTestEvent,
@@ -11,6 +11,7 @@ import {
   type TestChannel,
   type TestDatabase
 } from "@roastbot/testing";
+import sharp from "sharp";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { WebSocket } from "@fastify/websocket";
 
@@ -145,7 +146,7 @@ function nextMessage(socket: WebSocket, type: string): Promise<Record<string, un
   });
 }
 
-async function publishOverlayEvent(channel: TestChannel) {
+async function publishOverlayEvent(channel: TestChannel, extra: Partial<StoredOverlayRoast> = {}) {
   const eventId = await createTestEvent(db.sql, channel.channelId);
   const [roast] = await db.sql<{ id: string }[]>`
     insert into roasts(channel_id,event_id,source,viewer_login,tone,voice,toxicity,status,output_text)
@@ -163,7 +164,8 @@ async function publishOverlayEvent(channel: TestChannel) {
     text: "Привет",
     audioFile,
     expiresAt: new Date(Date.now() + 120_000).toISOString(),
-    sentAt: new Date().toISOString()
+    sentAt: new Date().toISOString(),
+    ...extra
   };
   await db.sql`insert into overlay_events(id,channel_id,roast_id,payload,expires_at)
     values(${overlayId},${channel.channelId},${roast!.id},${db.sql.json(payload)},
@@ -973,7 +975,8 @@ describe("favorites and opt-outs", () => {
       id,
       text: "Опять ты, мой хороший.",
       tone: "yandere",
-      channel: streamer.login
+      channel: streamer.login,
+      characterName: null
     });
     // Taking the star back takes it off the landing page.
     await call("POST", `/roasts/${id}/favorite`, streamer, { favorite: false });
@@ -1138,5 +1141,198 @@ describe("Telegram bot and Stars", () => {
       "refundStarPayment"
     ]);
     expect((await call("GET", "/status", streamer)).json()).toMatchObject({ plan: "free" });
+  });
+});
+
+describe("premium characters", () => {
+  const VOICE_ID = "Abcdefghij0123456789";
+  // One of the voices the migrations offer.
+  const OFFERED = "tnjzWy46l6XmxM2yWKnN";
+  // A picture with EXIF the service must not pass on.
+  const portrait = () =>
+    sharp({ create: { width: 300, height: 700, channels: 4, background: "#ff5d9d80" } })
+      .withExif({ IFD0: { Copyright: "secret-location" } })
+      .png()
+      .toBuffer();
+  const upload = (channel: TestChannel, id: string, body: Buffer, type = "image/png") =>
+    app.inject({
+      method: "PUT",
+      url: `/characters/${id}/image`,
+      headers: { cookie: cookieFor(channel), "content-type": type },
+      payload: body
+    });
+  const create = async (channel: TestChannel, name = "Кэт") => {
+    const response = await call("POST", "/characters", channel, {
+      name,
+      archetype: "kuudere",
+      voiceId: OFFERED
+    });
+    expect(response.statusCode).toBe(201);
+    const { id } = response.json<{ id: string }>();
+    expect((await upload(channel, id, await portrait())).statusCode).toBe(200);
+    return id;
+  };
+  const characters = async (channel: TestChannel) =>
+    (await call("GET", "/characters", channel)).json<{
+      allowed: boolean;
+      own: { id: string; status: string; imagePath: string | null }[];
+      shop: { id: string; author: string }[];
+      voices: { id: string; sampleReady: boolean }[];
+    }>();
+
+  it("is premium-only, three per channel, with names checked and pictures re-encoded", async () => {
+    expect(
+      (await call("POST", "/characters", streamer, { name: "Кэт", archetype: "kuudere" })).json()
+    ).toMatchObject({ error: { code: "plan_required" } });
+    const premium = await createTestChannel(db.sql, { plan: "premium" });
+    for (const name of ["deg_oz", "К"]) {
+      expect(
+        (await call("POST", "/characters", premium, { name, archetype: "kuudere" })).statusCode
+      ).toBe(400);
+    }
+    await db.sql`insert into global_settings(key,value) values('global_stop_words','["запретка"]')
+      on conflict(key) do update set value=excluded.value`;
+    expect(
+      (await call("POST", "/characters", premium, { name: "Запретка", archetype: "dandere" }))
+        .statusCode
+    ).toBe(400);
+    await db.sql`delete from global_settings where key='global_stop_words'`;
+    // Once voices are offered, the streamer picks one: that is the point of her own character.
+    expect(
+      (await call("POST", "/characters", premium, { name: "Кэт", archetype: "kuudere" })).json()
+    ).toMatchObject({ error: { message: "Выбери голос" } });
+
+    const id = await create(premium);
+    await create(premium, "Аня");
+    await create(premium, "Мисс Кэт");
+    expect(
+      (
+        await call("POST", "/characters", premium, {
+          name: "Лишняя",
+          archetype: "yandere",
+          voiceId: OFFERED
+        })
+      ).json()
+    ).toMatchObject({ error: { code: "character_limit" } });
+
+    const [own] = (await characters(premium)).own;
+    expect(own).toMatchObject({ id, status: "private" });
+    const image = await app.inject({ method: "GET", url: own!.imagePath! });
+    expect(image.headers["content-type"]).toBe("image/webp");
+    expect((await sharp(image.rawPayload).metadata()).format).toBe("webp");
+    expect(image.rawPayload.includes("secret-location")).toBe(false);
+    expect((await upload(premium, id, Buffer.from("not a picture"))).statusCode).toBe(400);
+    expect((await upload(premium, id, Buffer.from("hello"), "text/plain")).statusCode).toBe(415);
+    // Another channel cannot touch it.
+    expect((await upload(streamer, id, await portrait())).statusCode).toBe(404);
+  });
+
+  it("reaches the shop only after the owner approves it", async () => {
+    const author = await createTestChannel(db.sql, { plan: "premium" });
+    const buyer = await createTestChannel(db.sql, { plan: "premium" });
+    const id = await create(author);
+    // The author uses a private character right away; nobody else sees it.
+    expect((await call("PUT", "/settings/character", author, { characterId: id })).statusCode).toBe(
+      200
+    );
+    expect((await characters(buyer)).shop.some((item) => item.id === id)).toBe(false);
+    expect((await call("PUT", "/settings/character", buyer, { characterId: id })).statusCode).toBe(
+      404
+    );
+
+    expect((await call("POST", `/characters/${id}/publish`, author)).json()).toMatchObject({
+      status: "pending"
+    });
+    expect((await characters(buyer)).shop.some((item) => item.id === id)).toBe(false);
+    const queue = (await call("GET", "/admin/characters", owner)).json<{ id: string }[]>();
+    expect(queue.some((item) => item.id === id)).toBe(true);
+    expect(
+      (await call("POST", `/admin/characters/${id}/review`, owner, { approve: true })).statusCode
+    ).toBe(200);
+    expect((await characters(buyer)).shop).toContainEqual(
+      expect.objectContaining({ id, author: author.login })
+    );
+
+    // The buyer picks her under another name; the name is checked like the author's.
+    expect(
+      (await call("PUT", "/settings/character", buyer, { characterId: id, characterName: "x_1" }))
+        .statusCode
+    ).toBe(400);
+    expect(
+      (
+        await call("PUT", "/settings/character", buyer, { characterId: id, characterName: "Мурка" })
+      ).json()
+    ).toEqual({ characterId: id, characterName: "Мурка" });
+    // A free channel cannot pick her; clearing works on any plan.
+    expect(
+      (await call("PUT", "/settings/character", streamer, { characterId: id })).statusCode
+    ).toBe(403);
+    expect(
+      (await call("PUT", "/settings/character", streamer, { characterId: null })).statusCode
+    ).toBe(200);
+
+    // A published character is locked; the owner can take it off the shop.
+    expect(
+      (
+        await call("PATCH", `/characters/${id}`, author, { name: "Другая", archetype: "yandere" })
+      ).json()
+    ).toMatchObject({ error: { code: "character_published" } });
+    expect((await upload(author, id, await portrait())).statusCode).toBe(409);
+    await call("POST", `/admin/characters/${id}/review`, owner, { approve: false, note: "фон" });
+    expect((await characters(buyer)).shop.some((item) => item.id === id)).toBe(false);
+    expect((await characters(author)).own[0]).toMatchObject({ status: "rejected" });
+    expect(
+      (await call("POST", `/admin/characters/${id}/review`, streamer, { approve: true })).statusCode
+    ).toBe(403);
+  });
+
+  it("lets the owner offer voices, queues their samples and hides switched-off ones", async () => {
+    const added = await call("POST", "/admin/voices", owner, { id: VOICE_ID, label: "Звонкая" });
+    expect(added.statusCode).toBe(201);
+    expect(
+      (await call("POST", "/admin/voices", owner, { id: VOICE_ID, label: "Ещё" })).statusCode
+    ).toBe(409);
+    const [job] = await db.sql<{ data: { voiceId: string } }[]>`
+      select data from pgboss.job where name=${VOICE_SAMPLE_QUEUE} order by created_on desc limit 1`;
+    expect(job?.data).toEqual({ voiceId: VOICE_ID });
+
+    const premium = await createTestChannel(db.sql, { plan: "premium" });
+    expect((await characters(premium)).voices).toContainEqual(
+      expect.objectContaining({ id: VOICE_ID, sampleReady: false })
+    );
+    expect((await call("GET", `/voices/${VOICE_ID}/sample`)).statusCode).toBe(404);
+    await db.sql`update voices set sample=${Buffer.from("RIFFsample")}, sample_status='ready'
+      where id=${VOICE_ID}`;
+    const sample = await call("GET", `/voices/${VOICE_ID}/sample`);
+    expect(sample.headers["content-type"]).toBe("audio/wav");
+
+    await call("PATCH", `/admin/voices/${VOICE_ID}`, owner, { enabled: false });
+    expect((await characters(premium)).voices.some((voice) => voice.id === VOICE_ID)).toBe(false);
+    expect(
+      (
+        await call("POST", "/characters", premium, {
+          name: "Кэт",
+          archetype: "himedere",
+          voiceId: VOICE_ID
+        })
+      ).statusCode
+    ).toBe(400);
+    expect(
+      (await call("POST", "/admin/voices", streamer, { id: VOICE_ID, label: "x" })).statusCode
+    ).toBe(403);
+    await call("DELETE", `/admin/voices/${VOICE_ID}`, owner);
+  });
+
+  it("gives the overlay the character's picture as a URL", async () => {
+    const socket = await app.injectWS(`/overlay/${encodeURIComponent(streamer.overlayToken)}`);
+    await nextMessage(socket, "overlay.ready");
+    const pending = nextMessage(socket, "roast.play");
+    const imagePath = `/characters/${randomUUID()}/image?v=0123456789abcdef`;
+    await publishOverlayEvent(streamer, { character: { name: "Кэт", imagePath } });
+    expect((await pending).character).toEqual({
+      name: "Кэт",
+      imageUrl: `https://app.test/api${imagePath}`
+    });
+    socket.terminate();
   });
 });

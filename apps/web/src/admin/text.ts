@@ -67,6 +67,10 @@ const AUDIT_ACTIONS: Record<string, string> = {
   "invite_link.revoke": "отозвал инвайт-ссылку",
   "invite_link.use": "вошёл по инвайт-ссылке",
   "showcase.review": "решил по витрине",
+  "character.review": "решил по героине для магазина",
+  "voice.add": "добавил голос",
+  "voice.update": "изменил голос",
+  "voice.delete": "удалил голос",
   "payment.stars": "оплатил звёздами",
   "payment.refund": "вернул звёзды"
 };
@@ -129,6 +133,15 @@ export function auditText(row: AuditRow): { action: string; detail: string } {
       };
     case "showcase.review":
       return { action, detail: payload.approved ? "на сайт" : "убрал с сайта" };
+    case "character.review":
+      return {
+        action,
+        detail: payload.approve
+          ? "в магазин"
+          : `не пускать${typeof payload.note === "string" ? `: ${payload.note}` : ""}`
+      };
+    case "voice.add":
+      return { action, detail: `${String(payload.label)} (${row.target})` };
     case "user.signup":
       return { action, detail: `${who}${payload.status === "active" ? ", по приглашению" : ""}` };
     default:

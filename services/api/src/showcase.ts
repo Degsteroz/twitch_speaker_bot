@@ -1,12 +1,17 @@
 // Best roasts and viewers who opted out. The streamer stars a roast (that is the consent to show
 // it); the owner approves it for the landing page, where it appears without the viewer's name.
 // Viewers opt out themselves with "!роаст-стоп"; the streamer sees the list and may clear it.
+import { ARCHETYPE_THEME, type Archetype } from "@roastbot/shared";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 
 import { denied, session, type RouteContext } from "./context.js";
 
 const idParams = z.object({ id: z.string().uuid() });
+
+// A premium character's roast keeps her name; the card borrows the built-in theme of her archetype.
+const withTheme = <T extends { tone: Archetype }>(rows: readonly T[]) =>
+  rows.map((row) => ({ ...row, tone: ARCHETYPE_THEME[row.tone] }));
 
 export function registerShowcaseRoutes(app: FastifyInstance, context: RouteContext) {
   const { sql, requireUser, requireOwner, audit } = context;
@@ -24,26 +29,30 @@ export function registerShowcaseRoutes(app: FastifyInstance, context: RouteConte
     return { id, favorite: row.favoriteAt !== null };
   });
 
-  app.get(
-    "/showcase",
-    async () =>
-      sql`select r.id, r.output_text "text", r.tone, c.twitch_login "channel"
-      from roasts r join channels c on c.id=r.channel_id
-      where r.showcase_approved_at is not null and r.favorite_at is not null
-        and r.output_text is not null
-      order by r.showcase_approved_at desc limit 6`
+  app.get("/showcase", async () =>
+    withTheme(
+      await sql<{ id: string; text: string; tone: Archetype; characterName: string | null }[]>`
+        select r.id, r.output_text "text", r.tone, c.twitch_login "channel",
+          ch.name "characterName"
+        from roasts r join channels c on c.id=r.channel_id
+        left join characters ch on ch.id=r.character_id
+        where r.showcase_approved_at is not null and r.favorite_at is not null
+          and r.output_text is not null
+        order by r.showcase_approved_at desc limit 6`
+    )
   );
 
-  app.get(
-    "/admin/showcase",
-    { preHandler: requireOwner },
-    async () =>
-      sql`select r.id, r.output_text "text", r.input_text "inputText", r.tone,
-        c.twitch_login "channel", r.favorite_at "favoriteAt",
-        r.showcase_approved_at "approvedAt"
-      from roasts r join channels c on c.id=r.channel_id
-      where r.favorite_at is not null and r.output_text is not null
-      order by r.showcase_approved_at is not null, r.favorite_at desc limit 100`
+  app.get("/admin/showcase", { preHandler: requireOwner }, async () =>
+    withTheme(
+      await sql<{ id: string; tone: Archetype }[]>`
+        select r.id, r.output_text "text", r.input_text "inputText", r.tone,
+          c.twitch_login "channel", r.favorite_at "favoriteAt",
+          r.showcase_approved_at "approvedAt", ch.name "characterName"
+        from roasts r join channels c on c.id=r.channel_id
+        left join characters ch on ch.id=r.character_id
+        where r.favorite_at is not null and r.output_text is not null
+        order by r.showcase_approved_at is not null, r.favorite_at desc limit 100`
+    )
   );
 
   app.post("/admin/roasts/:id/showcase", { preHandler: requireOwner }, async (request, reply) => {

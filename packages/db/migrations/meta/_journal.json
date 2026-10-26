@@ -113,6 +113,20 @@
       "when": 1793865600000,
       "tag": "0015_cheaper_plans",
       "breakpoints": true
+    },
+    {
+      "idx": 16,
+      "version": "16",
+      "when": 1793952000000,
+      "tag": "0016_custom_characters",
+      "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "17",
+      "when": 1794038400000,
+      "tag": "0017_elevenlabs_voices",
+      "breakpoints": true
     }
   ]
 }

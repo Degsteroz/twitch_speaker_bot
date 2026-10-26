@@ -16,7 +16,9 @@ const SESSION_CHANGED_CODES = new Set(["mfa_required", "mfa_setup_required", "pe
 
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const headers = new Headers(init?.headers);
-  if (init?.body !== undefined) headers.set("Content-Type", "application/json");
+  if (init?.body !== undefined && !headers.has("Content-Type")) {
+    headers.set("Content-Type", "application/json");
+  }
   const response = await fetch(`${API}${path}`, { ...init, credentials: "include", headers });
   if (!response.ok) {
     if (response.status === 401 && typeof window !== "undefined") {
@@ -71,6 +73,65 @@ export interface Session {
 /** Mirrors CHARACTER_NAMES in packages/shared: the tone is the character's temperament. */
 export const CHARACTER_NAMES = { tsundere: "Мицуки", yandere: "Аи" } as const;
 
+// ---- Premium characters (mirrors packages/shared) ------------------------------------------
+export type Archetype = "tsundere" | "yandere" | "kuudere" | "dandere" | "himedere";
+export const ARCHETYPE_TEXT: Record<Archetype, { title: string; desc: string }> = {
+  tsundere: { title: "Цундэрэ", desc: "колюче, а потом выдаёт, что ей не всё равно" },
+  yandere: { title: "Яндэрэ", desc: "мило, ласково и слегка пугающе" },
+  kuudere: { title: "Кудэрэ", desc: "ледяное спокойствие, сухие приговоры без эмоций" },
+  dandere: { title: "Дандэрэ", desc: "тихая и стеснительная, но колет точнее всех" },
+  himedere: { title: "Химэдэрэ", desc: "надменная принцесса, чат — её подданные" }
+};
+export type CharacterStatus = "private" | "pending" | "published" | "rejected";
+export const CHARACTER_STATUS_TEXT: Record<CharacterStatus, string> = {
+  private: "только у вас",
+  pending: "на проверке для магазина",
+  published: "в магазине",
+  rejected: "не прошла проверку"
+};
+export interface CharacterView {
+  id: string;
+  name: string;
+  archetype: Archetype;
+  voiceId: string | null;
+  voiceLabel: string | null;
+  status: CharacterStatus;
+  reviewNote: string | null;
+  /** API path of the picture; null until uploaded. */
+  imagePath: string | null;
+  /** The author's Twitch login. */
+  author: string;
+  own: boolean;
+}
+export interface VoiceOption {
+  id: string;
+  label: string;
+  description: string;
+  sampleReady: boolean;
+}
+export interface CharactersResponse {
+  /** The plan includes premium characters. */
+  allowed: boolean;
+  maxOwn: number;
+  selected: { characterId: string | null; characterName: string | null };
+  own: CharacterView[];
+  shop: CharacterView[];
+  voices: VoiceOption[];
+}
+/** An API path as a URL for <img> and <audio>. */
+export const apiUrl = (path: string) => `${API}${path}`;
+export const voiceSampleUrl = (id: string) => apiUrl(`/voices/${encodeURIComponent(id)}/sample`);
+export const CHARACTER_IMAGE_TYPES = ["image/png", "image/jpeg", "image/webp"];
+export const MAX_CHARACTER_UPLOAD_BYTES = 4 * 1024 * 1024;
+
+/** Sends the picture as the raw body; the API re-encodes it. */
+export const uploadCharacterImage = (id: string, file: File) =>
+  api<{ id: string; imagePath: string }>(`/characters/${id}/image`, {
+    method: "PUT",
+    body: file,
+    headers: { "Content-Type": file.type }
+  });
+
 export interface Settings {
   tone: "tsundere" | "yandere";
   voice: "male" | "female";
@@ -89,13 +150,17 @@ export interface EventTriggers {
   follow: { enabled: boolean; chancePercent: number };
   prediction: { enabled: boolean };
   adBreak: { enabled: boolean };
-  donation: { enabled: boolean; minAmount: number };
+  donation: { enabled: boolean; minAmount: number; delaySec: number };
 }
 export interface Triggers {
   command: boolean;
   rewardId: string | null;
   keywords: string[];
   keywordChancePercent: number;
+  /** Premium character: her name in chat works like a keyword. */
+  nameMention: boolean;
+  /** Chat bots and spammers whose messages never trigger a roast; lowercase logins. */
+  ignoredUsers: string[];
   /** Who is roasted on every trigger: the author, the streamer, or the character decides. */
   targetMode: "author" | "streamer" | "auto";
   events: EventTriggers;
@@ -108,6 +173,8 @@ export const DEFAULT_TRIGGERS: Triggers = {
   rewardId: null,
   keywords: [],
   keywordChancePercent: 25,
+  nameMention: false,
+  ignoredUsers: [],
   targetMode: "auto",
   events: {
     cheer: { enabled: false, minBits: 100 },
@@ -117,9 +184,15 @@ export const DEFAULT_TRIGGERS: Triggers = {
     follow: { enabled: false, chancePercent: 20 },
     prediction: { enabled: false },
     adBreak: { enabled: false },
-    donation: { enabled: false, minAmount: 100 }
+    donation: { enabled: false, minAmount: 100, delaySec: 8 }
   }
 };
+
+/** "@Moo_Bot" → "moo_bot"; null for anything that cannot be a Twitch login. */
+export function twitchLogin(text: string): string | null {
+  const login = text.trim().replace(/^@/u, "").toLowerCase();
+  return /^[a-z0-9_]{1,25}$/u.test(login) ? login : null;
+}
 
 export interface DonationAlertsStatus {
   configured: boolean;

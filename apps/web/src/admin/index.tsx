@@ -5,6 +5,7 @@ import type { Session } from "../api.js";
 import { ADMIN_TABS, type AdminTab } from "../routes.js";
 import { Link, Shell } from "../ui.js";
 import { Audit } from "./audit.js";
+import { AdminCharacters } from "./characters.js";
 import { Moderation } from "./moderation.js";
 import { AdminOverview } from "./overview.js";
 import { Payments } from "./payments.js";
@@ -33,6 +34,7 @@ export function Admin({ session, tab }: { session: Session; tab: AdminTab }) {
       {tab === "users" && <AdminUsers selfId={session.userId} />}
       {tab === "roasts" && <AdminRoasts />}
       {tab === "moderation" && <Moderation />}
+      {tab === "characters" && <AdminCharacters />}
       {tab === "payments" && <Payments />}
       {tab === "settings" && <AdminSettings />}
       {tab === "audit" && <Audit />}

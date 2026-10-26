@@ -37,6 +37,22 @@ describe("overlay protocol", () => {
     expect(previewTone("?preview=tsundere")).toBe("tsundere");
     expect(previewTone("?preview=<script>")).toBeNull();
   });
+  it("carries a premium character's picture and drops a malformed one", () => {
+    const character = { name: "Кэт", imageUrl: "https://api.test/characters/x/image?v=1" };
+    const custom = parseEvent(
+      JSON.stringify({ ...event(), tone: "tsundere", character })
+    ) as RoastEvent;
+    expect(custom.character).toEqual(character);
+    for (const bad of [
+      { name: "Кэт", imageUrl: "javascript:alert(1)" },
+      { name: "", imageUrl: character.imageUrl },
+      "Кэт"
+    ]) {
+      const parsed = parseEvent(JSON.stringify({ ...event(), character: bad })) as RoastEvent;
+      expect(parsed.type).toBe("roast.play");
+      expect(parsed).not.toHaveProperty("character");
+    }
+  });
   it("shows the service address only when the free plan asks for it", () => {
     const branded = parseEvent(JSON.stringify({ ...event(), branding: true })) as RoastEvent;
     expect(branded.branding).toBe(true);

@@ -15,11 +15,13 @@
     "@fastify/jwt": "^10.0.0",
     "@fastify/websocket": "^11.2.0",
     "@roastbot/db": "workspace:*",
+    "@roastbot/prompts": "workspace:*",
     "@roastbot/shared": "workspace:*",
     "drizzle-orm": "^0.44.7",
     "fastify": "^5.6.1",
     "pg-boss": "^12.7.0",
     "postgres": "^3.4.7",
+    "sharp": "^0.34.5",
     "zod": "^4.1.12"
   },
   "devDependencies": {

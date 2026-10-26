@@ -10,6 +10,7 @@ interface ShowcaseRow {
   text: string;
   inputText: string | null;
   tone: "tsundere" | "yandere";
+  characterName: string | null;
   channel: string;
   favoriteAt: string;
   approvedAt: string | null;
@@ -43,8 +44,8 @@ export function ShowcaseReview() {
             <strong>«{row.text}»</strong>
             {row.inputText && <p className="muted">Зритель: {row.inputText}</p>}
             <small>
-              {CHARACTER_NAMES[row.tone]} · #{row.channel} · отмечен {date(row.favoriteAt)} ·{" "}
-              <Link href={`/roasts/${row.id}`}>подробнее</Link>
+              {row.characterName ?? CHARACTER_NAMES[row.tone]} · #{row.channel} · отмечен{" "}
+              {date(row.favoriteAt)} · <Link href={`/roasts/${row.id}`}>подробнее</Link>
             </small>
           </div>
           <div>

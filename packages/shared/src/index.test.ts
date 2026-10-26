@@ -1,12 +1,18 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  DEFAULT_DONATION_DELAY_SECONDS,
   DEFAULT_TRIGGERS,
+  MAX_DONATION_DELAY_SECONDS,
+  OVERLAY_EVENT_TTL_SECONDS,
   channelSettingsSchema,
+  characterNameSchema,
+  donationDelaySeconds,
   overlayServerEventSchema,
   parseStarsPayload,
   roastRequestedJobSchema,
   starsPayload,
+  storedOverlayRoastSchema,
   triggerSettingsSchema
 } from "./index.js";
 
@@ -27,6 +33,7 @@ describe("channelSettingsSchema", () => {
       command: true,
       rewardId: null,
       keywords: [],
+      nameMention: false,
       targetMode: "auto",
       events: { cheer: { enabled: false }, raid: { enabled: false }, follow: { enabled: false } }
     });
@@ -36,6 +43,55 @@ describe("channelSettingsSchema", () => {
     const legacy = triggerSettingsSchema.parse({ command: false, rewardId: "r1" });
     expect(legacy).toMatchObject({ command: false, rewardId: "r1", targetMode: "auto" });
     expect(legacy.events.subscription).toEqual({ enabled: false });
+    expect(legacy.ignoredUsers).toEqual([]);
+    expect(legacy.events.donation.delaySec).toBe(DEFAULT_DONATION_DELAY_SECONDS);
+  });
+
+  it("stores ignored users as plain lowercase logins and rejects anything else", () => {
+    expect(
+      triggerSettingsSchema.parse({ ignoredUsers: [" @Moo_Bot ", "nightbot"] }).ignoredUsers
+    ).toEqual(["moo_bot", "nightbot"]);
+    expect(() => triggerSettingsSchema.parse({ ignoredUsers: ["два слова"] })).toThrow();
+  });
+
+  it("accepts character names that can be said and matched in chat", () => {
+    expect(characterNameSchema.parse("  Мисс   Кэт ")).toBe("Мисс Кэт");
+    expect(characterNameSchema.parse("Анна-Мария")).toBe("Анна-Мария");
+    for (const bad of ["A", "deg_oz", "Кэт99", "<name>", "-Кэт", "Очень длинное имя героини"]) {
+      expect(characterNameSchema.safeParse(bad).success, bad).toBe(false);
+    }
+  });
+
+  it("stores a character picture as a path and gives the overlay a URL", () => {
+    const stored = {
+      version: 1,
+      type: "roast.play",
+      eventId: "00000000-0000-4000-8000-000000000001",
+      roastId: "00000000-0000-4000-8000-000000000002",
+      viewerLogin: "viewer",
+      text: "Привет",
+      tone: "tsundere",
+      audioFile: "00000000-0000-4000-8000-000000000003.wav",
+      expiresAt: "2026-10-26T00:00:00.000Z",
+      sentAt: "2026-10-26T00:00:00.000Z"
+    };
+    const imagePath = "/characters/00000000-0000-4000-8000-000000000004/image?v=0123456789abcdef";
+    expect(
+      storedOverlayRoastSchema.parse({ ...stored, character: { name: "Кэт", imagePath } }).character
+    ).toEqual({ name: "Кэт", imagePath });
+    expect(() =>
+      storedOverlayRoastSchema.parse({
+        ...stored,
+        character: { name: "Кэт", imagePath: "https://evil.example/x.png" }
+      })
+    ).toThrow();
+  });
+
+  it("holds a donation roast for the alert plus the reading time, within the overlay TTL", () => {
+    expect(donationDelaySeconds("", 8)).toBe(8);
+    expect(donationDelaySeconds("а".repeat(140), 8)).toBe(18);
+    expect(donationDelaySeconds("а".repeat(5_000), 8)).toBe(MAX_DONATION_DELAY_SECONDS);
+    expect(MAX_DONATION_DELAY_SECONDS).toBeLessThan(OVERLAY_EVENT_TTL_SECONDS);
   });
 
   it("drops the old reward and target fields instead of rejecting the row", () => {

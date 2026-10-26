@@ -5,6 +5,7 @@ import {
   boolean,
   check,
   char,
+  customType,
   date,
   index,
   integer,
@@ -19,11 +20,14 @@ import {
   uuid
 } from "drizzle-orm/pg-core";
 
+const bytea = customType<{ data: Buffer }>({ dataType: () => "bytea" });
+
 const createdAt = () => timestamp("created_at", { withTimezone: true }).notNull().defaultNow();
 
 export const userRoleEnum = pgEnum("user_role", ["owner", "user"]);
 export const userStatusEnum = pgEnum("user_status", ["active", "suspended", "pending"]);
-export const toneEnum = pgEnum("tone", ["tsundere", "yandere"]);
+// The built-in characters' temperaments plus the archetypes a premium character may have.
+export const toneEnum = pgEnum("tone", ["tsundere", "yandere", "kuudere", "dandere", "himedere"]);
 export const voiceEnum = pgEnum("voice", ["male", "female"]);
 export const planCodeEnum = pgEnum("plan_code", ["free", "basic", "premium"]);
 export const subscriptionSourceEnum = pgEnum("subscription_source", [
@@ -129,6 +133,9 @@ export const settings = pgTable(
       .notNull()
       .default(sql`ARRAY[]::text[]`),
     enabled: boolean("enabled").notNull().default(true),
+    // Premium: the channel's own or a shop character, and the name it answers to here.
+    characterId: uuid("character_id").references(() => characters.id, { onDelete: "set null" }),
+    characterName: text("character_name"),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow()
   },
   (table) => [
@@ -288,6 +295,7 @@ export const roasts = pgTable(
     favoriteAt: timestamp("favorite_at", { withTimezone: true }),
     showcaseApprovedAt: timestamp("showcase_approved_at", { withTimezone: true }),
     moderationReviewedAt: timestamp("moderation_reviewed_at", { withTimezone: true }),
+    characterId: uuid("character_id").references(() => characters.id, { onDelete: "set null" }),
     createdAt: createdAt()
   },
   (table) => [
@@ -612,6 +620,59 @@ export const starPayments = pgTable(
   (table) => [
     index("star_payments_created_idx").on(table.createdAt),
     check("star_payments_stars_check", sql`${table.stars} > 0`)
+  ]
+);
+
+// ElevenLabs voices the owner offers for premium characters, with a sample for the panel.
+export const voices = pgTable(
+  "voices",
+  {
+    id: text("id").primaryKey(),
+    label: text("label").notNull(),
+    description: text("description").notNull().default(""),
+    enabled: boolean("enabled").notNull().default(true),
+    sort: integer("sort").notNull().default(0),
+    sample: bytea("sample"),
+    sampleStatus: text("sample_status").notNull().default("pending"),
+    createdAt: createdAt()
+  },
+  (table) => [
+    check("voices_id_check", sql`${table.id} ~ '^[A-Za-z0-9]{10,40}$'`),
+    check(
+      "voices_sample_status_check",
+      sql`${table.sampleStatus} in ('pending', 'ready', 'failed')`
+    )
+  ]
+);
+
+// A premium channel's own character. "published" ones (approved by the owner) are in the shop
+// for every premium channel; the author uses theirs in any status.
+export const characters = pgTable(
+  "characters",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    authorChannelId: uuid("author_channel_id")
+      .notNull()
+      .references(() => channels.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    archetype: toneEnum("archetype").notNull(),
+    voiceId: text("voice_id").references(() => voices.id, { onDelete: "set null" }),
+    image: bytea("image"),
+    imageHash: text("image_hash"),
+    status: text("status").notNull().default("private"),
+    reviewNote: text("review_note"),
+    publishedAt: timestamp("published_at", { withTimezone: true }),
+    createdAt: createdAt(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow()
+  },
+  (table) => [
+    index("characters_author_idx").on(table.authorChannelId),
+    index("characters_status_idx").on(table.status, table.publishedAt),
+    check(
+      "characters_status_check",
+      sql`${table.status} in ('private', 'pending', 'published', 'rejected')`
+    ),
+    check("characters_image_check", sql`(${table.image} is null) = (${table.imageHash} is null)`)
   ]
 );
 

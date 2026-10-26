@@ -8,6 +8,7 @@ import {
   readingTimeMs,
   reconnectDelay,
   websocketUrl,
+  type Character,
   type RoastEvent,
   type Tone,
   type Verdict
@@ -68,10 +69,11 @@ function showVerdict(verdict: Verdict | undefined) {
   verdictBadge.textContent = verdict ? VERDICT_TEXT[verdict] : "";
   if (verdict) verdictBadge.dataset.verdict = verdict;
 }
-function showCharacter(tone: Tone | undefined) {
+function showCharacter(tone: Tone | undefined, custom?: Character) {
   if (tone) {
     card.dataset.tone = tone;
-    character.src = CHARACTERS[tone];
+    character.src = custom?.imageUrl ?? CHARACTERS[tone];
+    character.alt = custom?.name ?? "";
     character.hidden = false;
   } else {
     delete card.dataset.tone;
@@ -86,7 +88,7 @@ function next() {
   active = event;
   viewer.textContent = `@${event.viewerLogin}`;
   roastText.textContent = event.text;
-  showCharacter(event.tone);
+  showCharacter(event.tone, event.character);
   showVerdict(event.verdict);
   branding.hidden = event.branding !== true;
   audio.src = event.audioUrl;
@@ -182,6 +184,8 @@ function connect() {
       eventId: event.eventId,
       receivedAt: new Date().toISOString()
     });
+    // Start loading a premium character's picture while earlier roasts still play.
+    if (event.character) new Image().src = event.character.imageUrl;
     if (queue.enqueue(event)) next();
   });
   socket.addEventListener("close", (event) => {

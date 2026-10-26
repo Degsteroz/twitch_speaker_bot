@@ -79,6 +79,59 @@ export const demoStatusSchema = z.enum(["queued", "done", "blocked", "failed", "
 export type DemoStatus = z.infer<typeof demoStatusSchema>;
 
 export const toneSchema = z.enum(["tsundere", "yandere"]);
+
+// ---- Premium characters ----------------------------------------------------------------------
+// A premium channel builds its own heroine: a name, a temperament, an ElevenLabs voice and a
+// picture. The owner approves the ones the author offers to the shop; then every premium channel
+// may pick them. Built-in Mitsuki and Ai stay for everyone else and as the fallback.
+export const archetypeSchema = z.enum(["tsundere", "yandere", "kuudere", "dandere", "himedere"]);
+export const ARCHETYPE_TEXT = Object.freeze({
+  tsundere: { title: "Цундэрэ", desc: "колюче, а потом выдаёт, что ей не всё равно" },
+  yandere: { title: "Яндэрэ", desc: "мило, ласково и слегка пугающе" },
+  kuudere: { title: "Кудэрэ", desc: "ледяное спокойствие, сухие приговоры без эмоций" },
+  dandere: { title: "Дандэрэ", desc: "тихая и стеснительная, но колет точнее всех" },
+  himedere: { title: "Химэдэрэ", desc: "надменная принцесса, чат — её подданные" }
+} as const);
+/** The overlay has two card themes; a custom character borrows the closer one. */
+export const ARCHETYPE_THEME = Object.freeze({
+  tsundere: "tsundere",
+  yandere: "yandere",
+  kuudere: "tsundere",
+  dandere: "yandere",
+  himedere: "tsundere"
+} as const);
+export const CUSTOM_CHARACTER_PLANS: ReadonlySet<string> = new Set(["premium"]);
+// Pictures live in the database on a small server: a few own characters per channel, small files.
+export const MAX_OWN_CHARACTERS = 3;
+export const MAX_CHARACTER_UPLOAD_BYTES = 4 * 1024 * 1024;
+export const MAX_CHARACTER_IMAGE_BYTES = 400 * 1024;
+// Letters, spaces and hyphens: the name is said aloud and matched in chat.
+export const characterNameSchema = z
+  .string()
+  .trim()
+  .transform((name) => name.replace(/\s+/gu, " "))
+  .pipe(z.string().regex(/^\p{L}[\p{L} -]{1,19}$/u, "Имя: 2–20 букв, можно пробел и дефис"));
+export const characterStatusSchema = z.enum(["private", "pending", "published", "rejected"]);
+export const elevenLabsVoiceIdSchema = z.string().regex(/^[A-Za-z0-9]{10,40}$/u);
+export const characterInputSchema = z
+  .object({
+    name: characterNameSchema,
+    archetype: archetypeSchema,
+    voiceId: elevenLabsVoiceIdSchema.nullable().default(null)
+  })
+  .strict();
+export const selectCharacterSchema = z
+  .object({
+    characterId: z.string().uuid().nullable(),
+    // The name the character answers to on this channel; null keeps her own.
+    characterName: characterNameSchema.nullable().default(null)
+  })
+  .strict();
+// The worker records one sample per voice so streamers can hear it before choosing.
+export const VOICE_SAMPLE_QUEUE = "voice.sample";
+export const voiceSampleJobSchema = z.object({ voiceId: elevenLabsVoiceIdSchema }).strict();
+export const VOICE_SAMPLE_TEXT =
+  "Ну привет. Я буду отвечать твоему чату. Надеюсь, ты к этому готов.";
 export const voiceSchema = z.enum(["male", "female"]);
 export const toxicitySchema = z.union([
   z.literal(1),
@@ -142,6 +195,20 @@ export const roastStatusSchema = z.enum([
 
 const percentSchema = z.number().int().min(0).max(100);
 
+// DonationAlerts plays its own alert and reads the message aloud; the character answers after it.
+// The pause covers the alert; reading time of the message is added on top (donationDelaySeconds).
+export const DEFAULT_DONATION_DELAY_SECONDS = 8;
+export const MAX_DONATION_DELAY_SECONDS = 60;
+// Russian TTS reads roughly this many characters a second.
+const DONATION_READ_CHARS_PER_SECOND = 14;
+/** Seconds to hold the roast so the donation alert finishes first; within the overlay TTL. */
+export const donationDelaySeconds = (message: string, pauseSec: number) =>
+  Math.min(
+    MAX_DONATION_DELAY_SECONDS,
+    Math.max(0, pauseSec) +
+      Math.ceil(Array.from(message.trim()).length / DONATION_READ_CHARS_PER_SECOND)
+  );
+
 export const DEFAULT_EVENT_TRIGGERS = Object.freeze({
   cheer: { enabled: false, minBits: 100 },
   subscription: { enabled: false },
@@ -150,7 +217,7 @@ export const DEFAULT_EVENT_TRIGGERS = Object.freeze({
   follow: { enabled: false, chancePercent: 20 },
   prediction: { enabled: false },
   adBreak: { enabled: false },
-  donation: { enabled: false, minAmount: 100 }
+  donation: { enabled: false, minAmount: 100, delaySec: DEFAULT_DONATION_DELAY_SECONDS }
 });
 
 const toggle = z.object({ enabled: z.boolean().default(false) }).strict();
@@ -188,7 +255,13 @@ export const eventTriggersSchema = z
     donation: z
       .object({
         enabled: z.boolean().default(false),
-        minAmount: z.number().min(0).max(10_000_000).default(100)
+        minAmount: z.number().min(0).max(10_000_000).default(100),
+        delaySec: z
+          .number()
+          .int()
+          .min(0)
+          .max(MAX_DONATION_DELAY_SECONDS)
+          .default(DEFAULT_DONATION_DELAY_SECONDS)
       })
       .strict()
       .default({ ...DEFAULT_EVENT_TRIGGERS.donation })
@@ -214,6 +287,15 @@ function dropLegacyTriggers(value: unknown): unknown {
   return row;
 }
 
+export const MAX_IGNORED_USERS = 100;
+// Twitch logins are 1–25 letters, digits and "_"; "@nick" and any case are accepted and stored
+// lowercase.
+const twitchLoginSchema = z
+  .string()
+  .trim()
+  .transform((login) => login.replace(/^@/u, "").toLowerCase())
+  .pipe(z.string().regex(/^[a-z0-9_]{1,25}$/u));
+
 const triggerSettingsObject = z
   .object({
     command: z.boolean().default(true),
@@ -221,6 +303,10 @@ const triggerSettingsObject = z
     // Chat messages containing one of these words (word start, any case) may trigger a roast.
     keywords: z.array(z.string().trim().min(1).max(40)).max(50).default([]),
     keywordChancePercent: percentSchema.default(25),
+    // Premium character: a chat message with her name triggers a roast like a keyword.
+    nameMention: z.boolean().default(false),
+    // The streamer's own chat bots and spammers: their messages never trigger a roast.
+    ignoredUsers: z.array(twitchLoginSchema).max(MAX_IGNORED_USERS).default([]),
     targetMode: targetModeSchema.default("auto"),
     events: eventTriggersSchema.default(eventTriggersSchema.parse({}))
   })
@@ -356,6 +442,11 @@ export const overlayRoastEventSchema = z
     // Picks the character shown next to the text. Optional: outbox rows written before it existed
     // still validate and play without a character.
     tone: toneSchema.optional(),
+    // A premium character: her name and picture instead of the built-in one; tone is the theme.
+    character: z
+      .object({ name: z.string().min(1).max(20), imageUrl: z.string().url() })
+      .strict()
+      .optional(),
     // Channel-points verdict, shown as a badge next to the text.
     verdict: verdictSchema.optional(),
     // Free plan: the overlay shows the service address under the card.
@@ -369,8 +460,18 @@ export const overlayRoastEventSchema = z
 // Outbox payload persisted by the worker. The API swaps audioFile for a freshly signed audioUrl
 // at delivery time, so the 60-second URL lifetime starts when the overlay actually receives it.
 export const storedOverlayRoastSchema = overlayRoastEventSchema
-  .omit({ audioUrl: true })
-  .extend({ audioFile: z.string().regex(/^[0-9a-f-]{36}\.wav$/u) })
+  .omit({ audioUrl: true, character: true })
+  .extend({
+    audioFile: z.string().regex(/^[0-9a-f-]{36}\.wav$/u),
+    // The API turns the path into a URL at delivery time, like the audio.
+    character: z
+      .object({
+        name: z.string().min(1).max(20),
+        imagePath: z.string().regex(/^\/characters\/[0-9a-f-]{36}\/image\?v=[0-9a-f]{16}$/u)
+      })
+      .strict()
+      .optional()
+  })
   .strict();
 
 export const overlayPingEventSchema = z
@@ -408,6 +509,9 @@ export const overlayClientEventSchema = z.discriminatedUnion("type", [
 ]);
 
 export type Tone = z.infer<typeof toneSchema>;
+export type Archetype = z.infer<typeof archetypeSchema>;
+export type CharacterStatus = z.infer<typeof characterStatusSchema>;
+export type CharacterInput = z.infer<typeof characterInputSchema>;
 export type Voice = z.infer<typeof voiceSchema>;
 export type Toxicity = z.infer<typeof toxicitySchema>;
 export type RoastSource = z.infer<typeof roastSourceSchema>;

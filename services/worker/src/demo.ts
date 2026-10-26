@@ -5,7 +5,8 @@ import {
   enforceOutputLimit,
   inspectInput,
   inspectOutput,
-  parseClassifierVerdict
+  parseClassifierVerdict,
+  spokenText
 } from "@roastbot/prompts";
 import {
   BLOCKED_OUTPUT_FALLBACK,
@@ -151,7 +152,7 @@ export async function processDemo(
       DEFAULT_YANDEX_TTS_MONTHLY_LIMIT_RUB
     );
     const speech = await speak(
-      output,
+      spokenText(output),
       "yandere",
       deps.config,
       deps.fetch ?? globalThis.fetch,

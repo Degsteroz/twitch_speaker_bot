@@ -18,6 +18,7 @@ import {
 } from "../api.js";
 import { ActivityLog } from "./activity.js";
 import { BillingCard } from "./billing.js";
+import { CustomCharacters } from "./characters.js";
 import { Choice, ScaleChoice, targetSteps, TOXICITY_STEPS } from "./controls.js";
 import { OptOuts } from "./optouts.js";
 import { OverlaySetup } from "./overlay.js";
@@ -78,6 +79,8 @@ export function Dashboard({
   const [saving, setSaving] = useState(false);
   const [tourOpen, setTourOpen] = useState(false);
   const [activityReload, setActivityReload] = useState(0);
+  // The premium character on air, if any: the chat card offers her name as a trigger.
+  const [characterName, setCharacterName] = useState<string | null>(null);
   const refreshStatus = useCallback(async () => setStatus(await api<Status>("/status")), []);
   const load = useCallback(async () => {
     setLoadError("");
@@ -352,7 +355,11 @@ export function Dashboard({
                 icon="♥"
               />
             </div>
-            <small className="hint below">У каждой свой голос и своя картинка на оверлее.</small>
+            <small className="hint below">
+              {characterName
+                ? `Сейчас вместо них на стриме ${characterName} — см. «Своя героиня». Токсичность и «Кого жарить» действуют и на неё.`
+                : "У каждой свой голос и своя картинка на оверлее."}
+            </small>
             <ScaleChoice
               label="Кого жарить"
               tour="target"
@@ -367,8 +374,10 @@ export function Dashboard({
               onChange={(value) => patch("toxicity", value as Settings["toxicity"])}
             />
           </Card>
+          <CustomCharacters onActiveName={setCharacterName} />
           <TriggerSettings
             triggers={settings.triggers}
+            characterName={characterName}
             rewards={rewards}
             commandAvailable={status.commandAvailable}
             onChange={(triggers) => patch("triggers", triggers)}

@@ -59,6 +59,33 @@ describe("chat triggers", () => {
     expect(chatTrigger(chat("!слил"), settings, options)).toBeNull();
   });
 
+  it("answers the premium character's name like a keyword, only when the streamer turned it on", () => {
+    const options = { random: always, characterName: "Мисс Кэт" };
+    const on = triggers({ nameMention: true, keywordChancePercent: 50 });
+    expect(chatTrigger(chat("мисс кэт, привет"), on, options)).toEqual({
+      source: "chat_keyword",
+      inputText: "мисс кэт, привет",
+      target: "viewer"
+    });
+    expect(chatTrigger(chat("мисс кэт, привет"), on, { ...options, random: never })).toBeNull();
+    expect(
+      chatTrigger(chat("мисс кэт"), triggers({ keywordChancePercent: 50 }), options)
+    ).toBeNull();
+    expect(chatTrigger(chat("мисс кэт"), on, { random: always })).toBeNull();
+  });
+
+  it("ignores the channel's own list of bots and spammers, whatever the case", () => {
+    const settings = triggers({
+      keywords: ["слил"],
+      keywordChancePercent: 100,
+      ignoredUsers: ["my_bot"]
+    });
+    const options = { commandAllowed: true, random: always };
+    expect(chatTrigger(chat("слил", { username: "My_Bot" }), settings, options)).toBeNull();
+    expect(chatTrigger(chat("!роаст слил", { username: "my_bot" }), settings, options)).toBeNull();
+    expect(chatTrigger(chat("слил"), settings, options)?.source).toBe("chat_keyword");
+  });
+
   it("roasts the streamer for their own message: there is no other author", () => {
     const settings = triggers({ keywords: ["слил"], keywordChancePercent: 100 });
     const options = { commandAllowed: true, random: never };

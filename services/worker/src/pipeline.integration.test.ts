@@ -21,6 +21,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vites
 
 import { processRoast, type PipelineDependencies } from "./pipeline.js";
 import { notifyStreamer, quotaNotice, sendStreamSummaries } from "./telegram.js";
+import { recordVoiceSample, syncVoices } from "./voices.js";
 
 interface FakeReply {
   text: string;
@@ -610,7 +611,7 @@ describe("triggers and targets", () => {
 });
 
 describe("memory and context", () => {
-  it("tells the character about a regular viewer and the game, but not about a newcomer", async () => {
+  it("tells the character what a regular viewer said and the game, but not about a newcomer", async () => {
     await db.sql`update settings set cooldown_sec=0, user_cooldown_sec=0
       where channel_id=${channel.channelId}`;
     const anthropic = fakeAnthropic({ text: "Снова ты." });
@@ -626,7 +627,8 @@ describe("memory and context", () => {
     expect(first).toContain("<game>Dota 2</game>");
     expect(first).not.toContain("<history>");
     const second = await run("vasya");
-    expect(second).toContain("<history>Сегодня: 1, за месяц: 1. Прошлая реплика: «Снова ты.»");
+    expect(second).toContain("— ты: «Снова ты.»</history>");
+    expect(second).not.toMatch(/Сегодня|за месяц/u);
     expect(await run("petya")).not.toContain("<history>");
   });
 });
@@ -775,5 +777,155 @@ describe("streamer Telegram", () => {
     expect(mine[0]!.text).toContain("лучший: «Ну и катка»");
     await sendStreamSummaries(worker.client, config, fetcher);
     expect(sent.filter((message) => message.chat_id === "43")).toHaveLength(1);
+  });
+});
+
+describe("premium characters", () => {
+  const VOICE_ID = "Abcdefghij0123456789";
+  const HASH = "a".repeat(64);
+  // ElevenLabs and, for the built-in characters, the local Piper.
+  const elevenLabs = () => Promise.resolve(new Response(new Uint8Array([82, 73, 70, 70, 1])));
+  const withVoices = (pipeline: ReturnType<typeof deps>) => {
+    pipeline.config = { ...pipeline.config, ELEVENLABS_API_KEY: "el-key" };
+    return pipeline;
+  };
+  async function character(author: TestChannel, status = "private") {
+    await db.sql`insert into voices(id,label) values(${VOICE_ID},'Звонкая') on conflict do nothing`;
+    const [row] = await db.sql<{ id: string }[]>`
+      insert into characters(author_channel_id,name,archetype,voice_id,image,image_hash,status)
+      values(${author.channelId},'Кэт','kuudere',${VOICE_ID},${Buffer.from("webp")},${HASH},${status})
+      returning id`;
+    return row!.id;
+  }
+  const prompt = (anthropic: ReturnType<typeof fakeAnthropic>) => {
+    const request = anthropic.create.mock.calls[0]![0];
+    return { system: request.system as string, user: request.messages[0]!.content as string };
+  };
+
+  beforeEach(async () => {
+    await db.sql`delete from tts_usage_monthly where provider='elevenlabs'`;
+  });
+
+  it("speaks as the chosen character: her name, temperament, voice and picture", async () => {
+    const id = await character(channel);
+    await db.sql`update settings set character_id=${id}, character_name='Мурка'
+      where channel_id=${channel.channelId}`;
+    const anthropic = fakeAnthropic({ text: "@deg_oz, ну и что это было?" });
+    const pipeline = withVoices(deps(anthropic.client, elevenLabs));
+
+    const outcome = await processRoast(await job({ source: "dashboard_test" }), pipeline);
+
+    expect(outcome.status).toBe("done");
+    const { system, user } = prompt(anthropic);
+    expect(user.startsWith("<name>Мурка</name>\n<viewer>")).toBe(true);
+    expect(system).toContain("кудэрэ");
+    expect(system).not.toContain("Мурка");
+    const [url, init] = pipeline.fetch.mock.calls[0]! as [string, RequestInit];
+    expect(url).toContain(`/text-to-speech/${VOICE_ID}?`);
+    // The voice reads the nickname without the underscore; the overlay shows the reply as is.
+    expect(JSON.parse(init.body as string)).toMatchObject({ text: "deg oz, ну и что это было?" });
+    const [event] = await db.sql<{ payload: unknown }[]>`
+      select payload from overlay_events where roast_id=${outcome.roastId}`;
+    expect(storedOverlayRoastSchema.parse(event!.payload)).toMatchObject({
+      text: "@deg_oz, ну и что это было?",
+      tone: "tsundere",
+      character: { name: "Мурка", imagePath: `/characters/${id}/image?v=${HASH.slice(0, 16)}` }
+    });
+    const [row] = await db.sql`select tone, character_id from roasts where id=${outcome.roastId}`;
+    expect(row).toMatchObject({ tone: "kuudere", character_id: id });
+  });
+
+  it("skips ElevenLabs once the owner switched her voice off", async () => {
+    const id = await character(channel);
+    await db.sql`update voices set enabled=false where id=${VOICE_ID}`;
+    await db.sql`update settings set character_id=${id} where channel_id=${channel.channelId}`;
+    const pipeline = withVoices(deps(fakeAnthropic({ text: "Хм." }).client, elevenLabs));
+
+    const outcome = await processRoast(await job({ source: "dashboard_test" }), pipeline);
+
+    await db.sql`update voices set enabled=true where id=${VOICE_ID}`;
+    expect(outcome.status).toBe("done");
+    expect(pipeline.fetch.mock.calls.some(([url]) => String(url).includes("elevenlabs"))).toBe(
+      false
+    );
+  });
+
+  it("offers the built-in voices and asks for the samples still missing", async () => {
+    const config = { ...deps(fakeAnthropic({ text: "" }).client).config };
+    const mitsuki = "Mitsuki0123456789";
+    expect(await syncVoices(db.sql, config)).toEqual([]);
+    const pending = await syncVoices(db.sql, {
+      ...config,
+      ELEVENLABS_API_KEY: "k",
+      ELEVENLABS_VOICE_TSUNDERE: mitsuki,
+      ELEVENLABS_VOICE_YANDERE: "not a voice id"
+    });
+    // The five voices of the migration plus Mitsuki's; a malformed ID is left out.
+    expect(pending).toEqual(expect.arrayContaining([mitsuki, "tnjzWy46l6XmxM2yWKnN"]));
+    const [row] = await db.sql`select label from voices where id=${mitsuki}`;
+    expect(row).toEqual({ label: "Как у Мицуки" });
+    await db.sql`update voices set sample_status='failed' where id=${mitsuki}`;
+    expect(await syncVoices(db.sql, { ...config, ELEVENLABS_API_KEY: "k" })).not.toContain(mitsuki);
+    await db.sql`delete from voices where id=${mitsuki}`;
+  });
+
+  it("falls back to the built-in character when the plan or the shop no longer allows hers", async () => {
+    const author = await createTestChannel(db.sql, { plan: "premium" });
+    const id = await character(author, "published");
+    await db.sql`update settings set character_id=${id} where channel_id=${channel.channelId}`;
+    const run = async () => {
+      const anthropic = fakeAnthropic({ text: "Хм." });
+      const pipeline = withVoices(deps(anthropic.client, elevenLabs));
+      const outcome = await processRoast(await job({ source: "dashboard_test" }), pipeline);
+      const [event] = await db.sql<{ payload: { character?: unknown } }[]>`
+        select payload from overlay_events where roast_id=${outcome.roastId}`;
+      return { user: prompt(anthropic).user, character: event!.payload.character };
+    };
+
+    expect((await run()).user).toContain("<name>Кэт</name>");
+    // The owner took her off the shop: the buyer's stream gets Mitsuki again.
+    await db.sql`update characters set status='rejected' where id=${id}`;
+    const rejected = await run();
+    expect(rejected.user).not.toContain("<name>");
+    expect(rejected.character).toBeUndefined();
+    // Her own character, but the plan was downgraded.
+    const own = await character(channel);
+    await db.sql`update settings set character_id=${own} where channel_id=${channel.channelId}`;
+    await db.sql`update subscriptions set plan_id=(select id from plans where code='basic')
+      where user_id=${channel.userId}`;
+    expect((await run()).user).not.toContain("<name>");
+  });
+
+  it("records a voice sample in that voice only, within the ElevenLabs cap", async () => {
+    await db.sql`insert into voices(id,label) values(${VOICE_ID},'Звонкая') on conflict do nothing`;
+    const fetchSample = vi.fn(elevenLabs);
+    const config = { ...deps(fakeAnthropic({ text: "" }).client).config, ELEVENLABS_API_KEY: "k" };
+    expect(
+      await recordVoiceSample(
+        { voiceId: VOICE_ID },
+        { sql: worker.client, config, fetch: fetchSample }
+      )
+    ).toBe("ready");
+    const [voice] = await db.sql<{ sample: Buffer; sample_status: string }[]>`
+      select sample, sample_status from voices where id=${VOICE_ID}`;
+    expect(voice).toMatchObject({ sample_status: "ready" });
+    expect(voice!.sample.length).toBe(5);
+    const [usage] = await db.sql<{ requests: number }[]>`
+      select requests from tts_usage_monthly where provider='elevenlabs'`;
+    expect(usage!.requests).toBeGreaterThan(0);
+
+    // A failure leaves no sample and never tries another voice.
+    const failing = vi.fn<typeof globalThis.fetch>(() =>
+      Promise.resolve(new Response("no", { status: 500 }))
+    );
+    const withYandex = { ...config, YANDEX_TTS_API_KEY: "y" };
+    expect(
+      await recordVoiceSample(
+        { voiceId: VOICE_ID },
+        { sql: worker.client, config: withYandex, fetch: failing }
+      )
+    ).toBe("failed");
+    expect(failing).toHaveBeenCalledOnce();
+    expect(failing.mock.calls[0]![0]).toEqual(expect.stringContaining("elevenlabs"));
   });
 });

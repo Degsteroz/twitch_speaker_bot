@@ -31,6 +31,7 @@ import {
   storedOverlayRoastSchema,
   testRoastRequestSchema,
   updateSettingsRequestSchema,
+  VOICE_SAMPLE_QUEUE,
   YANDEX_TTS_RUB_PER_REQUEST,
   yandexBillingMonth
 } from "@roastbot/shared";
@@ -41,6 +42,7 @@ import { z, ZodError } from "zod";
 
 import type { ApiConfig } from "./config.js";
 import { denied, session, type RouteContext, type Session } from "./context.js";
+import { registerCharacterRoutes } from "./characters.js";
 import { applyInviteLink, inviteCodeSchema, registerInviteRoutes } from "./invites.js";
 import { registerShowcaseRoutes } from "./showcase.js";
 import { registerTelegramRoutes } from "./telegram-bot.js";
@@ -124,6 +126,7 @@ export async function buildApp(config: ApiConfig) {
   await boss.start();
   await boss.createQueue(ROAST_REQUESTED_QUEUE, { ...ROAST_REQUESTED_QUEUE_OPTIONS });
   await boss.createQueue(DEMO_REQUESTED_QUEUE, { ...DEMO_REQUESTED_QUEUE_OPTIONS });
+  await boss.createQueue(VOICE_SAMPLE_QUEUE);
 
   await app.register(cookie);
   await app.register(jwt, {
@@ -205,10 +208,18 @@ export async function buildApp(config: ApiConfig) {
       if (connection.sent.has(row.id)) continue;
       const stored = storedOverlayRoastSchema.safeParse(row.payload);
       if (!stored.success) continue;
-      const { audioFile, ...event } = stored.data;
+      const { audioFile, character, ...event } = stored.data;
       connection.sent.add(row.id);
       sendJson(connection.socket, {
         ...event,
+        ...(character
+          ? {
+              character: {
+                name: character.name,
+                imageUrl: `${config.PUBLIC_URL}${character.imagePath}`
+              }
+            }
+          : {}),
         audioUrl: `${config.PUBLIC_URL}${signAudioPath(audioFile, config.AUDIO_SIGNING_SECRET)}`
       });
     }
@@ -1194,6 +1205,7 @@ export async function buildApp(config: ApiConfig) {
   const routeContext: RouteContext = { sql, boss, config, requireUser, requireOwner, audit };
   registerInviteRoutes(app, routeContext);
   registerShowcaseRoutes(app, routeContext);
+  registerCharacterRoutes(app, routeContext);
   registerTelegramRoutes(app, routeContext);
 
   app.get("/admin/overview", { preHandler: requireOwner }, async () => {

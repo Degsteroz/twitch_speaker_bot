@@ -167,13 +167,17 @@ Sonnet 5.5 и Fable не отключают thinking (400), поэтому им 
 
 **ElevenLabs** (необязательно): `ELEVENLABS_API_KEY`, `ELEVENLABS_MODEL` (по умолчанию
 `eleven_v4`, есть русский) и ID голосов `ELEVENLABS_VOICE_TSUNDERE` / `ELEVENLABS_VOICE_YANDERE`
-из библиотеки голосов ElevenLabs. Героиня без ID голоса озвучивается Яндексом. Формат WAV 24 кГц
+из библиотеки голосов ElevenLabs. Героиня без ID голоса озвучивается Яндексом.
+Свои героини Premium выбирают голос из списка в `/admin/characters`: пять голосов добавляет
+миграция `0017`, голоса Мицуки и Аи воркер добавляет сам при старте, сэмплы записываются
+автоматически. Формат WAV 24 кГц
 (44.1 кГц требует Pro). Цена $0.08 за 1000 символов; лимит символов в месяц —
 `elevenlabs_monthly_char_limit` в `/admin` (по умолчанию 70 000, тариф Starter даёт 75 000), учёт
 в `tts_usage_monthly` (provider `elevenlabs`, атомарный резерв до запроса).
 
 У каждого персонажа свой голос Yandex SpeechKit (API v3): цундэрэ — `julia`/`strict`,
-яндэрэ — `jane`/`good` (`services/worker/src/tts.ts`). Запросы делает `worker`: у TTS-сервиса
+яндэрэ — `jane`/`good` (`services/worker/src/tts.ts`). Кудэрэ — `julia`/`neutral`,
+дандэрэ — `marina`/`whisper`, химэдэрэ — `dasha`/`strict`. Запросы делает `worker`: у TTS-сервиса
 нет выхода в интернет. Нужен сервисный аккаунт с единственной ролью `ai.speechkit-tts.user` и
 его API-ключ в `YANDEX_TTS_API_KEY`.
 
