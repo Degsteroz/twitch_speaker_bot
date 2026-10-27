@@ -1,5 +1,9 @@
 import tsundereUrl from "./assets/tsundere.webp";
 import yandereUrl from "./assets/yandere.webp";
+import doorUrl from "./assets/sounds/door.wav";
+import pingUrl from "./assets/sounds/ping.wav";
+import tapUrl from "./assets/sounds/tap.wav";
+import whooshUrl from "./assets/sounds/whoosh.wav";
 import {
   EventQueue,
   getToken,
@@ -11,6 +15,7 @@ import {
   websocketUrl,
   type Character,
   type RoastEvent,
+  type StubSound,
   type Tone,
   type Verdict
 } from "./core.js";
@@ -19,6 +24,12 @@ import "./styles.css";
 const CHARACTERS: Readonly<Record<Tone, string>> = { tsundere: tsundereUrl, yandere: yandereUrl };
 // Decode both up front so the first roast does not pop in without its character.
 for (const url of Object.values(CHARACTERS)) new Image().src = url;
+const SOUNDS: Readonly<Record<StubSound, string>> = {
+  tap: tapUrl,
+  ping: pingUrl,
+  whoosh: whooshUrl,
+  door: doorUrl
+};
 
 function element(selector: string): Element {
   const found = document.querySelector(selector);
@@ -109,9 +120,12 @@ function next() {
   showCharacter(event.tone, event.character);
   showVerdict(event.verdict);
   branding.hidden = event.branding !== true;
-  audio.src = event.audioUrl;
+  // parseEvent keeps only events with audio or a sound: a free stub plays its sound.
+  audio.src = event.audioUrl ?? SOUNDS[event.sound ?? "tap"];
   card.hidden = false;
   requestAnimationFrame(() => card.classList.add("visible"));
+  // A free stub's sound is a blip: the caption holds for its reading time instead.
+  if (!event.audioUrl) silentFallback = window.setTimeout(finish, readingTimeMs(event.text));
   void audio
     .play()
     .then(() => {
@@ -120,6 +134,7 @@ function next() {
     .catch(() => {
       showUnlock();
       // Without sound the card would wait forever for "ended" and block the queue.
+      window.clearTimeout(silentFallback);
       silentFallback = window.setTimeout(finish, readingTimeMs(event.text));
     });
 }
@@ -133,11 +148,15 @@ function finish() {
   next();
 }
 audio.addEventListener("playing", () => {
-  window.clearTimeout(silentFallback);
+  // A stub's hold timer runs on its own: only a spoken roast waits for the audio.
+  if (active?.audioUrl) window.clearTimeout(silentFallback);
   card.classList.add("speaking");
 });
 audio.addEventListener("pause", () => card.classList.remove("speaking"));
-audio.addEventListener("ended", finish);
+// Only a spoken roast ends with its audio; a stub's sound ends long before the caption.
+audio.addEventListener("ended", () => {
+  if (active?.audioUrl) finish();
+});
 audio.addEventListener("error", finish);
 recover.addEventListener("click", () => {
   // The click itself unlocks audio for this page; replay the current roast if there is one.

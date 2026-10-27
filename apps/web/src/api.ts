@@ -553,6 +553,7 @@ export const SKIP_REASON_TEXT: Record<string, string> = {
   viewer_limit: "зритель уже получил 3 ответа за полчаса",
   stub_cooldown: "пауза — прозвучала заглушка",
   stub_viewer_limit: "зритель частит — прозвучала заглушка",
+  stub_quota: "квота закончилась — прозвучала заглушка",
   stub_declined: "награда без роаста по частоте — «Мммммм, нет!»",
   command_not_in_plan: "команда недоступна на бесплатном тарифе",
   test_limit_reached: "тесты на сегодня закончились",

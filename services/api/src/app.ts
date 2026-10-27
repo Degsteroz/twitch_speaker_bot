@@ -225,7 +225,12 @@ export async function buildApp(config: ApiConfig) {
               }
             }
           : {}),
-        audioUrl: `${config.PUBLIC_URL}${signAudioPath(audioFile, config.AUDIO_SIGNING_SECRET)}`
+        // A free stub has no audio file: the overlay plays its `sound` instead.
+        ...(audioFile
+          ? {
+              audioUrl: `${config.PUBLIC_URL}${signAudioPath(audioFile, config.AUDIO_SIGNING_SECRET)}`
+            }
+          : {})
       });
     }
   };

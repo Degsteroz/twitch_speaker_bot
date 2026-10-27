@@ -20,13 +20,7 @@ import type { JSONValue } from "postgres";
 import WebSocket from "ws";
 import { z } from "zod";
 
-import {
-  decryptToken,
-  encryptToken,
-  enqueueEvent,
-  isOnCooldown,
-  reconnectDelayMs
-} from "./core.js";
+import { decryptToken, encryptToken, enqueueEvent, reconnectDelayMs } from "./core.js";
 import { DonationAlertsConnection, type DonationAlertsAccount } from "./donationalerts.js";
 import {
   EveryNth,
@@ -176,15 +170,15 @@ chat.on("message", (channelName, tags, message, self) => {
   );
   if (!roast) return;
   void (async () => {
+    // Every Nth message with a trigger word gets a roast; the others get a free "no" stub, so the
+    // viewer still hears the bot. The worker spends nothing on them.
+    let declined = false;
     if (roast.source === "chat_keyword") {
-      // Only every Nth message with a trigger word is answered; one that lands on a pause stays
-      // due, so the next word gets the answer. Nobody called the bot: no stub during a pause.
-      if (!keywordGate.due(channel.id, KEYWORD_EVERY[channel.triggers.chatFrequency])) return;
-      if (await isOnCooldown(sql, channel.id, viewerLogin)) return;
-      keywordGate.reset(channel.id);
+      declined = !keywordGate.due(channel.id, KEYWORD_EVERY[channel.triggers.chatFrequency]);
+      if (!declined) keywordGate.reset(channel.id);
     }
-    // The command always reaches the worker: during a pause or past the viewer's limit it answers
-    // with a stub, so the viewer knows the bot heard them.
+    // Every message that reaches here goes to the worker: a pause, a limit or a declined word
+    // answers with a stub, so the viewer knows the bot heard them.
     await enqueueEvent(sql, boss, {
       channelId: channel.id,
       source: roast.source,
@@ -193,6 +187,7 @@ chat.on("message", (channelName, tags, message, self) => {
       viewerLogin,
       inputText: roast.inputText,
       target: roast.target,
+      ...(declined ? { declined } : {}),
       ...(await withGame(channel)),
       raw: { tags, message }
     });

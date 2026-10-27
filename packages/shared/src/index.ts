@@ -150,6 +150,25 @@ export const STUB_PHRASES: Readonly<Record<z.infer<typeof archetypeSchema>, read
   });
 // A reward the frequency or a pause turned down.
 export const REWARD_DECLINED_STUB = "Мммммм, нет!";
+// Free stubs: the character's picture, a caption and a sound effect, no voice and no model. The
+// caption is the viewer's name in %USER_NAME%. `aiDraft` lets Haiku write a fresh caption per viewer
+// in the same spirit; the template is the fallback when the draft is refused or fails.
+export const stubSoundSchema = z.enum(["tap", "ping", "whoosh", "door"]);
+export type StubSound = z.infer<typeof stubSoundSchema>;
+export const STUB_VISUALS: readonly {
+  readonly text: string;
+  readonly sound: StubSound;
+  readonly aiDraft?: true;
+}[] = Object.freeze([
+  { text: "Смотрит на %USER_NAME% с презрением", sound: "whoosh" },
+  { text: "Игнорирует %USER_NAME%, смотря в телефон", sound: "tap" },
+  { text: "Просто не хочет отвечать %USER_NAME%", sound: "ping" },
+  { text: "Записала %USER_NAME% в список на игнор", sound: "door", aiDraft: true },
+  { text: "Хотела ответить %USER_NAME%, но это ниже её достоинства", sound: "whoosh" },
+  { text: "Ответила всем, кроме %USER_NAME%", sound: "ping" },
+  { text: "Зевнула, глядя на %USER_NAME%", sound: "tap" }
+]);
+export const STUB_CAPTION_MAX_CHARACTERS = 120;
 export const CUSTOM_CHARACTER_PLANS: ReadonlySet<string> = new Set(["premium"]);
 // Pictures live in the database on a small server: a few own characters per channel, small files.
 export const MAX_OWN_CHARACTERS = 3;
@@ -218,10 +237,11 @@ export const VIEWER_LIMITED_SOURCES: ReadonlySet<RoastSource> = new Set<RoastSou
   "chat_keyword",
   "reward"
 ]);
-// A viewer who called the bot directly and hit a pause or their limit hears a short prerecorded
-// stub instead of silence, so nobody thinks the bot is down. Keywords stay silent: nobody called.
+// A viewer who talks to the bot (command, keyword, reward) and hits a pause or their limit hears a
+// short stub instead of silence, so nobody thinks the bot is down.
 export const STUB_SOURCES: ReadonlySet<RoastSource> = new Set<RoastSource>([
   "chat_command",
+  "chat_keyword",
   "reward"
 ]);
 /** Who the roast is aimed at: the viewer behind the trigger or the streamer. */
@@ -565,7 +585,10 @@ export const overlayRoastEventSchema = z
     verdict: verdictSchema.optional(),
     // Free plan: the overlay shows the service address under the card.
     branding: z.boolean().optional(),
-    audioUrl: z.string().url(),
+    // A spoken roast has audioUrl. A free stub has no voice: `sound` names the effect the overlay
+    // plays from its own bundle while the caption stays on screen.
+    audioUrl: z.string().url().optional(),
+    sound: stubSoundSchema.optional(),
     expiresAt: z.string().datetime(),
     sentAt: z.string().datetime()
   })
@@ -576,7 +599,10 @@ export const overlayRoastEventSchema = z
 export const storedOverlayRoastSchema = overlayRoastEventSchema
   .omit({ audioUrl: true, character: true })
   .extend({
-    audioFile: z.string().regex(/^[0-9a-f-]{36}\.wav$/u),
+    audioFile: z
+      .string()
+      .regex(/^[0-9a-f-]{36}\.wav$/u)
+      .optional(),
     // The API turns the path into a URL at delivery time, like the audio.
     character: z
       .object({

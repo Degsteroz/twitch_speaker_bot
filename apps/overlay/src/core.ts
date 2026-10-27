@@ -23,10 +23,17 @@ export interface RoastEvent {
   verdict?: Verdict;
   /** Free plan: show the service address under the card. */
   branding?: boolean;
-  audioUrl: string;
+  /** A spoken roast. Absent on a free stub, which plays `sound` instead. */
+  audioUrl?: string;
+  sound?: StubSound;
   expiresAt: string;
   sentAt: string;
 }
+/** Sound effects the overlay bundles; a free stub names one of them. */
+export type StubSound = "tap" | "ping" | "whoosh" | "door";
+const STUB_SOUNDS: readonly StubSound[] = ["tap", "ping", "whoosh", "door"];
+const isStubSound = (value: unknown): value is StubSound =>
+  typeof value === "string" && (STUB_SOUNDS as readonly string[]).includes(value);
 export interface Character {
   name: string;
   imageUrl: string;
@@ -78,25 +85,28 @@ export function parseEvent(raw: string): ServerEvent | null {
     !text(value.roastId, 100) ||
     !text(value.viewerLogin, 64) ||
     !text(value.text, 200) ||
-    !text(value.audioUrl, 3000) ||
     !text(value.expiresAt, 100)
   )
     return null;
+  // A roast carries audio; a free stub carries a sound. Neither means nothing to play.
+  const hasAudio = text(value.audioUrl, 3000);
+  if (!hasAudio && !isStubSound(value.sound)) return null;
   try {
-    new URL(value.audioUrl);
+    if (hasAudio) new URL(value.audioUrl as string);
     if (!Number.isFinite(Date.parse(value.expiresAt))) return null;
   } catch {
     return null;
   }
   // An unknown tone only loses the character, never the roast itself.
-  const { tone, character, verdict, branding, ...rest } = value;
+  const { tone, character, verdict, branding, sound, ...rest } = value;
   const custom = parseCharacter(character);
   return {
     ...(rest as unknown as RoastEvent),
     ...(isTone(tone) ? { tone } : {}),
     ...(custom ? { character: custom } : {}),
     ...(isVerdict(verdict) ? { verdict } : {}),
-    ...(branding === true ? { branding: true } : {})
+    ...(branding === true ? { branding: true } : {}),
+    ...(isStubSound(sound) ? { sound } : {})
   };
 }
 

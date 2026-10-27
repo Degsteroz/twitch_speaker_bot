@@ -29,6 +29,15 @@ describe("overlay protocol", () => {
     expect(parseEvent(JSON.stringify(event()))?.type).toBe("roast.play");
     expect(parseEvent(JSON.stringify({ ...event(), text: "" }))).toBeNull();
   });
+  it("plays a free stub's sound when it has no audio, and needs one of the two", () => {
+    const silent = { ...event(), audioUrl: undefined };
+    const stub = parseEvent(JSON.stringify({ ...silent, sound: "door" })) as RoastEvent;
+    expect(stub.sound).toBe("door");
+    expect(stub.audioUrl).toBeUndefined();
+    // Without audio, an unknown sound leaves nothing to play, so the event is dropped.
+    expect(parseEvent(JSON.stringify({ ...silent, sound: "moo" }))).toBeNull();
+    expect(parseEvent(JSON.stringify(silent))).toBeNull();
+  });
   it("carries the character tone and drops an unknown one without losing the roast", () => {
     const tagged = parseEvent(JSON.stringify({ ...event(), tone: "yandere" })) as RoastEvent;
     expect(tagged.tone).toBe("yandere");

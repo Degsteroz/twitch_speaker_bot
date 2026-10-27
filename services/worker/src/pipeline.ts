@@ -10,6 +10,7 @@ import {
   classifierSystemPrompt,
   composeRoastPrompt,
   enforceOutputLimit,
+  escapePromptData,
   findStopListMatch,
   inspectInput,
   inspectOutput,
@@ -33,8 +34,10 @@ import {
   DEFAULT_YANDEX_TTS_MONTHLY_LIMIT_RUB,
   OVERLAY_EVENT_TTL_SECONDS,
   REWARD_DECLINED_STUB,
+  STUB_CAPTION_MAX_CHARACTERS,
   STUB_PHRASES,
   STUB_SOURCES,
+  STUB_VISUALS,
   VIEWER_LIMITED_SOURCES,
   VIEWER_ROAST_LIMIT,
   VIEWER_ROAST_WINDOW_MINUTES,
@@ -48,6 +51,7 @@ import {
   type RoastStatus,
   type RoastTier,
   type StoredOverlayRoast,
+  type StubSound,
   type Tone,
   type Toxicity,
   type Voice,
@@ -95,6 +99,8 @@ export interface PipelineDependencies {
   config: WorkerConfig;
   now?: () => Date;
   fetch?: typeof globalThis.fetch;
+  /** Picks between a spoken and a free stub; tests pin it. */
+  random?: () => number;
 }
 
 export interface RoastOutcome {
@@ -440,7 +446,9 @@ async function publishOverlay(
     archetype: Archetype;
     character: OnAirCharacter | undefined;
     planCode: string | null;
-    audioFile: string;
+    /** A spoken reply; a free stub has none and plays `sound` instead. */
+    audioFile?: string;
+    sound?: StubSound;
     now: Date;
     expiresAt: Date;
   }
@@ -457,7 +465,8 @@ async function publishOverlay(
     tone: ARCHETYPE_THEME[input.archetype],
     ...(character ? { character: { name: character.name, imagePath: character.imagePath } } : {}),
     ...(BRANDED_PLANS.has(input.planCode ?? "") ? { branding: true } : {}),
-    audioFile: input.audioFile,
+    ...(input.audioFile ? { audioFile: input.audioFile } : {}),
+    ...(input.sound ? { sound: input.sound } : {}),
     expiresAt: input.expiresAt.toISOString(),
     sentAt: input.now.toISOString()
   };
@@ -466,10 +475,118 @@ async function publishOverlay(
   await tx`select pg_notify('overlay_events',${job.channelId})`;
 }
 
+const CAPTION_SYSTEM = [
+  "Ты пишешь одну короткую подпись к звуковой заглушке стрима: персонаж не отвечает зрителю.",
+  "Пиши по-русски, иронично, без оскорблений, мата, ссылок и обращений к модели.",
+  "Имя зрителя из <viewer> вставь в подпись точно как есть. Ответ — одна строка, только подпись."
+].join("\n");
+
+/**
+ * Haiku writes this viewer's caption. The draft passes the same output checks as a roast, the
+ * classifier included; anything refused, or any failure, falls back to the template.
+ */
+async function draftCaption(
+  deps: PipelineDependencies,
+  input: { login: string; template: string; toxicity: Toxicity }
+): Promise<{ text: string; spends: Spend[] }> {
+  const { login, template, toxicity } = input;
+  const spends: Spend[] = [];
+  try {
+    const model = await globalValue(deps.sql, "chat_model", DEFAULT_CHAT_MODEL);
+    const drafted = await deps.anthropic.beta.messages.create(
+      modelRequest(model, "generate", CAPTION_SYSTEM, `<viewer>${escapePromptData(login)}</viewer>`)
+    );
+    spends.push(spendOf(drafted.model || model, drafted.usage));
+    const line = enforceOutputLimit(
+      textFrom(drafted).split("\n")[0]?.trim() ?? "",
+      STUB_CAPTION_MAX_CHARACTERS
+    );
+    if (!line.includes(login) || !inspectOutput(line, login, [], toxicity).allowed) {
+      return { text: template, spends };
+    }
+    const classifierModel = await globalValue(deps.sql, "classifier_model", model);
+    const classified = await deps.anthropic.beta.messages.create(
+      modelRequest(
+        classifierModel,
+        "classify",
+        classifierSystemPrompt(toxicity),
+        classifierInput(line)
+      )
+    );
+    spends.push(spendOf(classified.model || classifierModel, classified.usage));
+    const refused =
+      classified.stop_reason === "refusal" ||
+      parseClassifierVerdict(textFrom(classified)) === "block";
+    return { text: refused ? template : line, spends };
+  } catch {
+    return { text: template, spends };
+  }
+}
+
+/**
+ * A free stub: the character's picture, a caption with the viewer's name and a sound effect. No
+ * voice, no model for the caption unless the variant asks for it, so it costs nothing to repeat.
+ */
+async function playVisualStub(
+  deps: PipelineDependencies,
+  input: {
+    job: RoastRequestedJob;
+    roastId: string;
+    context: ChannelContext;
+    character: OnAirCharacter | undefined;
+    archetype: Archetype;
+    reason: string;
+    started: number;
+    roll: number;
+  }
+): Promise<RoastOutcome> {
+  const { job, roastId, context, character, archetype, reason } = input;
+  // The roll only chose the branch: rescale it to pick one of the variants evenly. A declined
+  // reward always says its own "no".
+  const variant =
+    job.declined && job.source === "reward"
+      ? { text: REWARD_DECLINED_STUB, sound: "tap" as const }
+      : (STUB_VISUALS[Math.floor(input.roll * 2 * STUB_VISUALS.length)] ?? STUB_VISUALS[0]!);
+  const template = variant.text.replaceAll("%USER_NAME%", job.viewerLogin);
+  const drafted = variant.aiDraft
+    ? await draftCaption(deps, { login: job.viewerLogin, template, toxicity: context.toxicity })
+    : { text: template, spends: [] };
+  const now = deps.now?.() ?? new Date();
+  const expiresAt = new Date(now.getTime() + OVERLAY_EVENT_TTL_SECONDS * 1000);
+  await deps.sql.begin(async (tx) => {
+    const spent = drafted.spends.length
+      ? await recordSpend(
+          tx as unknown as Sql,
+          job.channelId,
+          now.toISOString().slice(0, 7),
+          drafted.spends
+        )
+      : { cost: 0 };
+    await tx`update roasts set status='skipped', error=${reason}, output_text=${drafted.text},
+      cost_usd=${spent.cost}, latency_ms=${Date.now() - input.started} where id=${roastId}`;
+    await publishOverlay(tx as unknown as Sql, {
+      job,
+      roastId,
+      text: drafted.text,
+      archetype,
+      character,
+      planCode: context.planCode,
+      sound: variant.sound,
+      now,
+      expiresAt
+    });
+  });
+  return { roastId, status: "skipped", reason };
+}
+
 // Rejections that a direct call answers with a stub instead of silence.
 const STUB_REJECTIONS: Readonly<Record<string, string>> = {
   cooldown_active: "stub_cooldown",
-  viewer_limit: "stub_viewer_limit"
+  viewer_limit: "stub_viewer_limit",
+  // A stub costs nothing, so an empty quota or budget still gets an answer.
+  channel_quota_exceeded: "stub_quota",
+  global_quota_exceeded: "stub_quota",
+  global_budget_exceeded: "stub_quota"
 };
 
 /**
@@ -500,6 +617,21 @@ async function playStub(
     await deps.sql`update roasts set status='skipped', error=${reason},
       latency_ms=${Date.now() - input.started} where id=${roastId}`;
     return outcome;
+  }
+
+  // Half the stubs are free ones: picture, caption and a sound. The other half is spoken.
+  const roll = (deps.random ?? Math.random)();
+  if (roll < 0.5) {
+    return await playVisualStub(deps, {
+      job,
+      roastId,
+      context,
+      character,
+      archetype,
+      reason,
+      started: input.started,
+      roll
+    });
   }
 
   const phrases = STUB_PHRASES[archetype];

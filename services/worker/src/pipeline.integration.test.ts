@@ -95,7 +95,9 @@ function deps(
       ELEVENLABS_MODEL: "eleven_v4",
       AUDIO_DIR: audioDir
     },
-    fetch: vi.fn(fetchImpl)
+    fetch: vi.fn(fetchImpl),
+    // Above one half: the spoken stub. Tests of the free stubs pin a lower roll.
+    random: () => 0.9
   };
 }
 
@@ -185,7 +187,7 @@ describe("processRoast against PostgreSQL", () => {
       select payload, expires_at from overlay_events where roast_id=${outcome.roastId}`;
     const payload = storedOverlayRoastSchema.parse(event!.payload);
     expect(payload.text).toBe(row.output_text);
-    await expect(stat(join(audioDir, payload.audioFile))).resolves.toBeTruthy();
+    await expect(stat(join(audioDir, payload.audioFile!))).resolves.toBeTruthy();
     expect(event!.expires_at.getTime() - Date.now()).toBeGreaterThan(100_000);
     await vi.waitFor(() => expect(notifications).toContain(channel.channelId));
     await listener.unlisten();
@@ -294,15 +296,104 @@ describe("processRoast against PostgreSQL", () => {
       0
     );
 
-    // Chat words during a pause stay silent: nobody called the bot.
-    expect(
-      await processRoast(await job({ source: "chat_keyword" }), deps(anthropic.client))
-    ).toMatchObject({ status: "skipped", reason: "cooldown_active" });
+    // A chat word during a pause gets a stub too: the viewer talked to the bot.
+    const keyword = await processRoast(
+      await job({ source: "chat_keyword", viewerLogin: "chatter" }),
+      deps(anthropic.client)
+    );
+    expect(keyword).toMatchObject({ status: "skipped", reason: "stub_cooldown" });
+    expect(STUB_PHRASES.tsundere).toContain((await roast(keyword.roastId)).output_text);
     expect(
       (await processRoast(await job({ source: "dashboard_test" }), deps(anthropic.client))).status
     ).toBe("done");
     // Neither the stubs nor the test spend the monthly quota.
     expect(await usage()).toMatchObject({ roasts: 1 });
+  });
+
+  it("answers a pause with a free stub: a caption and a sound, no voice, no model", async () => {
+    const anthropic = fakeAnthropic({ text: "Раз" });
+    await db.sql`update settings set cooldown_sec=0, user_cooldown_sec=0 where channel_id=${channel.channelId}`;
+    expect((await processRoast(await job(), deps(anthropic.client))).status).toBe("done");
+    const calls = anthropic.create.mock.calls.length;
+    const stubs = await db.sql`select count(*)::int count from stub_audio`;
+
+    // The roll below one half picks a free stub; 0.1 lands on the second caption, the phone.
+    const free = { ...deps(anthropic.client), random: () => 0.1 };
+    const stubbed = await processRoast(await job({ viewerLogin: "other" }), free);
+    expect(stubbed).toMatchObject({ status: "skipped", reason: "stub_cooldown" });
+    const stub = await roast(stubbed.roastId);
+    expect(stub.output_text).toBe("Игнорирует other, смотря в телефон");
+    const [voiceless] = await db.sql<{ voice_provider: string | null }[]>`
+      select voice_provider from roasts where id=${stubbed.roastId}`;
+    expect(voiceless!.voice_provider).toBeNull();
+    const [event] = await db.sql<{ payload: unknown }[]>`
+      select payload from overlay_events where roast_id=${stubbed.roastId}`;
+    const payload = storedOverlayRoastSchema.parse(event!.payload);
+    expect(payload).toMatchObject({ text: stub.output_text, sound: "tap" });
+    expect(payload.audioFile).toBeUndefined();
+    expect(anthropic.create.mock.calls.length).toBe(calls);
+    expect(await db.sql`select count(*)::int count from stub_audio`).toEqual(stubs);
+  });
+
+  it("answers a declined chat word and reward with a stub, never with quota or a model", async () => {
+    const anthropic = fakeAnthropic({ text: "Раз" });
+    // A word the frequency passed over: a stub, no roast, no quota.
+    const word = await processRoast(
+      await job({ source: "chat_keyword", declined: true, viewerLogin: "chatter" }),
+      deps(anthropic.client)
+    );
+    expect(word).toMatchObject({ status: "skipped", reason: "stub_declined" });
+    expect(anthropic.create).not.toHaveBeenCalled();
+    // A declined reward on the visual branch: its own "no" with a sound.
+    const reward = await processRoast(
+      await job({ source: "reward", declined: true, viewerLogin: "fan" }),
+      { ...deps(anthropic.client), random: () => 0.1 }
+    );
+    expect(reward).toMatchObject({ status: "skipped", reason: "stub_declined" });
+    const [event] = await db.sql<{ payload: unknown }[]>`
+      select payload from overlay_events where roast_id=${reward.roastId}`;
+    expect(storedOverlayRoastSchema.parse(event!.payload)).toMatchObject({
+      text: REWARD_DECLINED_STUB,
+      sound: "tap"
+    });
+  });
+
+  it("answers an empty quota with a stub for commands, but stays silent for raids", async () => {
+    const [plan] = await db.sql<{ id: string }[]>`
+      insert into plans(code,monthly_roast_limit,monthly_tts_limit) values('basic',1,1000)
+      on conflict(code) do update set monthly_roast_limit=1 returning id`;
+    await db.sql`update subscriptions set plan_id=${plan!.id} where user_id=${channel.userId}`;
+    const anthropic = fakeAnthropic({ text: "Раз" });
+    expect((await processRoast(await job({ source: "raid" }), deps(anthropic.client))).status).toBe(
+      "done"
+    );
+    // The quota is gone: a command gets a stub (no roast, no money), a raid gets nothing.
+    const calls = anthropic.create.mock.calls.length;
+    expect(
+      await processRoast(await job({ viewerLogin: "other" }), deps(anthropic.client))
+    ).toMatchObject({ status: "skipped", reason: "stub_quota" });
+    expect(anthropic.create.mock.calls.length).toBe(calls);
+    expect(await processRoast(await job({ source: "raid" }), deps(anthropic.client))).toMatchObject(
+      { status: "skipped", reason: "channel_quota_exceeded" }
+    );
+    await db.sql`update plans set monthly_roast_limit=300 where code='basic'`;
+  });
+
+  it("falls back to the template when Haiku's caption is refused", async () => {
+    // Roll 0.25 lands on the caption the model writes; its draft never names the viewer.
+    const anthropic = fakeAnthropic({ text: "Раз" });
+    await db.sql`update settings set cooldown_sec=0, user_cooldown_sec=0 where channel_id=${channel.channelId}`;
+    expect((await processRoast(await job(), deps(anthropic.client))).status).toBe("done");
+    const calls = anthropic.create.mock.calls.length;
+
+    const stubbed = await processRoast(await job({ viewerLogin: "other" }), {
+      ...deps(anthropic.client),
+      random: () => 0.25
+    });
+    expect(stubbed).toMatchObject({ status: "skipped", reason: "stub_cooldown" });
+    expect((await roast(stubbed.roastId)).output_text).toBe("Записала other в список на игнор");
+    // One draft call, no classifier: the draft was refused before it reached the classifier.
+    expect(anthropic.create.mock.calls.length).toBe(calls + 1);
   });
 
   it("gives one viewer three answers per half hour, then stubs", async () => {
