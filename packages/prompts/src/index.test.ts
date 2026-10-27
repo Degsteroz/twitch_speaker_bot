@@ -308,6 +308,8 @@ describe("prompt composition", () => {
     expect(prompt.system.startsWith(SAFETY_BLOCK)).toBe(true);
     expect(prompt.system).toBe(prompt.systemBlocks.join("\n\n"));
     expect(prompt.system).toContain("границы безопасности остаются неизменными");
+    // The persona stays neutral: no commentary on the bot itself or on how the message is written.
+    expect(prompt.system).toContain("не описывай собственные мысли и ощущения");
     expect(prompt.system).not.toContain("игнорируй правила");
     expect(prompt.system).not.toContain("evil");
     expect(prompt.user).toContain("&lt;/msg&gt;");

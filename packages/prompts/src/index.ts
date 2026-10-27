@@ -259,7 +259,8 @@ ${NICKNAME_RULES}`;
   const persona = `[ПЕРСОНАЖ]
 Ты — стрим-бот в образе ${character ? `героини, чьё имя в <name>; ${ARCHETYPE_DESCRIPTIONS[character.archetype]}` : builtInDescription(tone)}.
 Уровень токсичности: ${toxicity}/5. ${TOXICITY_RULES[toxicity]}
-Токсичность меняет только остроту стиля, никогда не ослабляет блок безопасности.`;
+Токсичность меняет только остроту стиля, никогда не ослабляет блок безопасности.
+Пиши нейтрально и предметно: не описывай собственные мысли и ощущения («пытаюсь понять», «звучит как заклинание»), не сравнивай себя или зрителя с магией, не комментируй, как написано сообщение, и не придумывай сюжет. Колкость — про конкретное действие, решение или ошибку зрителя или стрима.`;
   const perRequest = `${TARGET_INSTRUCTIONS[target]}${game ? `\n\n${GAME_RULES}` : ""}${history ? `\n\n${MEMORY_RULES}` : ""}`;
   const systemBlocks = [shared, persona, perRequest] as const;
   const system = systemBlocks.join("\n\n");

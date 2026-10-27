@@ -153,7 +153,7 @@ export const REWARD_DECLINED_STUB = "Мммммм, нет!";
 // Free stubs: the character's picture, a caption and a sound effect, no voice and no model. The
 // caption is the viewer's name in %USER_NAME%. `aiDraft` lets Haiku write a fresh caption per viewer
 // in the same spirit; the template is the fallback when the draft is refused or fails.
-export const stubSoundSchema = z.enum(["tap", "ping", "whoosh", "door"]);
+export const stubSoundSchema = z.enum(["tap", "ping", "whoosh", "door", "sigh"]);
 export type StubSound = z.infer<typeof stubSoundSchema>;
 export const STUB_VISUALS: readonly {
   readonly text: string;
@@ -164,7 +164,7 @@ export const STUB_VISUALS: readonly {
   { text: "Игнорирует %USER_NAME%, смотря в телефон", sound: "tap" },
   { text: "Просто не хочет отвечать %USER_NAME%", sound: "ping" },
   { text: "Записала %USER_NAME% в список на игнор", sound: "door", aiDraft: true },
-  { text: "Хотела ответить %USER_NAME%, но это ниже её достоинства", sound: "whoosh" },
+  { text: "Хотела ответить %USER_NAME%, но это ниже её достоинства", sound: "sigh" },
   { text: "Ответила всем, кроме %USER_NAME%", sound: "ping" },
   { text: "Зевнула, глядя на %USER_NAME%", sound: "tap" }
 ]);

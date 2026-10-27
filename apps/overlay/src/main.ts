@@ -1,6 +1,7 @@
 import tsundereUrl from "./assets/tsundere.webp";
 import yandereUrl from "./assets/yandere.webp";
 import doorUrl from "./assets/sounds/door.wav";
+import sighUrl from "./assets/sounds/sigh.wav";
 import pingUrl from "./assets/sounds/ping.wav";
 import tapUrl from "./assets/sounds/tap.wav";
 import whooshUrl from "./assets/sounds/whoosh.wav";
@@ -28,7 +29,8 @@ const SOUNDS: Readonly<Record<StubSound, string>> = {
   tap: tapUrl,
   ping: pingUrl,
   whoosh: whooshUrl,
-  door: doorUrl
+  door: doorUrl,
+  sigh: sighUrl
 };
 
 function element(selector: string): Element {

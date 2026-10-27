@@ -30,8 +30,8 @@ export interface RoastEvent {
   sentAt: string;
 }
 /** Sound effects the overlay bundles; a free stub names one of them. */
-export type StubSound = "tap" | "ping" | "whoosh" | "door";
-const STUB_SOUNDS: readonly StubSound[] = ["tap", "ping", "whoosh", "door"];
+export type StubSound = "tap" | "ping" | "whoosh" | "door" | "sigh";
+const STUB_SOUNDS: readonly StubSound[] = ["tap", "ping", "whoosh", "door", "sigh"];
 const isStubSound = (value: unknown): value is StubSound =>
   typeof value === "string" && (STUB_SOUNDS as readonly string[]).includes(value);
 export interface Character {
