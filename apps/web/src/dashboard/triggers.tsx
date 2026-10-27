@@ -1,20 +1,23 @@
-// Trigger cards: the channel-points reward, chat words and !роаст, Twitch events and donations.
+// Trigger cards: the channel-points reward, chat words and the command, Twitch events and
+// donations.
 import { useEffect, useState } from "react";
 
 import {
   api,
+  DEFAULT_COMMAND,
   DONATIONALERTS_RESULT_TEXT,
   donationAlertsConnectUrl,
   post,
   REWARD_REASON_TEXT,
   type DonationAlertsStatus,
   type EventTriggers,
+  REWARD_EVERY,
   type RewardsResponse,
   type Triggers,
   twitchLogin
 } from "../api.js";
 import { ask } from "../ask.js";
-import { KEYWORD_CHANCE_STEPS, ScaleChoice } from "./controls.js";
+import { CHAT_FREQUENCY_STEPS, ScaleChoice } from "./controls.js";
 import { Card, Tags } from "../ui.js";
 
 export type EventKey = keyof EventTriggers;
@@ -121,6 +124,67 @@ export function DonationAlertsLink() {
   );
 }
 
+// Mirrors commandSchema in packages/shared: "!" and 2–20 letters, digits, "_" or "-".
+const COMMAND_PATTERN = /^![\p{L}\p{N}_-]{2,20}$/u;
+const RESERVED_COMMANDS = new Set([
+  "!song",
+  "!sr",
+  "!uptime",
+  "!followage",
+  "!commands",
+  "!discord",
+  "!points",
+  "!top",
+  "!help",
+  "!роаст-стоп",
+  "!роаст-старт",
+  "!roast-stop",
+  "!roast-start"
+]);
+
+/** Why a command cannot be saved, or null. */
+export function commandProblem(command: string): string | null {
+  const value = command.trim().toLocaleLowerCase("ru-RU");
+  if (!value.startsWith("!")) return "Команда начинается с «!»";
+  if (!COMMAND_PATTERN.test(value)) return "От 2 до 20 букв или цифр после «!», без пробелов";
+  if (RESERVED_COMMANDS.has(value)) return "Эту команду занимают другие боты";
+  return null;
+}
+
+/** The streamer's own command; saved only when valid, so a half-typed one never breaks a save. */
+function CommandField({
+  value,
+  disabled,
+  onChange
+}: {
+  value: string;
+  disabled: boolean;
+  onChange: (command: string) => void;
+}) {
+  const [draft, setDraft] = useState(value);
+  useEffect(() => setDraft(value), [value]);
+  const problem = commandProblem(draft);
+  return (
+    <label className="field-label">
+      Команда в чате
+      <input
+        value={draft}
+        disabled={disabled}
+        maxLength={21}
+        placeholder={DEFAULT_COMMAND}
+        onChange={(event) => {
+          setDraft(event.target.value);
+          if (!commandProblem(event.target.value)) {
+            onChange(event.target.value.trim().toLocaleLowerCase("ru-RU"));
+          }
+        }}
+        onBlur={() => problem && setDraft(value)}
+      />
+      {problem && draft !== value && <small className="hint below danger">{problem}</small>}
+    </label>
+  );
+}
+
 export function TriggerSettings({
   triggers,
   rewards,
@@ -170,7 +234,11 @@ export function TriggerSettings({
         )}
         <small className="hint below">
           Зритель пишет текст в награде, героиня читает его и отвечает по смыслу. Кого она при этом
-          жарит, решает переключатель «Кого жарить» в карточке персонажа.
+          жарит, решает переключатель «Кого жарить» в карточке персонажа.{" "}
+          {REWARD_EVERY[triggers.chatFrequency] === 1
+            ? "Отвечает на каждую награду"
+            : `Отвечает на каждую ${REWARD_EVERY[triggers.chatFrequency]}-ю награду`}{" "}
+          (частота — в карточке «Чат»), остальным и тем, кто частит, — «Мммммм, нет!».
         </small>
       </Card>
       <Card tour="command">
@@ -184,14 +252,27 @@ export function TriggerSettings({
             onChange={(event) => set({ command: event.target.checked })}
           />
           <span>
-            Команда <code>!роаст</code>{" "}
+            Команда <code>{triggers.commandName}</code>{" "}
             <small>
               {commandAvailable
-                ? "— «!роаст опять проиграл катку»"
+                ? `— «${triggers.commandName} опять проиграл катку»`
                 : "— доступна на тарифах Basic и Premium"}
             </small>
           </span>
         </label>
+        {commandAvailable && triggers.command && (
+          <>
+            <CommandField
+              value={triggers.commandName}
+              disabled={!commandAvailable}
+              onChange={(commandName) => set({ commandName })}
+            />
+            <small className="hint below">
+              Своё слово понятнее зрителям, например <code>!прожарь</code> или имя героини. Кто
+              зовёт слишком часто, слышит короткую заглушку вроде «Опять ты? Жди очереди».
+            </small>
+          </>
+        )}
         {characterName && (
           <label className="check">
             <input
@@ -201,7 +282,7 @@ export function TriggerSettings({
             />
             <span>
               Откликаться на имя «{characterName}»{" "}
-              <small>— как на слово-триггер: с тем же шансом и паузами</small>
+              <small>— как на слово-триггер: с той же частотой и паузами</small>
             </span>
           </label>
         )}
@@ -213,15 +294,17 @@ export function TriggerSettings({
         />
         <small className="hint below">
           Слово срабатывает в начале любого слова: «слил» поймает «слился». Команды на «!» и
-          сообщения ботов пропускаются, на сообщение самого стримера достаётся стримеру. Проверяете
-          сами — поставьте «Всегда» и учтите паузы из «Тонкой настройки».
+          сообщения ботов пропускаются, на сообщение самого стримера достаётся стримеру. Проверить
+          ответ проще кнопкой теста в панели: слово срабатывает не каждый раз.
         </small>
-        {(triggers.keywords.length > 0 || (characterName && triggers.nameMention)) && (
+        {(triggers.keywords.length > 0 ||
+          (characterName && triggers.nameMention) ||
+          triggers.rewardId) && (
           <ScaleChoice
-            label="Как часто отвечать на слово"
-            value={triggers.keywordChancePercent}
-            steps={KEYWORD_CHANCE_STEPS}
-            onChange={(keywordChancePercent) => set({ keywordChancePercent })}
+            label="Как часто отвечать на слова и награды"
+            value={triggers.chatFrequency}
+            steps={CHAT_FREQUENCY_STEPS}
+            onChange={(chatFrequency) => set({ chatFrequency })}
           />
         )}
         <Tags
@@ -238,7 +321,8 @@ export function TriggerSettings({
         />
         <small className="hint below">
           Боты канала и спамеры: их сообщения не запускают роаст, даже если в них слово-триггер или{" "}
-          <code>!роаст</code>. Nightbot, StreamElements и другие известные боты пропускаются и так.
+          <code>{triggers.commandName}</code>. Nightbot, StreamElements и другие известные боты
+          пропускаются и так.
         </small>
       </Card>
       <Card tour="events">

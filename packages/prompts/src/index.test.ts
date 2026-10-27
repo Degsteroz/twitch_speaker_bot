@@ -4,6 +4,7 @@ import {
   HAIKU_5_5_PRICING,
   MAX_PROMPT_MESSAGE_CHARACTERS,
   SAFETY_BLOCK,
+  calculateCostUsd,
   calculateHaikuCostUsd,
   classifierInput,
   classifierSystemPrompt,
@@ -16,6 +17,7 @@ import {
   moderateText,
   normalizeForModeration,
   parseClassifierVerdict,
+  pricingForModel,
   spokenText
 } from "./index.js";
 
@@ -304,6 +306,7 @@ describe("prompt composition", () => {
     });
 
     expect(prompt.system.startsWith(SAFETY_BLOCK)).toBe(true);
+    expect(prompt.system).toBe(prompt.systemBlocks.join("\n\n"));
     expect(prompt.system).toContain("границы безопасности остаются неизменными");
     expect(prompt.system).not.toContain("игнорируй правила");
     expect(prompt.system).not.toContain("evil");
@@ -437,6 +440,30 @@ describe("targets and answering by meaning", () => {
   });
 });
 
+describe("prompt caching", () => {
+  const base = { viewer: "v", message: "m", tone: "tsundere", toxicity: 2 } as const;
+
+  it("keeps the shared rules identical on every channel and the persona on every request", () => {
+    const one = composeRoastPrompt({ ...base, target: "viewer" });
+    const other = composeRoastPrompt({
+      ...base,
+      tone: "yandere",
+      toxicity: 5,
+      character: { name: "Кэт", archetype: "himedere" },
+      game: "Dota 2",
+      target: "streamer",
+      history: { exchanges: [{ message: "a", reply: "b" }] }
+    });
+    expect(other.systemBlocks[0]).toBe(one.systemBlocks[0]);
+    expect(other.systemBlocks[0].startsWith(SAFETY_BLOCK)).toBe(true);
+    // Target, game and memory change per request: they stay after the cached persona.
+    const sameChannel = composeRoastPrompt({ ...base, target: "auto", game: "Dota 2" });
+    expect(sameChannel.systemBlocks.slice(0, 2)).toEqual(one.systemBlocks.slice(0, 2));
+    expect(sameChannel.systemBlocks[2]).toContain("[ИГРА]");
+    expect(one.systemBlocks[2]).not.toContain("[ИГРА]");
+  });
+});
+
 describe("classifier verdict", () => {
   it("is fail-closed", () => {
     expect(parseClassifierVerdict("ALLOW")).toBe("allow");
@@ -451,7 +478,8 @@ describe("Haiku 5.5 cost", () => {
   it("calculates input and output costs from an injectable profile", () => {
     expect(HAIKU_5_5_PRICING).toEqual({
       inputUsdPerMillionTokens: 0.1,
-      outputUsdPerMillionTokens: 0.5
+      outputUsdPerMillionTokens: 0.5,
+      cacheReadUsdPerMillionTokens: 0.01
     });
     expect(calculateHaikuCostUsd(400, 100)).toBeCloseTo(0.00009, 10);
     expect(
@@ -460,6 +488,22 @@ describe("Haiku 5.5 cost", () => {
         outputUsdPerMillionTokens: 10
       })
     ).toBe(12);
+  });
+
+  it("bills cache writes a quarter above input and cache reads at the read price", () => {
+    const sonnet = pricingForModel("claude-sonnet-5-5");
+    const million = 1_000_000;
+    expect(calculateCostUsd({ input: million, output: million }, sonnet)).toBe(12);
+    expect(calculateCostUsd({ input: 0, output: 0, cacheWrite: million }, sonnet)).toBe(2.5);
+    expect(calculateCostUsd({ input: 0, output: 0, cacheRead: million }, sonnet)).toBeCloseTo(0.2);
+    // Without a read price, a tenth of the input price.
+    expect(
+      calculateCostUsd(
+        { input: 0, output: 0, cacheRead: million },
+        { inputUsdPerMillionTokens: 5, outputUsdPerMillionTokens: 25 }
+      )
+    ).toBeCloseTo(0.5);
+    expect(() => calculateCostUsd({ input: 0, output: 0, cacheRead: -1 }, sonnet)).toThrow();
   });
 
   it("rejects invalid token counts", () => {

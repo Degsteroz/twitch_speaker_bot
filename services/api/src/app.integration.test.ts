@@ -228,6 +228,22 @@ describe("auth and settings", () => {
     });
     expect((await call("PATCH", "/settings", streamer, { toxicity: 9 })).statusCode).toBe(400);
     expect((await call("PATCH", "/settings", streamer, { unknown: true })).statusCode).toBe(400);
+
+    // Pauses never go below the plan minimum (60 s off premium), saved or stored earlier.
+    const fast = await call("PATCH", "/settings", streamer, { cooldownSec: 0, userCooldownSec: 5 });
+    expect(fast.json()).toMatchObject({ cooldown_sec: 60, user_cooldown_sec: 60 });
+    await db.sql`update settings set cooldown_sec=0 where channel_id=${streamer.channelId}`;
+    expect((await call("GET", "/settings", streamer)).json()).toMatchObject({ cooldown_sec: 60 });
+    expect((await call("GET", "/status", streamer)).json()).toMatchObject({ minCooldownSec: 60 });
+    // The channel's own command, never a command of another bot.
+    const named = await call("PATCH", "/settings", streamer, {
+      triggers: { commandName: "!Прожарь" }
+    });
+    expect(named.json()).toMatchObject({ triggers: { commandName: "!прожарь" } });
+    expect(
+      (await call("PATCH", "/settings", streamer, { triggers: { commandName: "!song" } }))
+        .statusCode
+    ).toBe(400);
   });
 
   it("shows the channel's recent activity and Twitch's answer to its subscriptions", async () => {

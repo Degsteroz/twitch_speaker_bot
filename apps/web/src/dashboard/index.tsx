@@ -210,6 +210,7 @@ export function Dashboard({
               ? "Квота канала на месяц закончилась."
               : `Канал #${session.channelLogin} подключён`;
   const total = status.limit + status.gifted;
+  const minPause = status.minCooldownSec;
   const minutes = quotaMinutes(
     status.remaining,
     roastsPerMinute(settings.triggers, settings.cooldownSec, status.commandAvailable)
@@ -396,27 +397,31 @@ export function Dashboard({
                 <Field
                   label="Пауза между роастами, сек."
                   type="number"
-                  min={0}
+                  min={minPause}
                   max={3600}
                   value={settings.cooldownSec}
                   onChange={(value) =>
-                    patch("cooldownSec", Math.max(0, Math.min(3600, Number(value) || 0)))
+                    patch("cooldownSec", Math.max(minPause, Math.min(3600, Number(value) || 0)))
                   }
                 />
                 <Field
                   label="Один зритель не чаще, сек."
                   type="number"
-                  min={0}
+                  min={minPause}
                   max={86400}
                   value={settings.userCooldownSec}
                   onChange={(value) =>
-                    patch("userCooldownSec", Math.max(0, Math.min(86400, Number(value) || 0)))
+                    patch(
+                      "userCooldownSec",
+                      Math.max(minPause, Math.min(86400, Number(value) || 0))
+                    )
                   }
                 />
               </div>
               <small className="hint below">
-                Паузы действуют на чат, награду и фоллоу. Битсы, сабы, рейды и донаты бот озвучивает
-                всегда.
+                Паузы действуют на чат, награду и фоллоу, на вашем тарифе — не меньше {minPause}{" "}
+                сек. Кто зовёт бота во время паузы или чаще трёх раз за полчаса, слышит короткую
+                заглушку. Битсы, сабы, рейды и донаты бот озвучивает всегда.
               </small>
             </fieldset>
             <div data-tour="stopwords">

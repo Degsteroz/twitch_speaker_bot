@@ -46,7 +46,9 @@ const LIMIT_FIELDS: SettingField[] = [
   }
 ];
 const MODEL_FIELDS: SettingField[] = [
-  { key: "model", label: "Генерация", kind: "model", fallback: "claude-opus-5-5" },
+  { key: "model", label: "Генерация", kind: "model", fallback: "claude-sonnet-5-5" },
+  // Chat words on the premium tier; events, the command and rewards use "model".
+  { key: "chat_model", label: "Слова в чате", kind: "model", fallback: "claude-haiku-5-5" },
   { key: "classifier_model", label: "Классификатор", kind: "model", fallback: "claude-sonnet-5-5" }
 ];
 const VOICE_FIELDS: SettingField[] = [
@@ -88,7 +90,7 @@ export function AdminSettings() {
         <SettingsGroup
           key={`models${key}`}
           title="Модели"
-          note="Генерация — для лучших роастов, модель попроще задают тарифы ниже. Классификатор проверяет каждый ответ на всех тарифах."
+          note="Генерация — для лучших роастов: события, команда и награды. Слова в чате — фоновая болтовня, её отвечает модель подешевле. Модель после лимита лучших роастов задают тарифы ниже. Классификатор проверяет каждый ответ на всех тарифах."
           fields={MODEL_FIELDS}
           values={values}
           reload={load}

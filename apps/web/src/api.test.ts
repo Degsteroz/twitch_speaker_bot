@@ -40,13 +40,19 @@ describe("normalizeSettings", () => {
       rewardId: "r1",
       events: { raid: { enabled: true } }
     });
-    expect(triggers).toMatchObject({ command: false, rewardId: "r1", keywordChancePercent: 25 });
+    expect(triggers).toMatchObject({
+      command: false,
+      commandName: "!роаст",
+      rewardId: "r1",
+      chatFrequency: "normal"
+    });
     expect(triggers.events.raid).toEqual({ enabled: true, minViewers: 5 });
     expect(triggers.events.cheer).toEqual({ enabled: false, minBits: 100 });
   });
 
   it("drops the old reward and target fields so a save is not rejected", () => {
     const triggers = normalizeTriggers({
+      keywordChancePercent: 100,
       rewardMode: "verdict",
       streamerLoyaltyPercent: 80,
       streamerTargetPercent: 50
@@ -78,20 +84,23 @@ describe("quota estimate", () => {
     expect(quotaMinutes(10, 0)).toBeNull();
   });
 
-  it("caps chat triggers by the channel pause but not paid events", () => {
+  it("answers every Nth chat word and caps chat by the channel pause but not paid events", () => {
     const busy = {
       ...base,
       keywords: ["гг", "слил", "лаг", "кринж", "изи", "бот", "ещё"],
-      keywordChancePercent: 100
+      chatFrequency: "often" as const
     };
-    // Six words × 0.5 a minute = 3 a minute, the 30-second pause allows 2.
-    expect(roastsPerMinute(busy, 30, false)).toBe(2);
-    expect(roastsPerMinute(busy, 0, false)).toBe(3);
+    // Six words × 0.5 a minute = 3 hits a minute, every 6th answered: 0.5 a minute.
+    expect(roastsPerMinute(busy, 0, false)).toBeCloseTo(0.5);
+    expect(roastsPerMinute({ ...busy, chatFrequency: "rare" }, 0, false)).toBeCloseTo(0.25);
+    // A 60-second pause allows one a minute: chat plus the command hit it.
+    expect(roastsPerMinute({ ...busy, command: true }, 60, true)).toBe(1);
     const withRaids = {
       ...busy,
+      command: true,
       events: { ...busy.events, raid: { enabled: true, minViewers: 5 } }
     };
-    expect(roastsPerMinute(withRaids, 30, false)).toBeCloseTo(2.01);
+    expect(roastsPerMinute(withRaids, 60, true)).toBeCloseTo(1.01);
     expect(quotaMinutes(10, 2)).toBe(5);
   });
 });

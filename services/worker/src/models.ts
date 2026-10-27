@@ -18,11 +18,27 @@ const MAX_TOKENS: Record<Kind, { plain: number; thinking: number }> = {
 
 export type ModelRequest = Anthropic.Beta.MessageCreateParamsNonStreaming;
 
+/**
+ * The system prompt as one string, or as blocks from most to least stable: every block but the
+ * last is a cache breakpoint, so the shared rules and the channel's persona are read from the
+ * prompt cache (a tenth of the input price) instead of billed in full on every roast.
+ */
+function systemParam(
+  system: string | readonly string[]
+): string | Anthropic.Beta.BetaTextBlockParam[] {
+  if (typeof system === "string") return system;
+  return system.map((text, index) => ({
+    type: "text" as const,
+    text,
+    ...(index < system.length - 1 ? { cache_control: { type: "ephemeral" as const } } : {})
+  }));
+}
+
 /** One Messages request for the roast or the classifier, with the knobs this model accepts. */
 export function modelRequest(
   model: string,
   kind: Kind,
-  system: string,
+  system: string | readonly string[],
   user: string
 ): ModelRequest {
   const thinks = ALWAYS_THINKING.test(model);
@@ -31,7 +47,7 @@ export function modelRequest(
     max_tokens: thinks ? MAX_TOKENS[kind].thinking : MAX_TOKENS[kind].plain,
     ...(thinks ? { output_config: { effort: "low" } } : { thinking: { type: "disabled" } }),
     ...(SERVER_FALLBACK.test(model) ? { betas: [FALLBACK_BETA], fallbacks: "default" } : {}),
-    system,
+    system: systemParam(system),
     messages: [{ role: "user", content: user }]
   };
 }

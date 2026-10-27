@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   DEFAULT_DONATION_DELAY_SECONDS,
   DEFAULT_TRIGGERS,
+  effectiveCooldown,
   MAX_DONATION_DELAY_SECONDS,
   OVERLAY_EVENT_TTL_SECONDS,
   channelSettingsSchema,
@@ -22,8 +23,8 @@ describe("channelSettingsSchema", () => {
       tone: "tsundere",
       voice: "female",
       toxicity: 2,
-      cooldownSec: 30,
-      userCooldownSec: 60,
+      cooldownSec: 60,
+      userCooldownSec: 120,
       triggers: DEFAULT_TRIGGERS,
       stopWords: [],
       enabled: true
@@ -45,6 +46,24 @@ describe("channelSettingsSchema", () => {
     expect(legacy.events.subscription).toEqual({ enabled: false });
     expect(legacy.ignoredUsers).toEqual([]);
     expect(legacy.events.donation.delaySec).toBe(DEFAULT_DONATION_DELAY_SECONDS);
+  });
+
+  it("replaces the old keyword chance with a frequency and keeps the command name", () => {
+    const legacy = triggerSettingsSchema.parse({ keywordChancePercent: 100 });
+    expect(legacy).not.toHaveProperty("keywordChancePercent");
+    expect(legacy.chatFrequency).toBe("normal");
+    expect(legacy.commandName).toBe("!роаст");
+    expect(triggerSettingsSchema.parse({ commandName: " !Мицуки " }).commandName).toBe("!мицуки");
+    for (const bad of ["роаст", "!", "!a", "!два слова", "!song", "!роаст-стоп"]) {
+      expect(triggerSettingsSchema.safeParse({ commandName: bad }).success, bad).toBe(false);
+    }
+  });
+
+  it("never lets a pause go below the plan minimum", () => {
+    expect(effectiveCooldown(0, "basic")).toBe(60);
+    expect(effectiveCooldown(0, "premium")).toBe(40);
+    expect(effectiveCooldown(0, null)).toBe(60);
+    expect(effectiveCooldown(300, "premium")).toBe(300);
   });
 
   it("stores ignored users as plain lowercase logins and rejects anything else", () => {

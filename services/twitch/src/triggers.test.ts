@@ -1,7 +1,14 @@
-import { DEFAULT_TRIGGERS, triggerSettingsSchema, type TriggerSettings } from "@roastbot/shared";
+import {
+  DEFAULT_TRIGGERS,
+  KEYWORD_EVERY,
+  REWARD_EVERY,
+  triggerSettingsSchema,
+  type TriggerSettings
+} from "@roastbot/shared";
 import { describe, expect, it } from "vitest";
 
 import {
+  EveryNth,
   chatTrigger,
   donationRoast,
   eventRoast,
@@ -33,62 +40,61 @@ describe("chat triggers", () => {
     expect(matchKeyword("(слил)", ["слил"])).toBe("слил");
   });
 
-  it("answers !роаст only on a paid plan and keywords with their chance", () => {
-    const settings = triggers({ keywords: ["слил"], keywordChancePercent: 50 });
-    const paid = { commandAllowed: true, random: never };
+  it("answers !роаст only on a paid plan, and keywords", () => {
+    const settings = triggers({ keywords: ["слил"] });
+    const paid = { commandAllowed: true };
     expect(chatTrigger(chat("!роаст мой aim"), settings, paid)).toEqual({
       source: "chat_command",
       inputText: "мой aim",
       target: "viewer"
     });
-    expect(chatTrigger(chat("!роаст мой aim"), settings, { random: always })).toBeNull();
+    expect(chatTrigger(chat("!роаст мой aim"), settings)).toBeNull();
     expect(chatTrigger(chat("!роаст"), triggers({ command: false }), paid)).toBeNull();
-    expect(chatTrigger(chat("опять слил"), settings, { random: always })).toEqual({
+    expect(chatTrigger(chat("опять слил"), settings)).toEqual({
       source: "chat_keyword",
       inputText: "опять слил",
       target: "viewer"
     });
-    expect(chatTrigger(chat("опять слил"), settings, { random: never })).toBeNull();
-    expect(chatTrigger(chat("просто привет"), settings, { random: always })).toBeNull();
+    expect(chatTrigger(chat("просто привет"), settings)).toBeNull();
+  });
+
+  it("answers the channel's own command and no longer !роаст", () => {
+    const settings = triggers({ commandName: "!мицуки" });
+    const paid = { commandAllowed: true };
+    expect(chatTrigger(chat("!Мицуки привет"), settings, paid)?.inputText).toBe("привет");
+    expect(chatTrigger(chat("!роаст привет"), settings, paid)).toBeNull();
   });
 
   it("ignores bots and other commands", () => {
-    const settings = triggers({ keywords: ["слил"], keywordChancePercent: 100 });
-    const options = { commandAllowed: true, random: always };
+    const settings = triggers({ keywords: ["слил"] });
+    const options = { commandAllowed: true };
     expect(chatTrigger(chat("слил", { username: "Nightbot" }), settings, options)).toBeNull();
     expect(chatTrigger(chat("!слил"), settings, options)).toBeNull();
   });
 
   it("answers the premium character's name like a keyword, only when the streamer turned it on", () => {
-    const options = { random: always, characterName: "Мисс Кэт" };
-    const on = triggers({ nameMention: true, keywordChancePercent: 50 });
+    const options = { characterName: "Мисс Кэт" };
+    const on = triggers({ nameMention: true });
     expect(chatTrigger(chat("мисс кэт, привет"), on, options)).toEqual({
       source: "chat_keyword",
       inputText: "мисс кэт, привет",
       target: "viewer"
     });
-    expect(chatTrigger(chat("мисс кэт, привет"), on, { ...options, random: never })).toBeNull();
-    expect(
-      chatTrigger(chat("мисс кэт"), triggers({ keywordChancePercent: 50 }), options)
-    ).toBeNull();
-    expect(chatTrigger(chat("мисс кэт"), on, { random: always })).toBeNull();
+    expect(chatTrigger(chat("мисс кэт"), triggers(), options)).toBeNull();
+    expect(chatTrigger(chat("мисс кэт"), on)).toBeNull();
   });
 
   it("ignores the channel's own list of bots and spammers, whatever the case", () => {
-    const settings = triggers({
-      keywords: ["слил"],
-      keywordChancePercent: 100,
-      ignoredUsers: ["my_bot"]
-    });
-    const options = { commandAllowed: true, random: always };
+    const settings = triggers({ keywords: ["слил"], ignoredUsers: ["my_bot"] });
+    const options = { commandAllowed: true };
     expect(chatTrigger(chat("слил", { username: "My_Bot" }), settings, options)).toBeNull();
     expect(chatTrigger(chat("!роаст слил", { username: "my_bot" }), settings, options)).toBeNull();
     expect(chatTrigger(chat("слил"), settings, options)?.source).toBe("chat_keyword");
   });
 
   it("roasts the streamer for their own message: there is no other author", () => {
-    const settings = triggers({ keywords: ["слил"], keywordChancePercent: 100 });
-    const options = { commandAllowed: true, random: never };
+    const settings = triggers({ keywords: ["слил"] });
+    const options = { commandAllowed: true };
     expect(chatTrigger(chat("опять слил", { isBroadcaster: true }), settings, options)).toEqual({
       source: "chat_keyword",
       inputText: "опять слил",
@@ -97,6 +103,31 @@ describe("chat triggers", () => {
     expect(
       chatTrigger(chat("!роаст мой aim", { isBroadcaster: true }), settings, options)?.target
     ).toBe("streamer");
+  });
+});
+
+describe("every Nth", () => {
+  it("answers the first hit, then every Nth, and keeps a missed one due", () => {
+    const gate = new EveryNth();
+    const hits = (every: number, count: number) =>
+      Array.from({ length: count }, () => {
+        const due = gate.due("c1", every);
+        if (due) gate.reset("c1");
+        return due;
+      });
+    expect(hits(3, 7)).toEqual([true, false, false, true, false, false, true]);
+    // Due but not answered (a pause): the next hit is still due.
+    const other = new EveryNth();
+    expect(other.due("c2", 2)).toBe(true);
+    expect(other.due("c2", 2)).toBe(true);
+    other.reset("c2");
+    expect(other.due("c2", 2)).toBe(false);
+    expect(other.due("c2", 1)).toBe(true);
+  });
+
+  it("answers every chat word only every 6th, 9th or 12th time", () => {
+    expect(KEYWORD_EVERY).toEqual({ rare: 12, normal: 9, often: 6 });
+    expect(REWARD_EVERY).toEqual({ rare: 3, normal: 2, often: 1 });
   });
 });
 

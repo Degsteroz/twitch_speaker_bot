@@ -53,6 +53,19 @@ function elevenLabsVoice(tone: Archetype, config: WorkerConfig): string | undefi
   return undefined;
 }
 
+/**
+ * The ElevenLabs voice a character speaks with: a premium character's own one (null: none), or
+ * the built-in voice of the archetype. Undefined without a key or a voice.
+ */
+export function elevenLabsVoiceFor(
+  tone: Archetype,
+  config: WorkerConfig,
+  customVoice?: string | null
+): string | undefined {
+  if (!config.ELEVENLABS_API_KEY) return undefined;
+  return customVoice === undefined ? elevenLabsVoice(tone, config) : (customVoice ?? undefined);
+}
+
 async function synthesizeElevenLabs(
   text: string,
   voiceId: string,
@@ -173,12 +186,7 @@ export async function speak(
   const allowed = (provider: VoiceProvider) =>
     VOICE_ORDER.indexOf(provider) >= VOICE_ORDER.indexOf(best);
   let fallbackReason = allowed("yandex") ? "no_cloud_voice" : "plan_voice";
-  const voiceId =
-    config.ELEVENLABS_API_KEY && allowed("elevenlabs")
-      ? customVoice === undefined
-        ? elevenLabsVoice(tone, config)
-        : (customVoice ?? undefined)
-      : undefined;
+  const voiceId = allowed("elevenlabs") ? elevenLabsVoiceFor(tone, config, customVoice) : undefined;
   if (voiceId) {
     const characters = Array.from(text).length;
     if (await reserve.elevenlabs(characters)) {

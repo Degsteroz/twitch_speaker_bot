@@ -7,6 +7,8 @@ import { createDatabase } from "@roastbot/db";
 import {
   BLOCKED_OUTPUT_FALLBACK,
   DASHBOARD_TEST_DAILY_LIMIT,
+  REWARD_DECLINED_STUB,
+  STUB_PHRASES,
   storedOverlayRoastSchema,
   type RoastSource
 } from "@roastbot/shared";
@@ -53,8 +55,14 @@ beforeEach(async () => {
   await db.sql`delete from usage_monthly`;
 });
 
-// Opus generation + Sonnet classifier at 400 tokens in / 60 out each (the fake names no model).
-const MODEL_COST_USD = (400 * 4 + 60 * 20 + 400 * 2 + 60 * 10) / 1e6;
+// Sonnet generation + Sonnet classifier at 400 tokens in / 60 out each (the fake names no model).
+const MODEL_COST_USD = (400 * 2 + 60 * 10 + 400 * 2 + 60 * 10) / 1e6;
+
+/** The generation's system prompt as text: it is sent as cacheable blocks. */
+function systemText(request: Anthropic.MessageCreateParamsNonStreaming | undefined): string {
+  const system = request?.system ?? "";
+  return typeof system === "string" ? system : system.map((block) => block.text).join("\n\n");
+}
 
 function fakeAnthropic(generate: FakeReply | Error, classify: FakeReply = { text: "ALLOW" }) {
   const create = vi.fn((request: Anthropic.MessageCreateParamsNonStreaming) => {
@@ -99,6 +107,7 @@ async function job(
     requestedAt: string;
     target: "viewer" | "streamer";
     eventSummary: string;
+    declined: true;
   }> = {}
 ) {
   const source = overrides.source ?? "chat_command";
@@ -114,6 +123,7 @@ async function job(
     inputText: overrides.inputText ?? "опять проиграл",
     ...(overrides.target ? { target: overrides.target } : {}),
     ...(overrides.eventSummary ? { eventSummary: overrides.eventSummary } : {}),
+    ...(overrides.declined ? { declined: overrides.declined } : {}),
     requestedAt: overrides.requestedAt ?? new Date().toISOString()
   };
 }
@@ -156,7 +166,7 @@ describe("processRoast against PostgreSQL", () => {
     const [generation, classifier] = anthropic.create.mock.calls.map(([request]) => request);
     // Opus 5.5 cannot switch thinking off: low effort, and the refusal fallback on.
     expect(generation).toMatchObject({
-      model: "claude-opus-5-5",
+      model: "claude-sonnet-5-5",
       output_config: { effort: "low" },
       fallbacks: "default"
     });
@@ -211,7 +221,7 @@ describe("processRoast against PostgreSQL", () => {
     const anthropic = fakeAnthropic({ text: "Хитро, но нет." });
     await processRoast(await job({ inputText: "а <b>ты</b> попробуй" }), deps(anthropic.client));
     const [generation, classifier] = anthropic.create.mock.calls.map(([request]) => request);
-    expect((generation!.system as string).indexOf("[БЛОК БЕЗОПАСНОСТИ")).toBe(0);
+    expect(systemText(generation).indexOf("[БЛОК БЕЗОПАСНОСТИ")).toBe(0);
     const data = generation!.messages[0]!.content as string;
     expect(data).toContain("<msg>а &lt;b&gt;ты&lt;/b&gt; попробуй</msg>");
     expect(data).not.toContain("БЛОК БЕЗОПАСНОСТИ");
@@ -257,22 +267,107 @@ describe("processRoast against PostgreSQL", () => {
     expect(await usage()).toBeUndefined();
   });
 
-  it("enforces channel and viewer cooldowns but not for dashboard tests", async () => {
+  it("never lets a pause go below the plan minimum, and answers a direct call with a stub", async () => {
     const anthropic = fakeAnthropic({ text: "Раз" });
-    await db.sql`update settings set cooldown_sec=0, user_cooldown_sec=60 where channel_id=${channel.channelId}`;
+    // Stored 0, but premium pauses are at least 40 seconds.
+    await db.sql`update settings set cooldown_sec=0, user_cooldown_sec=0 where channel_id=${channel.channelId}`;
     expect((await processRoast(await job(), deps(anthropic.client))).status).toBe("done");
-    expect(await processRoast(await job(), deps(anthropic.client))).toMatchObject({
-      status: "skipped",
-      reason: "cooldown_active"
-    });
+    const [pause] = await db.sql<{ seconds: number }[]>`
+      select extract(epoch from next_allowed_at - now())::int seconds from cooldown_state
+      where channel_id=${channel.channelId} and scope='channel'`;
+    expect(pause!.seconds).toBeGreaterThanOrEqual(38);
+    const calls = anthropic.create.mock.calls.length;
+
+    // The command during the pause: a prerecorded stub, no model, no quota.
+    const stubbed = await processRoast(await job({ viewerLogin: "other" }), deps(anthropic.client));
+    expect(stubbed).toMatchObject({ status: "skipped", reason: "stub_cooldown" });
+    expect(anthropic.create.mock.calls.length).toBe(calls);
+    const stub = await roast(stubbed.roastId);
+    expect(STUB_PHRASES.tsundere).toContain(stub.output_text);
+    const [event] = await db.sql<{ payload: { text: string } }[]>`
+      select payload from overlay_events where roast_id=${stubbed.roastId}`;
+    expect(event!.payload.text).toBe(stub.output_text);
+    // A second call while that stub waits for the overlay adds nothing to the queue.
+    const again = await processRoast(await job({ viewerLogin: "other" }), deps(anthropic.client));
+    expect(again).toMatchObject({ status: "skipped", reason: "stub_cooldown" });
+    expect(await db.sql`select 1 from overlay_events where roast_id=${again.roastId}`).toHaveLength(
+      0
+    );
+
+    // Chat words during a pause stay silent: nobody called the bot.
     expect(
-      (await processRoast(await job({ viewerLogin: "other" }), deps(anthropic.client))).status
-    ).toBe("done");
+      await processRoast(await job({ source: "chat_keyword" }), deps(anthropic.client))
+    ).toMatchObject({ status: "skipped", reason: "cooldown_active" });
     expect(
       (await processRoast(await job({ source: "dashboard_test" }), deps(anthropic.client))).status
     ).toBe("done");
-    // The test does not spend the monthly quota.
-    expect(await usage()).toMatchObject({ roasts: 2 });
+    // Neither the stubs nor the test spend the monthly quota.
+    expect(await usage()).toMatchObject({ roasts: 1 });
+  });
+
+  it("gives one viewer three answers per half hour, then stubs", async () => {
+    const anthropic = fakeAnthropic({ text: "Раз" });
+    await db.sql`delete from roasts where channel_id=${channel.channelId}`;
+    const call = async () => {
+      // Each call as if the pauses had passed.
+      await db.sql`delete from cooldown_state where channel_id=${channel.channelId}`;
+      return processRoast(await job({ viewerLogin: "spammer" }), deps(anthropic.client));
+    };
+    for (let index = 0; index < 3; index += 1) expect((await call()).status).toBe("done");
+    expect(await call()).toMatchObject({ status: "skipped", reason: "stub_viewer_limit" });
+    // Someone else is not affected.
+    await db.sql`delete from cooldown_state where channel_id=${channel.channelId}`;
+    expect(
+      (await processRoast(await job({ viewerLogin: "calm" }), deps(anthropic.client))).status
+    ).toBe("done");
+  });
+
+  it("answers a reward the frequency passed over with a short no", async () => {
+    const anthropic = fakeAnthropic({ text: "Раз" });
+    const outcome = await processRoast(
+      await job({ source: "reward", declined: true }),
+      deps(anthropic.client)
+    );
+    expect(outcome).toMatchObject({ status: "skipped", reason: "stub_declined" });
+    expect((await roast(outcome.roastId)).output_text).toBe(REWARD_DECLINED_STUB);
+    expect(anthropic.create).not.toHaveBeenCalled();
+  });
+
+  it("synthesizes a stub once per ElevenLabs voice and replays it from the database", async () => {
+    await db.sql`delete from stub_audio`;
+    await db.sql`update settings set tone='yandere' where channel_id=${channel.channelId}`;
+    const anthropic = fakeAnthropic({ text: "Раз" });
+    const pipeline = deps(anthropic.client);
+    pipeline.config = {
+      ...pipeline.config,
+      ELEVENLABS_API_KEY: "el-key",
+      ELEVENLABS_VOICE_YANDERE: "voice-ai"
+    };
+    const declined = async () =>
+      processRoast(await job({ source: "reward", declined: true }), pipeline);
+    const first = await declined();
+    expect(pipeline.fetch).toHaveBeenCalledOnce();
+    expect(pipeline.fetch.mock.calls[0]![0]).toContain("/voice-ai?");
+    expect(
+      await db.sql`select 1 from stub_audio where voice_key='elevenlabs:voice-ai'
+        and text=${REWARD_DECLINED_STUB}`
+    ).toHaveLength(1);
+    // The overlay played the first one; the next comes from the database.
+    await db.sql`update overlay_events set status='delivered' where roast_id=${first.roastId}`;
+    expect((await declined()).reason).toBe("stub_declined");
+    expect(pipeline.fetch).toHaveBeenCalledOnce();
+  });
+
+  it("answers chat words with the cheap chat model and the rest with the global one", async () => {
+    const anthropic = fakeAnthropic({ text: "Раз" });
+    await processRoast(await job({ source: "chat_keyword" }), deps(anthropic.client));
+    expect(anthropic.create.mock.calls[0]![0]).toMatchObject({
+      model: "claude-haiku-5-5",
+      thinking: { type: "disabled" }
+    });
+    // The shared rules and the persona are cache breakpoints, the per-request part is not.
+    const system = anthropic.create.mock.calls[0]![0].system as Anthropic.TextBlockParam[];
+    expect(system.map((block) => Boolean(block.cache_control))).toEqual([true, true, false]);
   });
 
   it("stops at the channel quota and then consumes gifted roasts", async () => {
@@ -526,7 +621,7 @@ describe("triggers and targets", () => {
     );
     expect(outcome.status).toBe("done");
     const generation = generationOf(anthropic);
-    expect(generation.system as string).toContain("подколов стримера из <streamer>");
+    expect(systemText(generation)).toContain("подколов стримера из <streamer>");
     const data = generation.messages[0]!.content as string;
     expect(data).toContain(`<streamer>${channel.login}</streamer>`);
     expect(data).toContain("<event>Рейд с канала other: 40 зрителей</event>");
@@ -569,13 +664,16 @@ describe("triggers and targets", () => {
     await db.sql`update settings set cooldown_sec=0, user_cooldown_sec=0
       where channel_id=${channel.channelId}`;
     const anthropic = fakeAnthropic({ text: "Ну и мазила." });
-    const reward = async () =>
-      processRoast(
+    // Pauses never go below the plan minimum: clear them as if time had passed.
+    const reward = async () => {
+      await db.sql`delete from cooldown_state where channel_id=${channel.channelId}`;
+      return processRoast(
         await job({ source: "reward", inputText: "скажи стримеру, что он плохо стреляет" }),
         deps(anthropic.client)
       );
+    };
     await reward();
-    const auto = anthropic.create.mock.calls[0]![0].system as string;
+    const auto = systemText(anthropic.create.mock.calls[0]![0]);
     expect(auto).toContain("Сама реши по смыслу, кого подколоть");
     expect(auto).toContain("не поручение");
 
@@ -583,15 +681,13 @@ describe("triggers and targets", () => {
       where channel_id=${channel.channelId}`;
     anthropic.create.mockClear();
     await reward();
-    expect(anthropic.create.mock.calls[0]![0].system as string).toContain(
-      "подколов автора из <viewer>"
-    );
+    expect(systemText(anthropic.create.mock.calls[0]![0])).toContain("подколов автора из <viewer>");
 
     await db.sql`update settings set triggers=triggers || '{"targetMode":"streamer"}'::jsonb
       where channel_id=${channel.channelId}`;
     anthropic.create.mockClear();
     await reward();
-    expect(anthropic.create.mock.calls[0]![0].system as string).toContain(
+    expect(systemText(anthropic.create.mock.calls[0]![0])).toContain(
       "подколов стримера из <streamer>"
     );
   });
@@ -680,8 +776,8 @@ describe("model and voice by plan", () => {
       expect(event!.payload.branding).toBe(true);
     }
     expect(tiers.map(({ tier, model, voice_provider }) => [tier, model, voice_provider])).toEqual([
-      ["premium", "claude-opus-5-5", "elevenlabs"],
-      ["premium", "claude-opus-5-5", "elevenlabs"],
+      ["premium", "claude-sonnet-5-5", "elevenlabs"],
+      ["premium", "claude-sonnet-5-5", "elevenlabs"],
       ["economy", "claude-haiku-5-5", "yandex"]
     ]);
     // Economy changes the writer and the voice, never the safety classifier.
@@ -714,7 +810,7 @@ describe("viewer opt-out", () => {
     ).toMatchObject({ status: "skipped", reason: "viewer_opted_out" });
     expect(anthropic.create).not.toHaveBeenCalled();
     await processRoast(await job({ source: "raid", viewerLogin: "shy" }), deps(anthropic.client));
-    expect(anthropic.create.mock.calls[0]![0].system as string).toContain(
+    expect(systemText(anthropic.create.mock.calls[0]![0])).toContain(
       "подколов стримера из <streamer>"
     );
   });
@@ -799,7 +895,7 @@ describe("premium characters", () => {
   }
   const prompt = (anthropic: ReturnType<typeof fakeAnthropic>) => {
     const request = anthropic.create.mock.calls[0]![0];
-    return { system: request.system as string, user: request.messages[0]!.content as string };
+    return { system: systemText(request), user: request.messages[0]!.content as string };
   };
 
   beforeEach(async () => {

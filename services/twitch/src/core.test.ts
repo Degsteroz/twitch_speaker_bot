@@ -14,6 +14,13 @@ describe("parseRoastCommand", () => {
   it("is case-insensitive for the command itself", () => {
     expect(parseRoastCommand("!РОАСТ мой aim", "viewer")).toBe("мой aim");
   });
+
+  it("answers the channel's own command instead of !роаст", () => {
+    expect(parseRoastCommand("!Мицуки скажи  что-нибудь", "viewer", "!мицуки")).toBe(
+      "скажи  что-нибудь"
+    );
+    expect(parseRoastCommand("!роаст target", "viewer", "!мицуки")).toBeNull();
+  });
 });
 
 describe("reconnectDelayMs", () => {

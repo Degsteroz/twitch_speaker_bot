@@ -5,7 +5,7 @@ import { join } from "node:path";
 import type Anthropic from "@anthropic-ai/sdk";
 import type { createDatabase } from "@roastbot/db";
 import {
-  calculateHaikuCostUsd,
+  calculateCostUsd,
   classifierInput,
   classifierSystemPrompt,
   composeRoastPrompt,
@@ -27,11 +27,19 @@ import {
   DASHBOARD_TEST_DAILY_LIMIT,
   OPTOUT_SKIPPED_SOURCES,
   DEFAULT_ANTHROPIC_MODEL,
+  DEFAULT_CHAT_MODEL,
   DEFAULT_GLOBAL_MONTHLY_ROAST_CAP,
   DEFAULT_MONTHLY_BUDGET_USD,
   DEFAULT_ELEVENLABS_MONTHLY_CHAR_LIMIT,
   DEFAULT_YANDEX_TTS_MONTHLY_LIMIT_RUB,
   OVERLAY_EVENT_TTL_SECONDS,
+  REWARD_DECLINED_STUB,
+  STUB_PHRASES,
+  STUB_SOURCES,
+  VIEWER_LIMITED_SOURCES,
+  VIEWER_ROAST_LIMIT,
+  VIEWER_ROAST_WINDOW_MINUTES,
+  effectiveCooldown,
   roastRequestedJobSchema,
   triggerSettingsSchema,
   COMMAND_PLANS,
@@ -51,7 +59,7 @@ import {
 import type { WorkerConfig } from "./config.js";
 import { modelRequest } from "./models.js";
 import { notifyStreamer, quotaNotice } from "./telegram.js";
-import { speak } from "./tts.js";
+import { elevenLabsVoiceFor, speak, type Speech, type VoiceReservations } from "./tts.js";
 
 export type Sql = ReturnType<typeof createDatabase>["client"];
 
@@ -97,10 +105,27 @@ export interface RoastOutcome {
 
 interface Spend {
   model: string;
+  /** All input, cached or not. */
   tokensIn: number;
   tokensOut: number;
+  /** The part of tokensIn written to and read from the prompt cache. */
+  cacheWrite?: number;
+  cacheRead?: number;
   /** Flat cost on top of tokens, e.g. a paid speech synthesis request. */
   fixedUsd?: number;
+}
+
+/** What a Messages response cost, with the cached part of the input billed at its own rates. */
+function spendOf(model: string, usage: Anthropic.Beta.BetaUsage): Spend {
+  const cacheWrite = usage.cache_creation_input_tokens ?? 0;
+  const cacheRead = usage.cache_read_input_tokens ?? 0;
+  return {
+    model,
+    tokensIn: usage.input_tokens + cacheWrite + cacheRead,
+    tokensOut: usage.output_tokens,
+    cacheWrite,
+    cacheRead
+  };
 }
 
 export function textFrom(message: Anthropic.Beta.BetaMessage): string {
@@ -111,9 +136,18 @@ export function textFrom(message: Anthropic.Beta.BetaMessage): string {
 }
 
 export function costOf(spend: Spend): number {
+  const cacheWrite = spend.cacheWrite ?? 0;
+  const cacheRead = spend.cacheRead ?? 0;
   return (
-    calculateHaikuCostUsd(spend.tokensIn, spend.tokensOut, pricingForModel(spend.model)) +
-    (spend.fixedUsd ?? 0)
+    calculateCostUsd(
+      {
+        input: spend.tokensIn - cacheWrite - cacheRead,
+        output: spend.tokensOut,
+        cacheWrite,
+        cacheRead
+      },
+      pricingForModel(spend.model)
+    ) + (spend.fixedUsd ?? 0)
   );
 }
 
@@ -224,10 +258,24 @@ async function reserve(
         select scope from cooldown_state where channel_id=${job.channelId} and next_allowed_at>now()
         and ((scope='channel' and subject_key='*') or (scope='viewer' and subject_key=${job.viewerLogin}))`;
       if (cooldowns.length) return rejected("cooldown_active");
+      if (VIEWER_LIMITED_SOURCES.has(job.source)) {
+        // Answers this viewer already got in the window: finished ones and ones booked but still
+        // being written (the tier is set right after booking).
+        const [answered] = await tx<{ count: number }[]>`
+          select count(*)::int count from roasts
+          where channel_id=${job.channelId} and lower(viewer_login)=lower(${job.viewerLogin})
+            and source::text in ${tx([...VIEWER_LIMITED_SOURCES])}
+            and (status in ('done','blocked_output','failed') or (status='queued' and tier is not null))
+            and created_at > now() - ${VIEWER_ROAST_WINDOW_MINUTES} * interval '1 minute'`;
+        if ((answered?.count ?? 0) >= VIEWER_ROAST_LIMIT) return rejected("viewer_limit");
+      }
+      // Never below the plan's minimum, whatever the channel stored.
+      const channelPause = effectiveCooldown(context.cooldownSec, context.planCode);
+      const viewerPause = effectiveCooldown(context.userCooldownSec, context.planCode);
       await tx`
         insert into cooldown_state(channel_id,scope,subject_key,next_allowed_at) values
-         (${job.channelId},'channel','*',now()+${context.cooldownSec}*interval '1 second'),
-         (${job.channelId},'viewer',${job.viewerLogin},now()+${context.userCooldownSec}*interval '1 second')
+         (${job.channelId},'channel','*',now()+${channelPause}*interval '1 second'),
+         (${job.channelId},'viewer',${job.viewerLogin},now()+${viewerPause}*interval '1 second')
         on conflict(channel_id,scope,subject_key)
         do update set next_allowed_at=excluded.next_allowed_at,updated_at=now()`;
     }
@@ -356,6 +404,162 @@ async function recordSpend(sql: Sql, channelId: string, month: string, spends: S
   return { tokensIn, tokensOut, cost };
 }
 
+/** The premium character on air, when the plan includes her. */
+interface OnAirCharacter {
+  id: string;
+  name: string;
+  archetype: Archetype;
+  voiceId: string | null;
+  imagePath: string;
+}
+
+/** Reservations against the owner's monthly caps for the paid voices. */
+async function voiceReservations(deps: PipelineDependencies): Promise<VoiceReservations> {
+  const clock = () => deps.now?.() ?? new Date();
+  const yandexLimitRub = await globalValue<number>(
+    deps.sql,
+    "yandex_tts_monthly_limit_rub",
+    DEFAULT_YANDEX_TTS_MONTHLY_LIMIT_RUB
+  );
+  const elevenLabsLimit = await globalValue<number>(
+    deps.sql,
+    "elevenlabs_monthly_char_limit",
+    DEFAULT_ELEVENLABS_MONTHLY_CHAR_LIMIT
+  );
+  return {
+    yandex: (requests) => reserveYandexRequests(deps.sql, clock(), requests, yandexLimitRub),
+    elevenlabs: (characters) =>
+      reserveElevenLabsCharacters(deps.sql, clock(), characters, elevenLabsLimit)
+  };
+}
+
+/** Queues a spoken reply for the channel's overlay and wakes the API's dispatcher. */
+async function publishOverlay(
+  tx: Sql,
+  input: {
+    job: RoastRequestedJob;
+    roastId: string;
+    text: string;
+    archetype: Archetype;
+    character: OnAirCharacter | undefined;
+    planCode: string | null;
+    audioFile: string;
+    now: Date;
+    expiresAt: Date;
+  }
+) {
+  const { job, character } = input;
+  const overlayId = randomUUID();
+  const payload: StoredOverlayRoast = {
+    version: 1,
+    type: "roast.play",
+    eventId: overlayId,
+    roastId: input.roastId,
+    viewerLogin: job.viewerLogin,
+    text: input.text,
+    tone: ARCHETYPE_THEME[input.archetype],
+    ...(character ? { character: { name: character.name, imagePath: character.imagePath } } : {}),
+    ...(BRANDED_PLANS.has(input.planCode ?? "") ? { branding: true } : {}),
+    audioFile: input.audioFile,
+    expiresAt: input.expiresAt.toISOString(),
+    sentAt: input.now.toISOString()
+  };
+  await tx`insert into overlay_events(id,channel_id,roast_id,payload,expires_at)
+    values(${overlayId},${job.channelId},${input.roastId},${tx.json(payload)},${input.expiresAt.toISOString()})`;
+  await tx`select pg_notify('overlay_events',${job.channelId})`;
+}
+
+// Rejections that a direct call answers with a stub instead of silence.
+const STUB_REJECTIONS: Readonly<Record<string, string>> = {
+  cooldown_active: "stub_cooldown",
+  viewer_limit: "stub_viewer_limit"
+};
+
+/**
+ * A prerecorded answer instead of a roast: no quota, no model, no classifier (the phrases are
+ * ours). The audio is synthesized once per ElevenLabs voice and phrase and kept in stub_audio;
+ * without ElevenLabs the next voice speaks and nothing is kept. One stub waits in the overlay
+ * queue per viewer at most, so a spammer cannot fill it.
+ */
+async function playStub(
+  deps: PipelineDependencies,
+  input: {
+    job: RoastRequestedJob;
+    roastId: string;
+    context: ChannelContext;
+    character: OnAirCharacter | undefined;
+    archetype: Archetype;
+    reason: string;
+    started: number;
+  }
+): Promise<RoastOutcome> {
+  const { job, roastId, context, character, archetype, reason } = input;
+  const outcome: RoastOutcome = { roastId, status: "skipped", reason };
+  const [waiting] = await deps.sql`
+    select 1 from overlay_events e join roasts r on r.id=e.roast_id
+    where e.channel_id=${job.channelId} and e.status='pending' and left(r.error,5)='stub_'
+      and lower(r.viewer_login)=lower(${job.viewerLogin}) limit 1`;
+  if (waiting) {
+    await deps.sql`update roasts set status='skipped', error=${reason},
+      latency_ms=${Date.now() - input.started} where id=${roastId}`;
+    return outcome;
+  }
+
+  const phrases = STUB_PHRASES[archetype];
+  const text =
+    job.source === "reward"
+      ? REWARD_DECLINED_STUB
+      : phrases[Math.floor(Math.random() * phrases.length)]!;
+  const voiceId = elevenLabsVoiceFor(archetype, deps.config, character && character.voiceId);
+  const voiceKey = voiceId ? `elevenlabs:${voiceId}` : null;
+  const [cached] = voiceKey
+    ? await deps.sql<{ audio: Buffer }[]>`
+        select audio from stub_audio where voice_key=${voiceKey} and text=${text}`
+    : [];
+  let speech: Speech;
+  if (cached) speech = { audio: new Uint8Array(cached.audio), provider: "elevenlabs", costUsd: 0 };
+  else {
+    speech = await speak(
+      text,
+      archetype,
+      deps.config,
+      deps.fetch ?? globalThis.fetch,
+      await voiceReservations(deps),
+      character ? { voiceId: character.voiceId } : {}
+    );
+    if (voiceKey && speech.provider === "elevenlabs") {
+      await deps.sql`insert into stub_audio(voice_key,text,audio)
+        values(${voiceKey},${text},${Buffer.from(speech.audio)}) on conflict do nothing`;
+    }
+  }
+  const audioFile = await storeAudio(speech.audio, deps.config.AUDIO_DIR);
+  const now = deps.now?.() ?? new Date();
+  const expiresAt = new Date(now.getTime() + OVERLAY_EVENT_TTL_SECONDS * 1000);
+  const { provider, costUsd } = speech;
+  await deps.sql.begin(async (tx) => {
+    const spent = costUsd
+      ? await recordSpend(tx as unknown as Sql, job.channelId, now.toISOString().slice(0, 7), [
+          { model: `tts:${provider}`, tokensIn: 0, tokensOut: 0, fixedUsd: costUsd }
+        ])
+      : { cost: 0 };
+    await tx`update roasts set status='skipped', error=${reason}, output_text=${text},
+      voice_provider=${provider}, tts_chars=${Array.from(text).length}, cost_usd=${spent.cost},
+      latency_ms=${Date.now() - input.started} where id=${roastId}`;
+    await publishOverlay(tx as unknown as Sql, {
+      job,
+      roastId,
+      text,
+      archetype,
+      character,
+      planCode: context.planCode,
+      audioFile,
+      now,
+      expiresAt
+    });
+  });
+  return outcome;
+}
+
 export async function processRoast(
   rawJob: unknown,
   deps: PipelineDependencies
@@ -421,14 +625,6 @@ export async function processRoast(
     const eventMatch = job.eventSummary ? findStopListMatch(job.eventSummary, stopWords) : null;
     if (eventMatch) return await settle("blocked_input", `event:${eventMatch.term}`);
 
-    const reservation = await reserve(deps, job, context.monthlyLimit!, context);
-    if ("rejected" in reservation) return await settle("skipped", reservation.rejected);
-    const { tier, quota } = reservation;
-
-    const globalModel = await globalValue(deps.sql, "model", DEFAULT_ANTHROPIC_MODEL);
-    const model = tier === "premium" ? globalModel : context.economyModel;
-    // The classifier is the safety net: it stays the same on every tier.
-    const classifierModel = await globalValue(deps.sql, "classifier_model", globalModel);
     // A premium character only on a plan that includes her; after a downgrade the built-in one
     // speaks again, and the choice waits in settings for an upgrade.
     const character =
@@ -446,6 +642,32 @@ export async function processRoast(
           }
         : undefined;
     const archetype: Archetype = character?.archetype ?? context.tone;
+    const stub = (reason: string) =>
+      playStub(deps, { job, roastId: roastId!, context, character, archetype, reason, started });
+    // A reward the frequency passed over: a short "no", no quota, no model.
+    if (job.declined) return await stub("stub_declined");
+
+    const reservation = await reserve(deps, job, context.monthlyLimit!, context);
+    if ("rejected" in reservation) {
+      // Someone called the bot directly during a pause or past their limit: a stub, so nobody
+      // thinks the bot is down. Everything else (quota, budget) stays silent.
+      const stubReason = STUB_REJECTIONS[reservation.rejected];
+      if (stubReason && STUB_SOURCES.has(job.source)) return await stub(stubReason);
+      return await settle("skipped", reservation.rejected);
+    }
+    const { tier, quota } = reservation;
+
+    const globalModel = await globalValue(deps.sql, "model", DEFAULT_ANTHROPIC_MODEL);
+    // Chat words are background chatter nobody paid for: the cheap chat model answers them on the
+    // premium tier too. Paid events, the command and rewards get the global model.
+    const model =
+      tier !== "premium"
+        ? context.economyModel
+        : job.source === "chat_keyword"
+          ? await globalValue(deps.sql, "chat_model", DEFAULT_CHAT_MODEL)
+          : globalModel;
+    // The classifier is the safety net: it stays the same on every tier.
+    const classifierModel = await globalValue(deps.sql, "classifier_model", globalModel);
     await deps.sql`update roasts set tier=${tier}, model=${model}, tone=${archetype},
       character_id=${character?.id ?? null} where id=${roastId}`;
     // Instructions go in `system`, the viewer's data alone in the user turn. Thinking and effort
@@ -475,14 +697,10 @@ export async function processRoast(
       ...(history ? { history } : {})
     });
     const generated = await deps.anthropic.beta.messages.create(
-      modelRequest(model, "generate", prompt.system, prompt.user)
+      modelRequest(model, "generate", prompt.systemBlocks, prompt.user)
     );
     // After a refusal fallback the reply comes from another model: bill at its rate.
-    spends.push({
-      model: generated.model || model,
-      tokensIn: generated.usage.input_tokens,
-      tokensOut: generated.usage.output_tokens
-    });
+    spends.push(spendOf(generated.model || model, generated.usage));
     let output = enforceOutputLimit(textFrom(generated));
     let blockReason: string | undefined;
     if (generated.stop_reason === "refusal") blockReason = "model_refusal";
@@ -499,11 +717,7 @@ export async function processRoast(
             classifierInput(output)
           )
         );
-        spends.push({
-          model: classified.model || classifierModel,
-          tokensIn: classified.usage.input_tokens,
-          tokensOut: classified.usage.output_tokens
-        });
+        spends.push(spendOf(classified.model || classifierModel, classified.usage));
         if (
           classified.stop_reason === "refusal" ||
           parseClassifierVerdict(textFrom(classified)) === "block"
@@ -514,27 +728,13 @@ export async function processRoast(
     }
     if (blockReason) output = BLOCKED_OUTPUT_FALLBACK;
 
-    const yandexLimitRub = await globalValue<number>(
-      deps.sql,
-      "yandex_tts_monthly_limit_rub",
-      DEFAULT_YANDEX_TTS_MONTHLY_LIMIT_RUB
-    );
-    const elevenLabsLimit = await globalValue<number>(
-      deps.sql,
-      "elevenlabs_monthly_char_limit",
-      DEFAULT_ELEVENLABS_MONTHLY_CHAR_LIMIT
-    );
     const spoken = spokenText(output);
     const speech = await speak(
       spoken,
       archetype,
       deps.config,
       deps.fetch ?? globalThis.fetch,
-      {
-        yandex: (requests) => reserveYandexRequests(deps.sql, clock(), requests, yandexLimitRub),
-        elevenlabs: (characters) =>
-          reserveElevenLabsCharacters(deps.sql, clock(), characters, elevenLabsLimit)
-      },
+      await voiceReservations(deps),
       {
         best: tier === "premium" ? "elevenlabs" : context.economyVoice,
         // A premium character speaks in her own voice; without one, the archetype's voice.
@@ -566,26 +766,17 @@ export async function processRoast(
         tts_chars=${ttsChars}, cost_usd=${spent.cost},latency_ms=${Date.now() - started},
         voice_provider=${speech.provider}
         where id=${currentRoastId}`;
-      const overlayId = randomUUID();
-      const payload: StoredOverlayRoast = {
-        version: 1,
-        type: "roast.play",
-        eventId: overlayId,
+      await publishOverlay(tx as unknown as Sql, {
+        job,
         roastId: currentRoastId,
-        viewerLogin: job.viewerLogin,
         text: output,
-        tone: ARCHETYPE_THEME[archetype],
-        ...(character
-          ? { character: { name: character.name, imagePath: character.imagePath } }
-          : {}),
-        ...(BRANDED_PLANS.has(context.planCode ?? "") ? { branding: true } : {}),
+        archetype,
+        character,
+        planCode: context.planCode,
         audioFile,
-        expiresAt: expiresAt.toISOString(),
-        sentAt: now.toISOString()
-      };
-      await tx`insert into overlay_events(id,channel_id,roast_id,payload,expires_at)
-        values(${overlayId},${job.channelId},${currentRoastId},${deps.sql.json(payload)},${expiresAt.toISOString()})`;
-      await tx`select pg_notify('overlay_events',${job.channelId})`;
+        now,
+        expiresAt
+      });
     });
     const notice =
       quota &&

@@ -9,8 +9,21 @@ export const BRANDED_PLANS: ReadonlySet<string> = new Set(["free"]);
 // Dashboard tests and the event simulator have their own daily allowance per channel (UTC day)
 // and never spend the monthly quota: a streamer must be able to try the bot before going live.
 export const DASHBOARD_TEST_DAILY_LIMIT = 5;
-export const DEFAULT_CHANNEL_COOLDOWN_SECONDS = 30;
-export const DEFAULT_USER_COOLDOWN_SECONDS = 60;
+export const DEFAULT_CHANNEL_COOLDOWN_SECONDS = 60;
+export const DEFAULT_USER_COOLDOWN_SECONDS = 120;
+// Chat, rewards and follows cost money on every answer: a channel cannot set its pauses below
+// these, whatever is stored (streamers set 0 and burned a month of quota in an hour).
+export const PREMIUM_MIN_COOLDOWN_SECONDS = 40;
+export const MIN_COOLDOWN_SECONDS = 60;
+export const minCooldownSeconds = (planCode: string | null | undefined) =>
+  planCode === "premium" ? PREMIUM_MIN_COOLDOWN_SECONDS : MIN_COOLDOWN_SECONDS;
+/** The pause that applies: the stored one, never below the plan's minimum. */
+export const effectiveCooldown = (seconds: number, planCode: string | null | undefined) =>
+  Math.max(seconds, minCooldownSeconds(planCode));
+// One viewer gets at most this many real answers to chat and rewards per window; past it they
+// get stubs. Paid events never count and are never limited.
+export const VIEWER_ROAST_LIMIT = 3;
+export const VIEWER_ROAST_WINDOW_MINUTES = 30;
 export const DEFAULT_GLOBAL_MONTHLY_ROAST_CAP = 4_000;
 export const MAX_ROAST_CHARACTERS = 200;
 export const OVERLAY_EVENT_TTL_SECONDS = 120;
@@ -34,9 +47,11 @@ export const yandexBillingMonth = (date: Date) =>
   new Intl.DateTimeFormat("sv-SE", { timeZone: "Europe/Moscow", year: "numeric", month: "2-digit" })
     .format(date)
     .slice(0, 7);
-// Opus writes the roast (it has to understand what the viewer meant); Sonnet checks the reply.
-export const DEFAULT_ANTHROPIC_MODEL = "claude-opus-5-5";
+// Sonnet writes the roast (it has to understand what the viewer meant) and checks the reply. Chat
+// keywords are background chatter nobody paid for: Haiku answers them (global "chat_model").
+export const DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-5-5";
 export const DEFAULT_CLASSIFIER_MODEL = "claude-sonnet-5-5";
+export const DEFAULT_CHAT_MODEL = "claude-haiku-5-5";
 // Plans with a premium allowance (free) write the rest of the month's roasts with this model and
 // a simpler voice; the owner changes both per plan in /admin. The classifier never changes.
 export const DEFAULT_ECONOMY_MODEL = "claude-haiku-5-5";
@@ -100,6 +115,38 @@ export const ARCHETYPE_THEME = Object.freeze({
   dandere: "yandere",
   himedere: "tsundere"
 } as const);
+// Prerecorded answers to a viewer who called during a pause or past their limit: no model, no
+// check, the audio is synthesized once per voice and kept in stub_audio.
+export const STUB_PHRASES: Readonly<Record<z.infer<typeof archetypeSchema>, readonly string[]>> =
+  Object.freeze({
+    tsundere: [
+      "Опять ты? Встань в очередь, я тут не только для тебя!",
+      "Б-бака! Я не обязана отвечать тебе каждую минуту!",
+      "Подожди, я ещё от прошлого раза не остыла."
+    ],
+    yandere: [
+      "Терпение, милый… я никуда от тебя не денусь.",
+      "Ты был у меня совсем недавно. Я всё помню.",
+      "Подожди чуть-чуть. Ожидание делает нашу встречу слаще."
+    ],
+    kuudere: [
+      "Очередь. Жди.",
+      "Ты уже спрашивал. Ответ тот же: позже.",
+      "Слишком часто. Неинтересно."
+    ],
+    dandere: [
+      "П-подожди немного… я ещё не готова…",
+      "Эм… можно чуть позже? Мне неловко так часто…",
+      "Ой… опять ты… дай мне минутку, пожалуйста."
+    ],
+    himedere: [
+      "Принцесса не принимает так часто. Жди аудиенции.",
+      "Ты уже удостоился моего внимания. Знай меру.",
+      "В очередь, простолюдин. Я занята."
+    ]
+  });
+// A reward the frequency or a pause turned down.
+export const REWARD_DECLINED_STUB = "Мммммм, нет!";
 export const CUSTOM_CHARACTER_PLANS: ReadonlySet<string> = new Set(["premium"]);
 // Pictures live in the database on a small server: a few own characters per channel, small files.
 export const MAX_OWN_CHARACTERS = 3;
@@ -161,6 +208,18 @@ export const COOLDOWN_SOURCES: ReadonlySet<RoastSource> = new Set<RoastSource>([
   "chat_keyword",
   "reward",
   "follow"
+]);
+// Sources counted against VIEWER_ROAST_LIMIT.
+export const VIEWER_LIMITED_SOURCES: ReadonlySet<RoastSource> = new Set<RoastSource>([
+  "chat_command",
+  "chat_keyword",
+  "reward"
+]);
+// A viewer who called the bot directly and hit a pause or their limit hears a short prerecorded
+// stub instead of silence, so nobody thinks the bot is down. Keywords stay silent: nobody called.
+export const STUB_SOURCES: ReadonlySet<RoastSource> = new Set<RoastSource>([
+  "chat_command",
+  "reward"
 ]);
 /** Who the roast is aimed at: the viewer behind the trigger or the streamer. */
 /** The two characters by name; the tone is their temperament. */
@@ -279,13 +338,62 @@ export const DONATIONALERTS_SCOPES = Object.freeze([
 export const targetModeSchema = z.enum(["author", "streamer", "auto"]);
 
 // Fields of older settings rows; the target switch replaced all three.
-const LEGACY_TRIGGER_KEYS = ["rewardMode", "streamerLoyaltyPercent", "streamerTargetPercent"];
+const LEGACY_TRIGGER_KEYS = [
+  "rewardMode",
+  "streamerLoyaltyPercent",
+  "streamerTargetPercent",
+  // A percentage chance; chatFrequency replaced it.
+  "keywordChancePercent"
+];
 function dropLegacyTriggers(value: unknown): unknown {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return value;
   const row = { ...(value as Record<string, unknown>) };
   for (const key of LEGACY_TRIGGER_KEYS) delete row[key];
   return row;
 }
+
+// How often the character answers chat words and rewards. Chat: every Nth message with a trigger
+// word; rewards: every Nth redemption, the others hear REWARD_DECLINED_STUB.
+export const chatFrequencySchema = z.enum(["rare", "normal", "often"]);
+export type ChatFrequency = z.infer<typeof chatFrequencySchema>;
+export const KEYWORD_EVERY: Readonly<Record<ChatFrequency, number>> = {
+  rare: 12,
+  normal: 9,
+  often: 6
+};
+export const REWARD_EVERY: Readonly<Record<ChatFrequency, number>> = {
+  rare: 3,
+  normal: 2,
+  often: 1
+};
+
+export const DEFAULT_COMMAND = "!роаст";
+// Commands of popular chat bots: a roast command must not answer them too.
+export const RESERVED_COMMANDS: ReadonlySet<string> = new Set([
+  "!song",
+  "!sr",
+  "!uptime",
+  "!followage",
+  "!commands",
+  "!discord",
+  "!points",
+  "!top",
+  "!help",
+  "!роаст-стоп",
+  "!роаст-старт",
+  "!roast-stop",
+  "!roast-start"
+]);
+export const commandSchema = z
+  .string()
+  .trim()
+  .transform((command) => command.toLocaleLowerCase("ru-RU"))
+  .pipe(
+    z
+      .string()
+      .regex(/^![\p{L}\p{N}_-]{2,20}$/u)
+      .refine((command) => !RESERVED_COMMANDS.has(command), "reserved_command")
+  );
 
 export const MAX_IGNORED_USERS = 100;
 // Twitch logins are 1–25 letters, digits and "_"; "@nick" and any case are accepted and stored
@@ -299,10 +407,11 @@ const twitchLoginSchema = z
 const triggerSettingsObject = z
   .object({
     command: z.boolean().default(true),
+    commandName: commandSchema.default(DEFAULT_COMMAND),
     rewardId: z.string().min(1).nullable().default(null),
     // Chat messages containing one of these words (word start, any case) may trigger a roast.
     keywords: z.array(z.string().trim().min(1).max(40)).max(50).default([]),
-    keywordChancePercent: percentSchema.default(25),
+    chatFrequency: chatFrequencySchema.default("normal"),
     // Premium character: a chat message with her name triggers a roast like a keyword.
     nameMention: z.boolean().default(false),
     // The streamer's own chat bots and spammers: their messages never trigger a roast.
@@ -346,6 +455,8 @@ export const roastRequestedJobSchema = z
     eventSummary: z.string().max(500).optional(),
     // The channel's current Twitch category, for context; never "Just Chatting" (see JUST_CHATTING).
     game: z.string().min(1).max(100).optional(),
+    // A reward the frequency passed over: the character answers with REWARD_DECLINED_STUB.
+    declined: z.literal(true).optional(),
     requestedAt: z.string().datetime()
   })
   .strict();

@@ -42,7 +42,7 @@ services:
     restart: "no"
     environment:
       DATABASE_URL: ${DATABASE_URL}
-      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-opus-5-5}
+      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-sonnet-5-5}
       CLASSIFIER_MODEL: ${CLASSIFIER_MODEL:-claude-sonnet-5-5}
     command:
       - /bin/sh

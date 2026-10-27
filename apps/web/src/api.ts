@@ -152,11 +152,19 @@ export interface EventTriggers {
   adBreak: { enabled: boolean };
   donation: { enabled: boolean; minAmount: number; delaySec: number };
 }
+export type ChatFrequency = "rare" | "normal" | "often";
+// Mirrors KEYWORD_EVERY and REWARD_EVERY in packages/shared.
+export const KEYWORD_EVERY: Record<ChatFrequency, number> = { rare: 12, normal: 9, often: 6 };
+export const REWARD_EVERY: Record<ChatFrequency, number> = { rare: 3, normal: 2, often: 1 };
+export const DEFAULT_COMMAND = "!роаст";
 export interface Triggers {
   command: boolean;
+  /** The chat command, "!роаст" unless the streamer picked their own. */
+  commandName: string;
   rewardId: string | null;
   keywords: string[];
-  keywordChancePercent: number;
+  /** Chat words: every 12th, 9th or 6th; rewards: every 3rd, 2nd or each one. */
+  chatFrequency: ChatFrequency;
   /** Premium character: her name in chat works like a keyword. */
   nameMention: boolean;
   /** Chat bots and spammers whose messages never trigger a roast; lowercase logins. */
@@ -170,9 +178,10 @@ export interface Triggers {
 // for rows saved before the fields existed.
 export const DEFAULT_TRIGGERS: Triggers = {
   command: true,
+  commandName: DEFAULT_COMMAND,
   rewardId: null,
   keywords: [],
-  keywordChancePercent: 25,
+  chatFrequency: "normal",
   nameMention: false,
   ignoredUsers: [],
   targetMode: "auto",
@@ -235,6 +244,8 @@ export interface Status {
   plan: string | null;
   /** `!роаст` is a paid feature. */
   commandAvailable: boolean;
+  /** The shortest pause the plan allows, in seconds. */
+  minCooldownSec: number;
   /** Free plan: the overlay shows the service address under the card. */
   branding: boolean;
   /** Roasts left this month on the best model and voice; null when all of them are. */
@@ -409,10 +420,9 @@ export function roastsPerMinute(
 ): number {
   const chance = (percent: number) => Math.max(0, Math.min(100, percent)) / 100;
   let throttled =
-    Math.min(triggers.keywords.length, RATES.maxKeywords) *
-    RATES.keywordPerWord *
-    chance(triggers.keywordChancePercent);
-  if (triggers.rewardId) throttled += RATES.reward;
+    (Math.min(triggers.keywords.length, RATES.maxKeywords) * RATES.keywordPerWord) /
+    KEYWORD_EVERY[triggers.chatFrequency];
+  if (triggers.rewardId) throttled += RATES.reward / REWARD_EVERY[triggers.chatFrequency];
   if (commandAvailable && triggers.command) throttled += RATES.command;
   const events = triggers.events;
   if (events.follow.enabled) throttled += RATES.follow * chance(events.follow.chancePercent);
@@ -474,7 +484,11 @@ export function activityOutcome(roast: ActivityRoast): { ok: boolean; text: stri
     case "failed":
       return { ok: false, text: "ошибка генерации, попробуйте ещё раз" };
     case "skipped":
-      return { ok: false, text: SKIP_REASON_TEXT[reason] ?? `пропущено: ${reason}` };
+      // A stub is an answer too: the viewer heard the bot.
+      return {
+        ok: reason.startsWith("stub_"),
+        text: SKIP_REASON_TEXT[reason] ?? `пропущено: ${reason}`
+      };
   }
 }
 
@@ -536,7 +550,11 @@ export const SKIP_REASON_TEXT: Record<string, string> = {
   global_budget_exceeded: "исчерпан месячный бюджет сервиса",
   channel_quota_exceeded: "квота канала закончилась",
   cooldown_active: "действует пауза из «Тонкой настройки»",
-  command_not_in_plan: "!роаст недоступен на бесплатном тарифе",
+  viewer_limit: "зритель уже получил 3 ответа за полчаса",
+  stub_cooldown: "пауза — прозвучала заглушка",
+  stub_viewer_limit: "зритель частит — прозвучала заглушка",
+  stub_declined: "награда без роаста по частоте — «Мммммм, нет!»",
+  command_not_in_plan: "команда недоступна на бесплатном тарифе",
   test_limit_reached: "тесты на сегодня закончились",
   stale_job: "задача устарела"
 };

@@ -1,16 +1,27 @@
 import { createDecipheriv, createCipheriv, randomBytes } from "node:crypto";
 
 import type { createDatabase } from "@roastbot/db";
-import { ROAST_REQUESTED_QUEUE, type RoastSource, type RoastTarget } from "@roastbot/shared";
+import {
+  DEFAULT_COMMAND,
+  ROAST_REQUESTED_QUEUE,
+  type RoastSource,
+  type RoastTarget
+} from "@roastbot/shared";
 import type { PgBoss } from "pg-boss";
 import type { JSONValue } from "postgres";
 
 type Sql = ReturnType<typeof createDatabase>["client"];
 
-export function parseRoastCommand(message: string, fallbackLogin: string): string | null {
-  const match = /^!роаст(?:\s+(.+))?$/iu.exec(message.trim());
-  if (!match) return null;
-  return match[1]?.trim() || fallbackLogin;
+/** "!роаст текст" → "текст", a bare command → the viewer; `command` is the channel's own one. */
+export function parseRoastCommand(
+  message: string,
+  fallbackLogin: string,
+  command = DEFAULT_COMMAND
+): string | null {
+  const text = message.trim();
+  const [word = ""] = text.split(/\s/u, 1);
+  if (word.toLocaleLowerCase("ru-RU") !== command.toLocaleLowerCase("ru-RU")) return null;
+  return text.slice(word.length).trim() || fallbackLogin;
 }
 
 /**
@@ -45,6 +56,8 @@ export async function enqueueEvent(
     game?: string;
     /** Hold the job this long, e.g. until a donation alert has been read out. */
     delaySeconds?: number;
+    /** A reward the frequency passed over: the worker answers with a stub. */
+    declined?: boolean;
     raw: JSONValue;
   }
 ): Promise<boolean> {
@@ -66,6 +79,7 @@ export async function enqueueEvent(
       target: input.target,
       ...(input.eventSummary ? { eventSummary: input.eventSummary.slice(0, 500) } : {}),
       ...(input.game ? { game: input.game.slice(0, 100) } : {}),
+      ...(input.declined ? { declined: true } : {}),
       requestedAt: new Date().toISOString()
     },
     input.delaySeconds ? { startAfter: input.delaySeconds } : {}

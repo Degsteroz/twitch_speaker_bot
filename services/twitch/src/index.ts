@@ -3,10 +3,11 @@ import { randomUUID } from "node:crypto";
 import { createDatabase } from "@roastbot/db";
 import {
   COMMAND_PLANS,
-  COOLDOWN_SOURCES,
   CUSTOM_CHARACTER_PLANS,
   donationDelaySeconds,
   gameContext,
+  KEYWORD_EVERY,
+  REWARD_EVERY,
   ROAST_REQUESTED_QUEUE,
   ROAST_REQUESTED_QUEUE_OPTIONS,
   TELEGRAM_NOTIFY_QUEUE,
@@ -28,6 +29,7 @@ import {
 } from "./core.js";
 import { DonationAlertsConnection, type DonationAlertsAccount } from "./donationalerts.js";
 import {
+  EveryNth,
   chatTrigger,
   donationRoast,
   eventRoast,
@@ -137,6 +139,10 @@ async function shutdown() {
 process.once("SIGINT", () => void shutdown().finally(() => process.exit(0)));
 process.once("SIGTERM", () => void shutdown().finally(() => process.exit(0)));
 const channelByLogin = new Map<string, Channel>();
+// How often chat words and rewards are answered, per channel (KEYWORD_EVERY, REWARD_EVERY).
+// In memory: a restart only makes the next hit due a little early.
+const keywordGate = new EveryNth();
+const rewardGate = new EveryNth();
 chat.on("message", (channelName, tags, message, self) => {
   if (self) return;
   const channel = channelByLogin.get(channelName.replace(/^#/u, "").toLowerCase());
@@ -170,10 +176,15 @@ chat.on("message", (channelName, tags, message, self) => {
   );
   if (!roast) return;
   void (async () => {
-    // Cheap pre-check: chat spam during a cooldown never reaches the queue.
-    if (COOLDOWN_SOURCES.has(roast.source) && (await isOnCooldown(sql, channel.id, viewerLogin))) {
-      return;
+    if (roast.source === "chat_keyword") {
+      // Only every Nth message with a trigger word is answered; one that lands on a pause stays
+      // due, so the next word gets the answer. Nobody called the bot: no stub during a pause.
+      if (!keywordGate.due(channel.id, KEYWORD_EVERY[channel.triggers.chatFrequency])) return;
+      if (await isOnCooldown(sql, channel.id, viewerLogin)) return;
+      keywordGate.reset(channel.id);
     }
+    // The command always reaches the worker: during a pause or past the viewer's limit it answers
+    // with a stub, so the viewer knows the bot heard them.
     await enqueueEvent(sql, boss, {
       channelId: channel.id,
       source: roast.source,
@@ -394,6 +405,15 @@ class EventSubConnection {
       this.channel.twitchLogin
     );
     if (!roast) return;
+    // Every Nth reward gets a roast, the others a short "no" (REWARD_DECLINED_STUB).
+    let declined = false;
+    if (roast.source === "reward") {
+      declined = !rewardGate.due(
+        this.channel.id,
+        REWARD_EVERY[this.channel.triggers.chatFrequency]
+      );
+      if (!declined) rewardGate.reset(this.channel.id);
+    }
     await enqueueEvent(sql, boss, {
       channelId: this.channel.id,
       source: roast.source,
@@ -403,6 +423,7 @@ class EventSubConnection {
       inputText: roast.inputText,
       target: roast.target,
       ...(roast.eventSummary ? { eventSummary: roast.eventSummary } : {}),
+      ...(declined ? { declined } : {}),
       ...(await withGame(this.channel)),
       raw: JSON.parse(raw) as JSONValue
     });

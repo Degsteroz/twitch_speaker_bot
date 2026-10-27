@@ -676,6 +676,18 @@ export const characters = pgTable(
   ]
 );
 
+// Stubs synthesized once per ElevenLabs voice ("elevenlabs:<voice id>") and phrase.
+export const stubAudio = pgTable(
+  "stub_audio",
+  {
+    voiceKey: text("voice_key").notNull(),
+    text: text("text").notNull(),
+    audio: bytea("audio").notNull(),
+    createdAt: createdAt()
+  },
+  (table) => [primaryKey({ name: "stub_audio_pk", columns: [table.voiceKey, table.text] })]
+);
+
 export const globalSettings = pgTable("global_settings", {
   key: text("key").primaryKey(),
   value: jsonb("value").$type<unknown>().notNull(),

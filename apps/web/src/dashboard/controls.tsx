@@ -1,5 +1,5 @@
 // Choice cards and named scales used by the panel settings.
-import { CHARACTER_NAMES, type Settings, type Triggers } from "../api.js";
+import { CHARACTER_NAMES, type ChatFrequency, type Settings, type Triggers } from "../api.js";
 
 export interface ScaleStep<T extends string | number = number> {
   value: T;
@@ -21,12 +21,22 @@ export const TOXICITY_STEPS: ScaleStep[] = [
     note: "Максимум язвительности и лёгкая грубость. Мат, оскорбления и угрозы запрещены всегда."
   }
 ];
-export const KEYWORD_CHANCE_STEPS: ScaleStep[] = [
-  { value: 10, label: "Изредка", note: "Примерно на одно сообщение из десяти." },
-  { value: 25, label: "Редко", note: "Примерно на одно сообщение из четырёх." },
-  { value: 50, label: "Через раз", note: "Примерно на каждое второе сообщение." },
-  { value: 75, label: "Часто", note: "Почти на каждое сообщение со словом." },
-  { value: 100, label: "Всегда", note: "На каждое сообщение со словом, если нет паузы." }
+export const CHAT_FREQUENCY_STEPS: ScaleStep<ChatFrequency>[] = [
+  {
+    value: "rare",
+    label: "Изредка",
+    note: "Каждое 12-е сообщение со словом-триггером, каждая 3-я награда."
+  },
+  {
+    value: "normal",
+    label: "Нормально",
+    note: "Каждое 9-е сообщение со словом-триггером, каждая 2-я награда."
+  },
+  {
+    value: "often",
+    label: "Часто",
+    note: "Каждое 6-е сообщение со словом-триггером, каждая награда."
+  }
 ];
 export function targetSteps(tone: Settings["tone"]): ScaleStep<Triggers["targetMode"]>[] {
   const name = CHARACTER_NAMES[tone];

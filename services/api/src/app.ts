@@ -26,6 +26,8 @@ import {
   TWITCH_SCOPES,
   channelSettingsSchema,
   economyVoiceSchema,
+  effectiveCooldown,
+  minCooldownSeconds,
   overlayClientEventSchema,
   roastStatusSchema,
   storedOverlayRoastSchema,
@@ -92,6 +94,8 @@ const globalSettingSchemas = {
   monthly_budget_usd: z.number().min(0).max(10_000),
   model: modelSchema,
   classifier_model: modelSchema,
+  // Chat words on the premium tier; paid events, the command and rewards get `model`.
+  chat_model: modelSchema,
   input_retention_days: z.number().int().min(1).max(30),
   yandex_tts_monthly_limit_rub: z.number().min(0).max(100_000),
   elevenlabs_monthly_char_limit: z.number().int().min(0).max(10_000_000),
@@ -656,9 +660,33 @@ export async function buildApp(config: ApiConfig) {
     return { overlayToken };
   });
 
+  // The plan's minimum pause applies whatever is stored; the panel sees and saves the real one.
+  const planCode = async (channelId: string) => {
+    const [row] = await sql<{ code: string | null }[]>`
+      select p.code from channels c left join lateral (
+        select plan_id from subscriptions sub where sub.user_id=c.user_id
+        and (sub.valid_until is null or sub.valid_until>now()) order by sub.created_at desc limit 1
+      ) sub on true left join plans p on p.id=sub.plan_id where c.id=${channelId}`;
+    return row?.code ?? null;
+  };
+  const withPlanPauses = async <T extends { cooldown_sec: number; user_cooldown_sec: number }>(
+    row: T | undefined,
+    channelId: string
+  ) => {
+    if (!row) return row;
+    const plan = await planCode(channelId);
+    return {
+      ...row,
+      cooldown_sec: effectiveCooldown(row.cooldown_sec, plan),
+      user_cooldown_sec: effectiveCooldown(row.user_cooldown_sec, plan)
+    };
+  };
+
   app.get("/settings", { preHandler: requireUser }, async (request) => {
-    const [row] = await sql`select * from settings where channel_id=${session(request).channelId}`;
-    return row;
+    const { channelId } = session(request);
+    const [row] = await sql<{ cooldown_sec: number; user_cooldown_sec: number }[]>`
+      select * from settings where channel_id=${channelId}`;
+    return withPlanPauses(row, channelId);
   });
   app.patch("/settings", { preHandler: requireUser }, async (request) => {
     const patch = updateSettingsRequestSchema.parse(request.body);
@@ -667,9 +695,11 @@ export async function buildApp(config: ApiConfig) {
        'userCooldownSec',user_cooldown_sec,'triggers',triggers,'stopWords',stop_words,'enabled',enabled) settings
       from settings where channel_id=${session(request).channelId}`;
     const merged = channelSettingsSchema.parse({ ...(current?.settings as object), ...patch });
-    const [updated] = await sql`
+    const plan = await planCode(session(request).channelId);
+    const [updated] = await sql<{ cooldown_sec: number; user_cooldown_sec: number }[]>`
       update settings set tone=${merged.tone}, voice=${merged.voice}, toxicity=${merged.toxicity},
-       cooldown_sec=${merged.cooldownSec}, user_cooldown_sec=${merged.userCooldownSec},
+       cooldown_sec=${effectiveCooldown(merged.cooldownSec, plan)},
+       user_cooldown_sec=${effectiveCooldown(merged.userCooldownSec, plan)},
        triggers=${sql.json(merged.triggers)}, stop_words=${merged.stopWords}, enabled=${merged.enabled},
        updated_at=now() where channel_id=${session(request).channelId} returning *`;
     return updated;
@@ -913,6 +943,8 @@ export async function buildApp(config: ApiConfig) {
         : null,
       // `!роаст` is a paid feature; the panel shows the switch disabled on the free plan.
       commandAvailable: COMMAND_PLANS.has(row.plan ?? ""),
+      // The shortest pause the plan allows; the panel's fields start there.
+      minCooldownSec: minCooldownSeconds(row.plan),
       branding: BRANDED_PLANS.has(row.plan ?? ""),
       // Best model and voice left this month; null when every roast gets them.
       premium:

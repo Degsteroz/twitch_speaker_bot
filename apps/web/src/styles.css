@@ -1268,6 +1268,9 @@ td small {
   color: var(--muted);
   line-height: 1.5;
 }
+.hint.below.danger {
+  color: #ff929d;
+}
 .reauth {
   display: flex;
   flex-wrap: wrap;

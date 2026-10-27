@@ -1,5 +1,6 @@
 import {
   DEFAULT_ANTHROPIC_MODEL,
+  DEFAULT_CHAT_MODEL,
   DEFAULT_CLASSIFIER_MODEL,
   DEFAULT_ELEVENLABS_MONTHLY_CHAR_LIMIT,
   DEFAULT_CHANNEL_MONTHLY_ROASTS,
@@ -65,6 +66,7 @@ export async function seedDatabase(
         key: "classifier_model",
         value: process.env["CLASSIFIER_MODEL"] || DEFAULT_CLASSIFIER_MODEL
       },
+      { key: "chat_model", value: DEFAULT_CHAT_MODEL },
       { key: "global_stop_words", value: [] },
       { key: "input_retention_days", value: 30 },
       { key: "yandex_tts_monthly_limit_rub", value: DEFAULT_YANDEX_TTS_MONTHLY_LIMIT_RUB },

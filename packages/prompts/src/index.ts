@@ -225,6 +225,12 @@ const TARGET_INSTRUCTIONS = Object.freeze({
 export interface RoastPrompt {
   /** Instructions only: the safety block first, then the persona. */
   readonly system: string;
+  /**
+   * The same instructions split for prompt caching, most stable first: the rules every channel
+   * shares, then this channel's persona, then what changes per request (target, game, memory).
+   * Joined with blank lines they are `system`.
+   */
+  readonly systemBlocks: readonly [string, string, string];
   /** Untrusted data only, escaped and wrapped in tags. */
   readonly user: string;
 }
@@ -243,41 +249,57 @@ export function composeRoastPrompt(input: ComposePromptInput): RoastPrompt {
   const history = input.history?.exchanges.length ? input.history : undefined;
   const game = input.game?.trim() ? input.game : undefined;
 
-  const system = `${SAFETY_BLOCK}
-
-[ПЕРСОНАЖ]
-Ты — стрим-бот в образе ${character ? `героини, чьё имя в <name>; ${ARCHETYPE_DESCRIPTIONS[character.archetype]}` : builtInDescription(tone)}.
-Уровень токсичности: ${toxicity}/5. ${TOXICITY_RULES[toxicity]}
-Токсичность меняет только остроту стиля, никогда не ослабляет блок безопасности.
+  // Most stable first, so the cached prefix is as long as possible: the safety block and shared
+  // rules are the same on every channel, the persona on every roast of this channel.
+  const shared = `${SAFETY_BLOCK}
 
 ${MEANING_RULES}
-${TARGET_INSTRUCTIONS[target]}
 
-${NICKNAME_RULES}${game ? `\n\n${GAME_RULES}` : ""}${history ? `\n\n${MEMORY_RULES}` : ""}`;
+${NICKNAME_RULES}`;
+  const persona = `[ПЕРСОНАЖ]
+Ты — стрим-бот в образе ${character ? `героини, чьё имя в <name>; ${ARCHETYPE_DESCRIPTIONS[character.archetype]}` : builtInDescription(tone)}.
+Уровень токсичности: ${toxicity}/5. ${TOXICITY_RULES[toxicity]}
+Токсичность меняет только остроту стиля, никогда не ослабляет блок безопасности.`;
+  const perRequest = `${TARGET_INSTRUCTIONS[target]}${game ? `\n\n${GAME_RULES}` : ""}${history ? `\n\n${MEMORY_RULES}` : ""}`;
+  const systemBlocks = [shared, persona, perRequest] as const;
+  const system = systemBlocks.join("\n\n");
 
   const user = `${character ? `<name>${escapePromptData(character.name)}</name>\n` : ""}<viewer>${escapePromptData(input.viewer)}</viewer>${optional("streamer", input.streamer)}${optional("game", game)}${optional("history", history && historyText(history))}${optional("event", input.event)}
 <msg>${escapePromptData(message)}</msg>`;
 
-  return { system, user };
+  return { system, systemBlocks, user };
 }
 
 export interface TokenPricing {
   readonly inputUsdPerMillionTokens: number;
   readonly outputUsdPerMillionTokens: number;
+  /** Reading a cached prompt prefix; a tenth of the input price when absent. */
+  readonly cacheReadUsdPerMillionTokens?: number;
 }
+// Writing a prefix to the 5-minute cache costs a quarter more than plain input.
+const CACHE_WRITE_FACTOR = 1.25;
 
 // Named profile requested for v1. Keep pricing injectable because model IDs and rates may change.
 export const HAIKU_5_5_PRICING: TokenPricing = Object.freeze({
   inputUsdPerMillionTokens: 0.1,
-  outputUsdPerMillionTokens: 0.5
+  outputUsdPerMillionTokens: 0.5,
+  cacheReadUsdPerMillionTokens: 0.01
 });
 
 const KNOWN_PRICING: Readonly<Record<string, TokenPricing>> = Object.freeze({
   "claude-haiku-5-5": HAIKU_5_5_PRICING,
   "claude-haiku-4-5": { inputUsdPerMillionTokens: 1, outputUsdPerMillionTokens: 5 },
-  "claude-sonnet-5-5": { inputUsdPerMillionTokens: 2, outputUsdPerMillionTokens: 10 },
+  "claude-sonnet-5-5": {
+    inputUsdPerMillionTokens: 2,
+    outputUsdPerMillionTokens: 10,
+    cacheReadUsdPerMillionTokens: 0.2
+  },
   "claude-opus-5": { inputUsdPerMillionTokens: 5, outputUsdPerMillionTokens: 25 },
-  "claude-opus-5-5": { inputUsdPerMillionTokens: 4, outputUsdPerMillionTokens: 20 },
+  "claude-opus-5-5": {
+    inputUsdPerMillionTokens: 4,
+    outputUsdPerMillionTokens: 20,
+    cacheReadUsdPerMillionTokens: 0.2
+  },
   "claude-fable-5-1": { inputUsdPerMillionTokens: 10, outputUsdPerMillionTokens: 50 }
 });
 
@@ -313,4 +335,28 @@ export function calculateHaikuCostUsd(
       outputTokens * pricing.outputUsdPerMillionTokens) /
     1_000_000
   );
+}
+
+export interface TokenUsage {
+  /** Input outside the cache. */
+  readonly input: number;
+  readonly output: number;
+  /** Input written to the cache on this request. */
+  readonly cacheWrite?: number;
+  /** Input read from the cache. */
+  readonly cacheRead?: number;
+}
+
+/** A request's cost with prompt caching: cache writes cost a quarter more, reads far less. */
+export function calculateCostUsd(usage: TokenUsage, pricing: TokenPricing): number {
+  const cacheWrite = usage.cacheWrite ?? 0;
+  const cacheRead = usage.cacheRead ?? 0;
+  const readPrice = pricing.cacheReadUsdPerMillionTokens ?? pricing.inputUsdPerMillionTokens / 10;
+  // Validates every count and price the same way as the plain calculation.
+  const plain = calculateHaikuCostUsd(usage.input, usage.output, pricing);
+  const cached = calculateHaikuCostUsd(cacheWrite, cacheRead, {
+    inputUsdPerMillionTokens: pricing.inputUsdPerMillionTokens * CACHE_WRITE_FACTOR,
+    outputUsdPerMillionTokens: readPrice
+  });
+  return plain + cached;
 }

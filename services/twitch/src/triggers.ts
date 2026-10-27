@@ -44,6 +44,26 @@ export function optOutCommand(message: string): "stop" | "start" | null {
 /** `random` is in [0, 1): below the percentage means "yes". */
 export const rollPercent = (percent: number, random: number) => random * 100 < percent;
 
+/**
+ * "Every Nth" per channel for chat words and rewards (KEYWORD_EVERY, REWARD_EVERY): a hit is due
+ * when N hits have come since the last answer. The first hit of a channel is due at once, so the
+ * streamer sees the bot is alive. A due hit that could not be answered (a pause) stays due until
+ * reset() after an answer.
+ */
+export class EveryNth {
+  private readonly counts = new Map<string, number>();
+
+  due(key: string, every: number): boolean {
+    const count = (this.counts.get(key) ?? every - 1) + 1;
+    this.counts.set(key, count);
+    return count >= every;
+  }
+
+  reset(key: string): void {
+    this.counts.set(key, 0);
+  }
+}
+
 export interface ChatMessage {
   message: string;
   username: string;
@@ -58,33 +78,33 @@ export interface ChatRoast {
 }
 
 /**
- * Decides whether a chat message triggers a roast: `!роаст` when the channel enabled it and its
- * plan includes it, or a keyword (or the premium character's name, when `nameMention` is on) with
- * `keywordChancePercent`. Other commands, known bots and
- * the channel's `ignoredUsers` are ignored. Who is roasted is the channel's targetMode, applied by the worker; the streamer's own
- * message has no other author, so it always roasts the streamer.
+ * Decides whether a chat message calls for a roast: the channel's command (`!роаст` by default)
+ * when it is on and the plan includes it, or a keyword (or the premium character's name, when
+ * `nameMention` is on). How often a keyword is answered is the caller's EveryNth. Other commands,
+ * known bots and the channel's `ignoredUsers` are ignored. Who is roasted is the channel's
+ * targetMode, applied by the worker; the streamer's own message has no other author, so it
+ * always roasts the streamer.
  */
 export function chatTrigger(
   chat: ChatMessage,
   triggers: TriggerSettings,
-  options: { commandAllowed?: boolean; characterName?: string; random?: () => number } = {}
+  options: { commandAllowed?: boolean; characterName?: string } = {}
 ): ChatRoast | null {
-  const { commandAllowed = false, characterName, random = Math.random } = options;
+  const { commandAllowed = false, characterName } = options;
   const login = chat.username.toLowerCase();
   if (KNOWN_BOTS.has(login) || triggers.ignoredUsers.includes(login)) return null;
   const target: RoastTarget = chat.isBroadcaster ? "streamer" : "viewer";
   if (triggers.command && commandAllowed) {
-    const inputText = parseRoastCommand(chat.message, chat.displayName);
+    const inputText = parseRoastCommand(chat.message, chat.displayName, triggers.commandName);
     if (inputText !== null) return { source: "chat_command", inputText, target };
   }
   if (chat.message.trimStart().startsWith("!")) return null;
-  // A premium character's name works like one more keyword, with the same chance and pauses.
+  // A premium character's name works like one more keyword, with the same frequency and pauses.
   const words =
     triggers.nameMention && characterName
       ? [...triggers.keywords, characterName]
       : triggers.keywords;
   if (!words.length || !matchKeyword(chat.message, words)) return null;
-  if (!rollPercent(triggers.keywordChancePercent, random())) return null;
   return { source: "chat_keyword", inputText: chat.message, target };
 }
 
