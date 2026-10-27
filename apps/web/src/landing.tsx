@@ -1,7 +1,7 @@
 // The public landing page with the live demo of Ai.
 import { useEffect, useRef, useState, type SyntheticEvent } from "react";
 
-import { api, authUrl, CHARACTER_NAMES, post } from "./api.js";
+import { api, ARCHETYPE_TEXT, authUrl, CHARACTER_NAMES, post } from "./api.js";
 import tsundereArt from "./assets/tsundere.webp";
 import yandereArt from "./assets/yandere.webp";
 import { clipEmbedUrl, REVIEWS } from "./reviews.js";
@@ -15,8 +15,8 @@ export const AUTH_ERRORS: Record<string, string> = {
 
 export const LANDING_TRIGGERS: [string, string][] = [
   ["Награда за баллы", "читает текст зрителя и отвечает по смыслу"],
-  ["Слова-триггеры", "«слил», «гг», «лаг» — с шансом, который вы зададите"],
-  ["!роаст", "зритель сам зовёт её в чат — на тарифах Basic и Premium"],
+  ["Слова-триггеры", "«слил», «гг», «лаг» — изредка, нормально или часто, как вы решите"],
+  ["Своя команда", "!роаст или ваша, например !прожарь — на тарифах Basic и Premium"],
   ["Битсы", "от порога, по тексту cheer"],
   ["Подписки", "новые и ресабы, со стажем"],
   ["Подарочные сабы", "щедрому дарителю — отдельный привет"],
@@ -116,6 +116,16 @@ function Showcase() {
     </section>
   );
 }
+
+// What else she does, beyond the triggers.
+export const LANDING_FEATURES: [string, string][] = [
+  ["Помнит разговор", "вспоминает, что зритель писал раньше на этом стриме, и не повторяется"],
+  ["Ники вслух", "deg_oz прозвучит как «Дег Оз», а не «дег подчёркивание оз»"],
+  ["Ждёт алерт", "отвечает на донат после того, как DonationAlerts его прочитал"],
+  ["Не даёт себя заспамить", "кто зовёт слишком часто, слышит «Опять ты? Жди очереди»"],
+  ["Игнорирует ботов", "Nightbot, StreamElements и ваших ботов из списка"],
+  ["Зритель может отказаться", "!роаст-стоп в чате — и она оставит его в покое"]
+];
 
 export const DEMO_EXAMPLES = [
   "стример опять слил катку",
@@ -342,6 +352,24 @@ export function Landing() {
         </p>
       </section>
 
+      <section className="landing-section">
+        <p className="eyebrow">PREMIUM</p>
+        <h2>Или создайте свою героиню</h2>
+        <p className="section-lead">
+          Загрузите картинку, дайте имя, выберите характер и голос из списка. Она отвечает на своё
+          имя в чате, а в OBS появляется ваш персонаж. Понравившуюся героиню другого стримера можно
+          взять из магазина.
+        </p>
+        <ul className="trigger-grid">
+          {Object.values(ARCHETYPE_TEXT).map(({ title, desc }) => (
+            <li key={title}>
+              <strong>{title}</strong>
+              <span>{desc}</span>
+            </li>
+          ))}
+        </ul>
+      </section>
+
       <LandingDemo />
       <Showcase />
       <Reviews />
@@ -387,6 +415,19 @@ export function Landing() {
       </section>
 
       <section className="landing-section">
+        <p className="eyebrow">МЕЛОЧИ</p>
+        <h2>Что она ещё умеет</h2>
+        <ul className="trigger-grid">
+          {LANDING_FEATURES.map(([title, text]) => (
+            <li key={title}>
+              <strong>{title}</strong>
+              <span>{text}</span>
+            </li>
+          ))}
+        </ul>
+      </section>
+
+      <section className="landing-section">
         <p className="eyebrow">БЕЗ ПЕРЕГИБОВ</p>
         <h2>Колко, но безопасно для канала</h2>
         <div className="safety">
@@ -407,7 +448,9 @@ export function Landing() {
           </article>
           <article>
             <h3>Ваши правила</h3>
-            <p>Свои стоп-слова, паузы между роастами, острота и кнопка «выключить» в один клик.</p>
+            <p>
+              Свои стоп-слова, частота ответов, паузы, острота и кнопка «выключить» в один клик.
+            </p>
           </article>
         </div>
       </section>
@@ -430,7 +473,7 @@ export function Landing() {
           </li>
           <li>
             <b>4</b>
-            <p>Выберите героиню и кого жарить, включите триггеры — и в эфир.</p>
+            <p>Выберите или создайте героиню, решите, кого жарить, включите триггеры — и в эфир.</p>
           </li>
         </ol>
       </section>
