@@ -3,6 +3,9 @@ import { Link, Metric, State } from "../ui.js";
 import { Section, useAdmin } from "./common.js";
 import type { Overview } from "./types.js";
 
+const shortTime = (iso: string) =>
+  new Date(iso).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" });
+
 const share = (used: number, limit: number) => used / Math.max(limit, 0.000_001);
 
 export function AdminOverview() {
@@ -65,7 +68,15 @@ export function AdminOverview() {
           <Metric
             label="ElevenLabs"
             value={data.elevenLabsChars.toLocaleString("ru-RU")}
-            note={`символов из ${data.elevenLabsLimit.toLocaleString("ru-RU")}, дальше Яндекс`}
+            note={`символов из ${data.elevenLabsLimit.toLocaleString("ru-RU")}, дальше Яндекс. ${
+              data.elevenLabsSyncedAt
+                ? `Сверено с ElevenLabs в ${shortTime(data.elevenLabsSyncedAt)}${
+                    data.elevenLabsResetAt
+                      ? `, сброс ${new Date(data.elevenLabsResetAt).toLocaleDateString("ru-RU")}`
+                      : ""
+                  }`
+                : "С ElevenLabs не сверено: счёт приложения"
+            }`}
             used={share(data.elevenLabsChars, data.elevenLabsLimit)}
             warn={share(data.elevenLabsChars, data.elevenLabsLimit) > 0.8}
           />

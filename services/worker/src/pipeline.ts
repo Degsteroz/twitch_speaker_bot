@@ -30,7 +30,6 @@ import {
   DEFAULT_CHAT_MODEL,
   DEFAULT_GLOBAL_MONTHLY_ROAST_CAP,
   DEFAULT_MONTHLY_BUDGET_USD,
-  DEFAULT_ELEVENLABS_MONTHLY_CHAR_LIMIT,
   DEFAULT_YANDEX_TTS_MONTHLY_LIMIT_RUB,
   OVERLAY_EVENT_TTL_SECONDS,
   REWARD_DECLINED_STUB,
@@ -57,6 +56,7 @@ import {
 } from "@roastbot/shared";
 
 import type { WorkerConfig } from "./config.js";
+import { elevenLabsCharLimit, releaseElevenLabsCharacters } from "./elevenlabs.js";
 import { modelRequest } from "./models.js";
 import { notifyStreamer, quotaNotice } from "./telegram.js";
 import { elevenLabsVoiceFor, speak, type Speech, type VoiceReservations } from "./tts.js";
@@ -421,15 +421,12 @@ async function voiceReservations(deps: PipelineDependencies): Promise<VoiceReser
     "yandex_tts_monthly_limit_rub",
     DEFAULT_YANDEX_TTS_MONTHLY_LIMIT_RUB
   );
-  const elevenLabsLimit = await globalValue<number>(
-    deps.sql,
-    "elevenlabs_monthly_char_limit",
-    DEFAULT_ELEVENLABS_MONTHLY_CHAR_LIMIT
-  );
+  const elevenLabsLimit = await elevenLabsCharLimit(deps.sql);
   return {
     yandex: (requests) => reserveYandexRequests(deps.sql, clock(), requests, yandexLimitRub),
     elevenlabs: (characters) =>
-      reserveElevenLabsCharacters(deps.sql, clock(), characters, elevenLabsLimit)
+      reserveElevenLabsCharacters(deps.sql, clock(), characters, elevenLabsLimit),
+    releaseElevenlabs: (characters) => releaseElevenLabsCharacters(deps.sql, clock(), characters)
   };
 }
 

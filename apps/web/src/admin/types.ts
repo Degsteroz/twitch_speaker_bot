@@ -57,7 +57,12 @@ export interface Overview {
   yandexTtsSpentRub: number;
   yandexTtsLimitRub: number;
   elevenLabsChars: number;
+  /** The owner's cap, never above the synced ElevenLabs plan. */
   elevenLabsLimit: number;
+  /** When ElevenLabs resets its count; null before the first sync. */
+  elevenLabsResetAt: string | null;
+  /** The last time the worker read ElevenLabs' own count; null when it never could. */
+  elevenLabsSyncedAt: string | null;
 }
 
 export interface PlanRow {

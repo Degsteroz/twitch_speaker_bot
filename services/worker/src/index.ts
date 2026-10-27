@@ -16,6 +16,7 @@ import { PgBoss } from "pg-boss";
 
 import { loadConfig } from "./config.js";
 import { processDemo } from "./demo.js";
+import { syncElevenLabsUsage } from "./elevenlabs.js";
 import { notifyStreamer, sendStreamSummaries } from "./telegram.js";
 import { processRoast } from "./pipeline.js";
 import { recordVoiceSample, syncVoices } from "./voices.js";
@@ -79,6 +80,16 @@ if (config.TELEGRAM_BOT_TOKEN) {
   await boss.work("stream.summary", async () => {
     const sent = await sendStreamSummaries(database.client, config);
     if (sent) console.log(JSON.stringify({ msg: "stream.summary", sent }));
+  });
+}
+
+// ElevenLabs' own usage and plan limit over our count: it resets on the renewal day, not the 1st.
+if (config.ELEVENLABS_API_KEY) {
+  await syncElevenLabsUsage(database.client, config);
+  await boss.createQueue("elevenlabs.sync");
+  await boss.schedule("elevenlabs.sync", "*/5 * * * *");
+  await boss.work("elevenlabs.sync", async () => {
+    await syncElevenLabsUsage(database.client, config);
   });
 }
 

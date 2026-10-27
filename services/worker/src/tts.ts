@@ -44,7 +44,12 @@ export type ReserveRequests = (requests: number) => Promise<boolean>;
 export interface VoiceReservations {
   yandex: ReserveRequests;
   elevenlabs: ReserveRequests;
+  /** Gives back the characters of a call ElevenLabs answered with an error: it bills nothing. */
+  releaseElevenlabs?: (characters: number) => Promise<void>;
 }
+
+// An HTTP error from ElevenLabs is not billed; a timeout or a dropped connection may have been.
+const ELEVENLABS_REFUSED = /^elevenlabs_tts_\d{3}$/u;
 
 /** The ElevenLabs voice of a built-in character, when the owner configured one. */
 function elevenLabsVoice(tone: Archetype, config: WorkerConfig): string | undefined {
@@ -206,6 +211,9 @@ export async function speak(
       } catch (error) {
         fallbackReason = error instanceof Error ? error.message : "elevenlabs_tts_error";
         log(`ElevenLabs TTS failed, trying the next voice: ${fallbackReason}`);
+        if (ELEVENLABS_REFUSED.test(fallbackReason)) {
+          await reserve.releaseElevenlabs?.(characters).catch(() => undefined);
+        }
       }
     } else {
       fallbackReason = "elevenlabs_tts_monthly_limit";

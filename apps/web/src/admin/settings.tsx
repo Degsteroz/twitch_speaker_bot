@@ -57,7 +57,8 @@ const VOICE_FIELDS: SettingField[] = [
     label: "ElevenLabs, символов в месяц",
     kind: "number",
     fallback: 70000,
-    step: "1000"
+    step: "1000",
+    hint: "Не выше тарифа ElevenLabs: воркер каждые 5 минут сверяет расход и лимит с ElevenLabs и держит запас 1000 символов."
   },
   {
     key: "yandex_tts_monthly_limit_rub",

@@ -176,8 +176,16 @@ Sonnet 5.5 и Fable не отключают thinking (400), поэтому им 
 миграция `0017`, голоса Мицуки и Аи воркер добавляет сам при старте, сэмплы записываются
 автоматически. Формат WAV 24 кГц
 (44.1 кГц требует Pro). Цена $0.08 за 1000 символов; лимит символов в месяц —
-`elevenlabs_monthly_char_limit` в `/admin` (по умолчанию 70 000, тариф Starter даёт 75 000), учёт
-в `tts_usage_monthly` (provider `elevenlabs`, атомарный резерв до запроса).
+`elevenlabs_monthly_char_limit` в `/admin` (по умолчанию 70 000), учёт в `tts_usage_monthly`
+(provider `elevenlabs`, атомарный резерв до запроса). Свой счёт расходится с ElevenLabs: там
+счётчик обнуляется в день продления подписки, а не 1-го числа, тариф бывает меньше лимита в
+админке, а за таймаут могли и списать. Поэтому воркер каждые 5 минут и при старте читает
+`GET /v1/user/subscription` (`services/worker/src/elevenlabs.ts`): расход ElevenLabs
+записывается поверх нашего, лимит тарифа и дата сброса — в `global_settings`
+(`elevenlabs_subscription`). Резерв идёт до меньшего из лимита в админке и тарифа минус 1000
+символов (`ELEVENLABS_PLAN_MARGIN`). Явный HTTP-отказ ElevenLabs резерв возвращает, таймаут —
+нет. Если ключ без права на чтение данных пользователя («User: read») или ElevenLabs не
+отвечает, работает свой счёт; в «Обзоре» это видно по подписи «С ElevenLabs не сверено».
 
 У каждого персонажа свой голос Yandex SpeechKit (API v3): цундэрэ — `julia`/`strict`,
 яндэрэ — `jane`/`good` (`services/worker/src/tts.ts`). Кудэрэ — `julia`/`neutral`,

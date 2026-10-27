@@ -35,6 +35,9 @@ export const DEFAULT_MONTHLY_BUDGET_USD = 10;
 // ElevenLabs Starter includes 75,000 characters a month; stay under it so the plan never bills
 // overage. The owner changes it in /admin.
 export const DEFAULT_ELEVENLABS_MONTHLY_CHAR_LIMIT = 70_000;
+// The worker syncs ElevenLabs' own plan limit; reservations stop this far below it, leaving room
+// for calls in flight while the counter is corrected and for voice samples.
+export const ELEVENLABS_PLAN_MARGIN = 1_000;
 export const DEFAULT_YANDEX_TTS_MONTHLY_LIMIT_RUB = 300;
 export const YANDEX_TTS_RUB_PER_REQUEST = 0.1626;
 export const YANDEX_TTS_CHARS_PER_REQUEST = 250;

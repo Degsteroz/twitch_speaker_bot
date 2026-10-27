@@ -20,6 +20,7 @@ import {
   DEFAULT_MONTHLY_BUDGET_USD,
   DEFAULT_ELEVENLABS_MONTHLY_CHAR_LIMIT,
   DEFAULT_YANDEX_TTS_MONTHLY_LIMIT_RUB,
+  ELEVENLABS_PLAN_MARGIN,
   gameContext,
   ROAST_REQUESTED_QUEUE,
   ROAST_REQUESTED_QUEUE_OPTIONS,
@@ -1293,7 +1294,13 @@ export async function buildApp(config: ApiConfig) {
         (select count(*) from roasts where moderation_reviewed_at is null
           and status in ('blocked_input','blocked_output'))::int "pendingModeration"`;
     const [tts] = await sql<
-      { requests: number; limitRub: number; elevenLabsChars: number; elevenLabsLimit: number }[]
+      {
+        requests: number;
+        limitRub: number;
+        elevenLabsChars: number;
+        elevenLabsLimit: number;
+        elevenLabsPlan: { limit: number; resetAt: string | null; syncedAt: string } | null;
+      }[]
     >`
       select coalesce((select requests from tts_usage_monthly
           where provider='yandex' and month=${yandexBillingMonth(new Date())}),0)::int requests,
@@ -1304,13 +1311,21 @@ export async function buildApp(config: ApiConfig) {
           "elevenLabsChars",
         coalesce((select (value #>> '{}')::int from global_settings
           where key='elevenlabs_monthly_char_limit'), ${DEFAULT_ELEVENLABS_MONTHLY_CHAR_LIMIT})::int
-          "elevenLabsLimit"`;
+          "elevenLabsLimit",
+        (select value from global_settings where key='elevenlabs_subscription') "elevenLabsPlan"`;
+    // The worker syncs ElevenLabs' own count and plan; the cap is never above the plan.
+    const plan = tts?.elevenLabsPlan ?? null;
+    const ownerLimit = tts?.elevenLabsLimit ?? DEFAULT_ELEVENLABS_MONTHLY_CHAR_LIMIT;
     return {
       ...row,
       yandexTtsSpentRub: Math.round((tts?.requests ?? 0) * YANDEX_TTS_RUB_PER_REQUEST * 100) / 100,
       yandexTtsLimitRub: tts?.limitRub ?? DEFAULT_YANDEX_TTS_MONTHLY_LIMIT_RUB,
       elevenLabsChars: tts?.elevenLabsChars ?? 0,
-      elevenLabsLimit: tts?.elevenLabsLimit ?? DEFAULT_ELEVENLABS_MONTHLY_CHAR_LIMIT
+      elevenLabsLimit: plan
+        ? Math.min(ownerLimit, Math.max(0, plan.limit - ELEVENLABS_PLAN_MARGIN))
+        : ownerLimit,
+      elevenLabsResetAt: plan?.resetAt ?? null,
+      elevenLabsSyncedAt: plan?.syncedAt ?? null
     };
   });
 

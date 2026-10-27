@@ -2,15 +2,11 @@
 // and the worker records one short phrase in that voice. Like every paid call it goes through
 // speak() after reserving characters against the monthly ElevenLabs cap; no fallback voice, since
 // a sample in another voice would mislead.
-import {
-  DEFAULT_ELEVENLABS_MONTHLY_CHAR_LIMIT,
-  elevenLabsVoiceIdSchema,
-  VOICE_SAMPLE_TEXT,
-  voiceSampleJobSchema
-} from "@roastbot/shared";
+import { elevenLabsVoiceIdSchema, VOICE_SAMPLE_TEXT, voiceSampleJobSchema } from "@roastbot/shared";
 
 import type { WorkerConfig } from "./config.js";
-import { globalValue, reserveElevenLabsCharacters, type Sql } from "./pipeline.js";
+import { elevenLabsCharLimit, releaseElevenLabsCharacters } from "./elevenlabs.js";
+import { reserveElevenLabsCharacters, type Sql } from "./pipeline.js";
 import { speak } from "./tts.js";
 
 // The first synthesis in a voice from the ElevenLabs library is slower than the live roast timeout;
@@ -31,11 +27,8 @@ export async function recordVoiceSample(
   const { voiceId } = voiceSampleJobSchema.parse(rawJob);
   const [voice] = await deps.sql`select 1 from voices where id=${voiceId}`;
   if (!voice) return "skipped";
-  const limit = await globalValue<number>(
-    deps.sql,
-    "elevenlabs_monthly_char_limit",
-    DEFAULT_ELEVENLABS_MONTHLY_CHAR_LIMIT
-  );
+  const limit = await elevenLabsCharLimit(deps.sql);
+  const clock = () => deps.now?.() ?? new Date();
   const speech = await speak(
     VOICE_SAMPLE_TEXT,
     "tsundere",
@@ -43,8 +36,8 @@ export async function recordVoiceSample(
     deps.fetch ?? globalThis.fetch,
     {
       yandex: () => Promise.resolve(false),
-      elevenlabs: (characters) =>
-        reserveElevenLabsCharacters(deps.sql, deps.now?.() ?? new Date(), characters, limit)
+      elevenlabs: (characters) => reserveElevenLabsCharacters(deps.sql, clock(), characters, limit),
+      releaseElevenlabs: (characters) => releaseElevenLabsCharacters(deps.sql, clock(), characters)
     },
     {
       best: "elevenlabs",
