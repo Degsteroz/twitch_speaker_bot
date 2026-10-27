@@ -629,7 +629,12 @@ restore на отдельном окружении регулярно.
 
 ```cron
 30 4 * * * cd /opt/roastbot && ./deploy/backup.sh >> deploy/backups/backup.log 2>&1
+15 5 * * * docker builder prune -af --filter until=72h >/dev/null 2>&1
 ```
+
+Вторая строка чистит кэш сборки Docker старше трёх дней: его копят сборки всех проектов на
+сервере, и однажды он занял 20 ГБ и остановил миграции (`No space left on device`). Старые
+образы RoastBot удаляет сам `edge-deploy.sh` после успешного деплоя.
 
 Копия вне сервера — на Mac: `./deploy/mac/install-backup-pull.sh user@host`. Mac каждый день в
 5:30 забирает архивы по SSH в `~/Backups/roastbot` (30 дней), уведомляет, если забрать не вышло

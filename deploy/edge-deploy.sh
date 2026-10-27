@@ -78,4 +78,9 @@ compose up -d --no-build
 # but a container keeps the old ones until it is recreated — a restart is not enough.
 compose up -d --no-build --force-recreate caddy
 compose ps
+# Images are tagged by commit, so old releases are never "dangling" and piled up until the disk
+# was full. Remove RoastBot images of other commits; rmi refuses ones a container still uses.
+# Other projects' images are left alone.
+docker image ls --format '{{.Repository}}:{{.Tag}}' |
+  grep '/roastbot-' | grep -v ":$IMAGE_TAG\$" | xargs -r docker rmi >/dev/null 2>&1 || true
 docker image prune -f >/dev/null
