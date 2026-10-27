@@ -20,7 +20,13 @@ import type { JSONValue } from "postgres";
 import WebSocket from "ws";
 import { z } from "zod";
 
-import { decryptToken, encryptToken, enqueueEvent, reconnectDelayMs } from "./core.js";
+import {
+  decryptToken,
+  encryptToken,
+  enqueueEvent,
+  isOnCooldown,
+  reconnectDelayMs
+} from "./core.js";
 import { DonationAlertsConnection, type DonationAlertsAccount } from "./donationalerts.js";
 import {
   EveryNth,
@@ -170,15 +176,14 @@ chat.on("message", (channelName, tags, message, self) => {
   );
   if (!roast) return;
   void (async () => {
-    // Every Nth message with a trigger word gets a roast; the others get a free "no" stub, so the
-    // viewer still hears the bot. The worker spends nothing on them.
-    let declined = false;
+    // Only every Nth message with a trigger word is answered; the others stay silent.
     if (roast.source === "chat_keyword") {
-      declined = !keywordGate.due(channel.id, KEYWORD_EVERY[channel.triggers.chatFrequency]);
-      if (!declined) keywordGate.reset(channel.id);
+      if (!keywordGate.due(channel.id, KEYWORD_EVERY[channel.triggers.chatFrequency])) return;
+      // A plain word on a pause is dropped and stays due; a call by name still reaches the worker,
+      // which answers it with a stub so the viewer knows the bot heard them.
+      if (!roast.named && (await isOnCooldown(sql, channel.id, viewerLogin))) return;
+      keywordGate.reset(channel.id);
     }
-    // Every message that reaches here goes to the worker: a pause, a limit or a declined word
-    // answers with a stub, so the viewer knows the bot heard them.
     await enqueueEvent(sql, boss, {
       channelId: channel.id,
       source: roast.source,
@@ -187,7 +192,7 @@ chat.on("message", (channelName, tags, message, self) => {
       viewerLogin,
       inputText: roast.inputText,
       target: roast.target,
-      ...(declined ? { declined } : {}),
+      ...(roast.named ? { named: true } : {}),
       ...(await withGame(channel)),
       raw: { tags, message }
     });

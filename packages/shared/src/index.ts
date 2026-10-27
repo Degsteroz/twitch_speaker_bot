@@ -133,7 +133,7 @@ export const STUB_PHRASES: Readonly<Record<z.infer<typeof archetypeSchema>, read
       "Подожди чуть-чуть. Ожидание делает нашу встречу слаще."
     ],
     kuudere: [
-      "Очередь. Жди.",
+      "Меня тут нет.",
       "Ты уже спрашивал. Ответ тот же: позже.",
       "Слишком часто. Неинтересно."
     ],
@@ -237,13 +237,17 @@ export const VIEWER_LIMITED_SOURCES: ReadonlySet<RoastSource> = new Set<RoastSou
   "chat_keyword",
   "reward"
 ]);
-// A viewer who talks to the bot (command, keyword, reward) and hits a pause or their limit hears a
-// short stub instead of silence, so nobody thinks the bot is down.
+// A viewer who calls the bot (command, reward, or the character's name) and hits a pause or their
+// limit hears a short stub instead of silence, so nobody thinks the bot is down. Ordinary chat words
+// stay silent: they are chatter, and a stub there lands at the wrong moment.
 export const STUB_SOURCES: ReadonlySet<RoastSource> = new Set<RoastSource>([
   "chat_command",
   "chat_keyword",
   "reward"
 ]);
+/** Whether a job gets a stub: a chat word only when it calls the character by name. */
+export const isStubCall = (source: RoastSource, named: boolean | undefined) =>
+  STUB_SOURCES.has(source) && (source !== "chat_keyword" || named === true);
 /** Who the roast is aimed at: the viewer behind the trigger or the streamer. */
 /** The two characters by name; the tone is their temperament. */
 export const CHARACTER_NAMES = Object.freeze({ tsundere: "Мицуки", yandere: "Аи" } as const);
@@ -480,6 +484,8 @@ export const roastRequestedJobSchema = z
     game: z.string().min(1).max(100).optional(),
     // A reward the frequency passed over: the character answers with REWARD_DECLINED_STUB.
     declined: z.literal(true).optional(),
+    // A chat word that calls the character by name (nameMention), not an ordinary keyword.
+    named: z.literal(true).optional(),
     requestedAt: z.string().datetime()
   })
   .strict();

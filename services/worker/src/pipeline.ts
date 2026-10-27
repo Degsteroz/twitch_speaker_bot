@@ -36,7 +36,7 @@ import {
   REWARD_DECLINED_STUB,
   STUB_CAPTION_MAX_CHARACTERS,
   STUB_PHRASES,
-  STUB_SOURCES,
+  isStubCall,
   STUB_VISUALS,
   VIEWER_LIMITED_SOURCES,
   VIEWER_ROAST_LIMIT,
@@ -781,7 +781,7 @@ export async function processRoast(
       // Someone called the bot directly during a pause or past their limit: a stub, so nobody
       // thinks the bot is down. Everything else (quota, budget) stays silent.
       const stubReason = STUB_REJECTIONS[reservation.rejected];
-      if (stubReason && STUB_SOURCES.has(job.source)) return await stub(stubReason);
+      if (stubReason && isStubCall(job.source, job.named)) return await stub(stubReason);
       return await settle("skipped", reservation.rejected);
     }
     const { tier, quota } = reservation;

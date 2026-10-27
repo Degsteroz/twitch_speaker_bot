@@ -58,6 +58,8 @@ export async function enqueueEvent(
     delaySeconds?: number;
     /** A reward the frequency passed over: the worker answers with a stub. */
     declined?: boolean;
+    /** A chat word that calls the character by name: the worker may answer it with a stub. */
+    named?: boolean;
     raw: JSONValue;
   }
 ): Promise<boolean> {
@@ -80,6 +82,7 @@ export async function enqueueEvent(
       ...(input.eventSummary ? { eventSummary: input.eventSummary.slice(0, 500) } : {}),
       ...(input.game ? { game: input.game.slice(0, 100) } : {}),
       ...(input.declined ? { declined: true } : {}),
+      ...(input.named ? { named: true } : {}),
       requestedAt: new Date().toISOString()
     },
     input.delaySeconds ? { startAfter: input.delaySeconds } : {}

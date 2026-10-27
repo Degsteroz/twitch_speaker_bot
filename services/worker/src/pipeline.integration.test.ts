@@ -110,6 +110,7 @@ async function job(
     target: "viewer" | "streamer";
     eventSummary: string;
     declined: true;
+    named: true;
   }> = {}
 ) {
   const source = overrides.source ?? "chat_command";
@@ -126,6 +127,7 @@ async function job(
     ...(overrides.target ? { target: overrides.target } : {}),
     ...(overrides.eventSummary ? { eventSummary: overrides.eventSummary } : {}),
     ...(overrides.declined ? { declined: overrides.declined } : {}),
+    ...(overrides.named ? { named: overrides.named } : {}),
     requestedAt: overrides.requestedAt ?? new Date().toISOString()
   };
 }
@@ -296,13 +298,20 @@ describe("processRoast against PostgreSQL", () => {
       0
     );
 
-    // A chat word during a pause gets a stub too: the viewer talked to the bot.
-    const keyword = await processRoast(
-      await job({ source: "chat_keyword", viewerLogin: "chatter" }),
+    // An ordinary chat word during a pause stays silent: it is chatter, not a call.
+    expect(
+      await processRoast(
+        await job({ source: "chat_keyword", viewerLogin: "chatter" }),
+        deps(anthropic.client)
+      )
+    ).toMatchObject({ status: "skipped", reason: "cooldown_active" });
+    // A call by the character's name during a pause gets a stub.
+    const named = await processRoast(
+      await job({ source: "chat_keyword", named: true, viewerLogin: "chatter" }),
       deps(anthropic.client)
     );
-    expect(keyword).toMatchObject({ status: "skipped", reason: "stub_cooldown" });
-    expect(STUB_PHRASES.tsundere).toContain((await roast(keyword.roastId)).output_text);
+    expect(named).toMatchObject({ status: "skipped", reason: "stub_cooldown" });
+    expect(STUB_PHRASES.tsundere).toContain((await roast(named.roastId)).output_text);
     expect(
       (await processRoast(await job({ source: "dashboard_test" }), deps(anthropic.client))).status
     ).toBe("done");
@@ -335,15 +344,8 @@ describe("processRoast against PostgreSQL", () => {
     expect(await db.sql`select count(*)::int count from stub_audio`).toEqual(stubs);
   });
 
-  it("answers a declined chat word and reward with a stub, never with quota or a model", async () => {
+  it("answers a declined reward with a stub, never with quota or a model", async () => {
     const anthropic = fakeAnthropic({ text: "Раз" });
-    // A word the frequency passed over: a stub, no roast, no quota.
-    const word = await processRoast(
-      await job({ source: "chat_keyword", declined: true, viewerLogin: "chatter" }),
-      deps(anthropic.client)
-    );
-    expect(word).toMatchObject({ status: "skipped", reason: "stub_declined" });
-    expect(anthropic.create).not.toHaveBeenCalled();
     // A declined reward on the visual branch: its own "no" with a sound.
     const reward = await processRoast(
       await job({ source: "reward", declined: true, viewerLogin: "fan" }),

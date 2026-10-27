@@ -75,6 +75,8 @@ export interface ChatRoast {
   source: Extract<RoastSource, "chat_command" | "chat_keyword">;
   inputText: string;
   target: RoastTarget;
+  /** The message calls the character by name, not an ordinary keyword. */
+  named?: true;
 }
 
 /**
@@ -104,8 +106,15 @@ export function chatTrigger(
     triggers.nameMention && characterName
       ? [...triggers.keywords, characterName]
       : triggers.keywords;
-  if (!words.length || !matchKeyword(chat.message, words)) return null;
-  return { source: "chat_keyword", inputText: chat.message, target };
+  const matched = words.length ? matchKeyword(chat.message, words) : null;
+  if (matched === null) return null;
+  const named = triggers.nameMention && characterName !== undefined && matched === characterName;
+  return {
+    source: "chat_keyword",
+    inputText: chat.message,
+    target,
+    ...(named ? { named: true } : {})
+  };
 }
 
 // ---- EventSub --------------------------------------------------------------------------------

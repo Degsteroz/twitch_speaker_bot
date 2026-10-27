@@ -78,7 +78,8 @@ describe("chat triggers", () => {
     expect(chatTrigger(chat("мисс кэт, привет"), on, options)).toEqual({
       source: "chat_keyword",
       inputText: "мисс кэт, привет",
-      target: "viewer"
+      target: "viewer",
+      named: true
     });
     expect(chatTrigger(chat("мисс кэт"), triggers(), options)).toBeNull();
     expect(chatTrigger(chat("мисс кэт"), on)).toBeNull();
@@ -90,6 +91,13 @@ describe("chat triggers", () => {
     expect(chatTrigger(chat("слил", { username: "My_Bot" }), settings, options)).toBeNull();
     expect(chatTrigger(chat("!роаст слил", { username: "my_bot" }), settings, options)).toBeNull();
     expect(chatTrigger(chat("слил"), settings, options)?.source).toBe("chat_keyword");
+  });
+
+  it("marks only a call by the character's name as named, never an ordinary word", () => {
+    const settings = triggers({ keywords: ["хлеб"], nameMention: true });
+    const options = { characterName: "Мисс Кэт" };
+    expect(chatTrigger(chat("хлеб с маслом"), settings, options)).not.toHaveProperty("named");
+    expect(chatTrigger(chat("мисс кэт, ау"), settings, options)).toHaveProperty("named", true);
   });
 
   it("roasts the streamer for their own message: there is no other author", () => {
