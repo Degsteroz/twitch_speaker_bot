@@ -5,6 +5,7 @@ import { join } from "node:path";
 import type Anthropic from "@anthropic-ai/sdk";
 import type { createDatabase } from "@roastbot/db";
 import {
+  addressesCharacter,
   calculateCostUsd,
   classifierInput,
   classifierSystemPrompt,
@@ -22,6 +23,7 @@ import {
 import {
   ARCHETYPE_THEME,
   BLOCKED_OUTPUT_FALLBACK,
+  CHARACTER_NAMES,
   BRANDED_PLANS,
   CUSTOM_CHARACTER_PLANS,
   COOLDOWN_SOURCES,
@@ -876,6 +878,14 @@ export async function processRoast(
     const history = optedOut
       ? undefined
       : await viewerHistory(deps.sql, job, roastId, context.streamerLogin);
+    // "Ноль сожалений": calling her by name is an attack, and the author gets it back, whatever
+    // the channel's target switch says. Not when there is no author or the viewer opted out.
+    const addressed =
+      context.toxicity === ZERO_REGRETS_TOXICITY &&
+      job.target !== "streamer" &&
+      !optedOut &&
+      (job.named === true ||
+        addressesCharacter(job.inputText, character?.name ?? CHARACTER_NAMES[context.tone]));
     const prompt = composeRoastPrompt({
       viewer: job.viewerLogin,
       message: job.inputText,
@@ -886,7 +896,8 @@ export async function processRoast(
       streamer: context.streamerLogin,
       ...(job.eventSummary ? { event: job.eventSummary } : {}),
       ...(job.game ? { game: job.game } : {}),
-      ...(history ? { history } : {})
+      ...(history ? { history } : {}),
+      ...(addressed ? { addressed } : {})
     });
     const generated = await deps.anthropic.beta.messages.create(
       modelRequest(model, "generate", prompt.systemBlocks, prompt.user)

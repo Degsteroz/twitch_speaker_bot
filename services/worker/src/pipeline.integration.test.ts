@@ -1020,6 +1020,30 @@ describe("«ноль сожалений»", () => {
     }
   });
 
+  it("turns a call by name on its author, even on a channel that roasts the streamer", async () => {
+    await db.sql`insert into channel_overrides(channel_id,zero_regrets)
+      values(${channel.channelId},true)`;
+    await db.sql`update settings set toxicity=6,
+      triggers=jsonb_set(triggers,'{targetMode}','"streamer"') where channel_id=${channel.channelId}`;
+    const anthropic = fakeAnthropic({ text: "Раз" });
+    await processRoast(
+      await job({ source: "donation", inputText: "Мицуки, потанцуй за мой донат" }),
+      deps(anthropic.client)
+    );
+    const addressed = systemText(anthropic.create.mock.calls[0]![0]);
+    expect(addressed).toContain("[ОБРАЩЕНИЕ К ТЕБЕ]");
+    expect(addressed).toContain("подколов автора из <viewer>");
+
+    anthropic.create.mockClear();
+    await processRoast(
+      await job({ source: "donation", inputText: "потанцуй за мой донат" }),
+      deps(anthropic.client)
+    );
+    expect(systemText(anthropic.create.mock.calls[0]![0])).toContain(
+      "подколов стримера из <streamer>"
+    );
+  });
+
   it("plays a stored 6 as 5 once the owner takes the tick back", async () => {
     await db.sql`update settings set toxicity=6 where channel_id=${channel.channelId}`;
     const anthropic = fakeAnthropic({ text: "Раз" });

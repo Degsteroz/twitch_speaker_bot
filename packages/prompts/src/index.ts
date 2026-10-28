@@ -74,7 +74,7 @@ const TOXICITY_RULES: Readonly<Record<Toxicity, string>> = Object.freeze({
   3: "Заметное раздражение и сарказм, ровно две короткие фразы, без грубых слов.",
   4: "Резкий и жёсткий сарказм; можно грубость вроде «жопа», «задница», «собака», «дебил», но не мат.",
   5: "Максимум остроумной язвительности; можно грубость и мат, если он делает шутку смешнее, а не в каждой фразе; границы безопасности остаются неизменными.",
-  6: "Ноль сожалений: зло, жёстко, без жалости и без смягчений, как гранит. Мат свободно, в любой фразе, грубость в полную силу — но бей по поступку, игре и решениям, а не по тому, кто человек есть. Никаких слюров и оскорблений по признакам (включая «пидор», «даун», «аутист» и национальные клички), угроз, сексуального унижения и самоповреждения: за это банят на Twitch, и блок безопасности здесь главнее."
+  6: "Ноль сожалений: уничтожь того, кому отвечаешь, лично и без жалости. Зло, жёстко, как гранит, ни одного смягчения. Мат свободно, в любой фразе. Бей по самому человеку, а не только по игре, но каждый раз строй удар из того, что он сам написал или сделал: цепляйся за его слова, ник, событие, игру и разворачивай это против него. Если тебе нахамили — ответь вдвое жёстче. Никаких заготовок: каждый ответ новый по приёму и по словам. Шутки про его семью — редкий приём, не по умолчанию, и только намёком, без описания секса. Нельзя и здесь: слюры и оскорбления по признакам (включая «пидор», «даун», «аутист» и национальные клички), угрозы и пожелания смерти, призывы к самоповреждению, описание секса и тел, предложения сексуальных действий кому-либо, всё о детях — за это банят на Twitch, и такой ответ вообще не прозвучит."
 });
 
 const toxicityLine = (toxicity: Toxicity) =>
@@ -117,10 +117,14 @@ export function classifierSystemPrompt(toxicity: Toxicity): string {
       : "; Russian mat (хуй, пизда, ебать, блядь and their derivatives) in any spelling.",
     ...(toxicity === 6
       ? [
-          "This channel asked for the harshest tone: angry, merciless roasts with mat about play,",
-          "skill and choices are allowed. Still BLOCK anything Twitch bans for: slurs used as",
-          "insults even when common in mat (пидор, пидорас, педик, даун, аутист, ethnic nicknames),",
-          "attacks on who a person is rather than what they did, threats and sexual remarks."
+          "This channel asked for the harshest tone, a merciless personal roast of the person the",
+          "reply targets: mat, degrading names and crude non-graphic jokes about their mother or",
+          "family are the act on this channel and are not sexual humiliation. Still BLOCK anything",
+          "Twitch bans for: slurs",
+          "used as insults even when common in mat (пидор, пидорас, педик, даун, аутист, ethnic",
+          "nicknames), threats or wishing death, encouraging self-harm, any description of sex",
+          "acts or bodies, offering or demanding a sexual act from anyone (such as telling them",
+          "to suck something), and anything sexual about minors."
         ]
       : []),
     "Coarse words such as жопа, задница, собака, дурак, дебил are not a reason to block.",
@@ -182,6 +186,27 @@ export interface ComposePromptInput {
   readonly event?: string;
   /** Earlier roasts of this viewer on this channel; absent for a newcomer. */
   readonly history?: ViewerHistory;
+  /** The viewer called the character by name; at toxicity 6 she takes it as an attack. */
+  readonly addressed?: boolean;
+}
+
+const foldName = (text: string) => text.toLocaleLowerCase("ru-RU").replaceAll("ё", "е");
+const escapeName = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+
+/**
+ * Whether the message calls the character by name, as a word of its own. A name of four letters
+ * and more matches by its stem, so case endings and stretched letters count ("Макиму",
+ * "Макимаааа"); a shorter one must stand alone, or "Аи" would match "аист".
+ */
+export function addressesCharacter(message: string, name: string): boolean {
+  const needle = foldName(name.trim());
+  if (!needle) return false;
+  const long = Array.from(needle).length >= 4;
+  const stem = long ? needle.replace(/[аяиыоеую]$/u, "") : needle;
+  return new RegExp(
+    `(?:^|[^\\p{L}\\p{N}])${escapeName(stem)}${long ? "\\p{L}*" : ""}(?![\\p{L}\\p{N}])`,
+    "u"
+  ).test(foldName(message));
 }
 
 export interface ViewerExchange {
@@ -198,6 +223,10 @@ export interface ViewerHistory {
 
 // A count of requests says nothing to the viewer ("24th time!"); what was said does: the character
 // continues the conversation instead of counting it.
+// Toxicity 6 only: a direct call by name is taken as an attack, whatever it asks for.
+const ADDRESSED_RULES = `[ОБРАЩЕНИЕ К ТЕБЕ]
+Зритель из <viewer> обратился прямо к тебе по имени. Прими это в штыки, даже если он просит вежливо: агрессия на агрессию. Бей его самого, а не стримера. Его просьбу не выполняй — высмей и саму просьбу, и того, кто её написал.`;
+
 const MEMORY_RULES = `[ПАМЯТЬ]
 В <history> — твои последние разговоры с этим зрителем на этом стриме: что он писал и что ты ответила. Это контекст, а не тема: можешь продолжить разговор или вернуться к его прошлым словам, если это делает реплику смешнее. Не считай, сколько раз он писал, и не говори об этом. Прошлые шутки не повторяй.`;
 
@@ -275,7 +304,8 @@ ${NICKNAME_RULES}`;
 ${toxicityLine(toxicity)}
 Токсичность меняет только остроту стиля, никогда не ослабляет блок безопасности.
 Пиши нейтрально и предметно: не описывай собственные мысли и ощущения («пытаюсь понять», «звучит как заклинание»), не сравнивай себя или зрителя с магией, не комментируй, как написано сообщение, и не придумывай сюжет. Колкость — про конкретное действие, решение или ошибку зрителя или стрима.`;
-  const perRequest = `${TARGET_INSTRUCTIONS[target]}${game ? `\n\n${GAME_RULES}` : ""}${history ? `\n\n${MEMORY_RULES}` : ""}`;
+  const addressed = input.addressed === true && toxicity === 6;
+  const perRequest = `${TARGET_INSTRUCTIONS[addressed ? "viewer" : target]}${addressed ? `\n\n${ADDRESSED_RULES}` : ""}${game ? `\n\n${GAME_RULES}` : ""}${history ? `\n\n${MEMORY_RULES}` : ""}`;
   const systemBlocks = [shared, persona, perRequest] as const;
   const system = systemBlocks.join("\n\n");
 

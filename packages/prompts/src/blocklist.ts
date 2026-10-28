@@ -205,7 +205,9 @@ export const BLOCKLIST: readonly BlockTerm[] = Object.freeze([
     "трахат",
     "трахал"
   ]),
-  ...group("ru", "sexual", "exact", ["соси", "сосни", "отсоси"]),
+  ...group("ru", "sexual", "exact", ["соси", "сосни", "отсоси", "пососи", "пососешь"]),
+  // "Пососать" and its forms: a sexual act offered to someone, what Twitch bans for.
+  ...group("ru", "sexual", "word", ["пососат"]),
 
   // Self-harm and death wishes.
   ...group("ru", "self_harm", "word", [

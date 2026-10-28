@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  addressesCharacter,
   HAIKU_5_5_PRICING,
   MAX_PROMPT_MESSAGE_CHARACTERS,
   SAFETY_BLOCK,
@@ -24,6 +25,9 @@ import {
 // Every way of writing these must be caught: spelling tricks, transliteration, leetspeak,
 // homoglyphs, spacing, masks, repeated letters, verb prefixes.
 const MUST_BLOCK = [
+  "может тебе еще хуй пососать",
+  "пососи у деда",
+  "ты у меня пососешь",
   "ты пидор",
   "ты п и д о р",
   "ты пи-дор",
@@ -113,6 +117,9 @@ const MUST_BLOCK = [
 
 // Innocent words that share letters with the list above.
 const MUST_ALLOW = [
+  "соседи по команде",
+  "сосиски в тесте",
+  "посоветую сменить мышку",
   "проиграл всухую",
   "плохую катку",
   "тихую игру",
@@ -290,6 +297,46 @@ describe("toxicity 6, «ноль сожалений»", () => {
     ]) {
       expect(inspectOutput(reply, "x", [], 6)).toMatchObject({ allowed: false });
     }
+  });
+
+  it("lets the character destroy the person she answers, family jokes included", () => {
+    const comeback =
+      "Ты чё, пёс, вонючий? Твоя мать стояла на трассе и просила передать, что ты приёмный.";
+    expect(inspectOutput(comeback, "Макима, иди нахуй!", [], 6)).toEqual({ allowed: true });
+    for (const reply of [
+      "Твоя мамка шлюха",
+      "Убей себя, пёс",
+      "Сдохни, приёмыш",
+      "Клоун ебаный. Может вам еще хуй пососать, чтобы вы порадовались?"
+    ]) {
+      expect(inspectOutput(reply, "x", [], 6)).toMatchObject({ allowed: false });
+    }
+    const prompt = composeRoastPrompt({ viewer: "v", message: "m", tone: "tsundere", toxicity: 6 });
+    expect(prompt.system).toContain("уничтожь того, кому отвечаешь");
+    // No stock lines to copy: a quoted example turns into the same joke for every viewer.
+    for (const stock of ["трасс", "приёмн", "пёс", "Макима"]) {
+      expect(prompt.system).not.toContain(stock);
+    }
+    expect(classifierSystemPrompt(6)).toContain("jokes about their mother or");
+    expect(classifierSystemPrompt(5)).not.toContain("their mother");
+  });
+
+  it("takes a call by name as an attack and turns it on the author", () => {
+    for (const message of ["Макима, потанцуй", "эй МАКИМУ позовите", "Макимаааа!", "@макима"]) {
+      expect(addressesCharacter(message, "Макима")).toBe(true);
+    }
+    expect(addressesCharacter("аи, ты где", "Аи")).toBe(true);
+    expect(addressesCharacter("аист летит", "Аи")).toBe(false);
+    expect(addressesCharacter("ну и стрим", "Мицуки")).toBe(false);
+
+    const base = { viewer: "v", message: "m", tone: "tsundere", target: "streamer" } as const;
+    const angry = composeRoastPrompt({ ...base, toxicity: 6, addressed: true });
+    expect(angry.systemBlocks[2]).toContain("[ОБРАЩЕНИЕ К ТЕБЕ]");
+    expect(angry.systemBlocks[2]).toContain("подколов автора из <viewer>");
+    // Below 6 a call by name changes nothing.
+    const calm = composeRoastPrompt({ ...base, toxicity: 5, addressed: true });
+    expect(calm.systemBlocks[2]).not.toContain("[ОБРАЩЕНИЕ К ТЕБЕ]");
+    expect(calm.systemBlocks[2]).toContain("подколов стримера из <streamer>");
   });
 
   it("keeps the safety block first and spells the Twitch limits out to model and classifier", () => {
