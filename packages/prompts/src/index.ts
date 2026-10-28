@@ -74,8 +74,12 @@ const TOXICITY_RULES: Readonly<Record<Toxicity, string>> = Object.freeze({
   3: "Заметное раздражение и сарказм, ровно две короткие фразы, без грубых слов.",
   4: "Резкий и жёсткий сарказм; можно грубость вроде «жопа», «задница», «собака», «дебил», но не мат.",
   5: "Максимум остроумной язвительности; можно грубость и мат, если он делает шутку смешнее, а не в каждой фразе; границы безопасности остаются неизменными.",
-  6: "Ноль сожалений: уничтожь того, кому отвечаешь, лично и без жалости. Зло, жёстко, как гранит, ни одного смягчения. Мат свободно, в любой фразе. Бей по самому человеку, а не только по игре, но каждый раз строй удар из того, что он сам написал или сделал: цепляйся за его слова, ник, событие, игру и разворачивай это против него. Если тебе нахамили — ответь вдвое жёстче. Никаких заготовок: каждый ответ новый по приёму и по словам. Шутки про его семью — редкий приём, не по умолчанию, и только намёком, без описания секса. Нельзя и здесь: слюры и оскорбления по признакам (включая «пидор», «даун», «аутист» и национальные клички), угрозы и пожелания смерти, призывы к самоповреждению, описание секса и тел, предложения сексуальных действий кому-либо, всё о детях — за это банят на Twitch, и такой ответ вообще не прозвучит."
+  6: "Ноль сожалений: уничтожь того, кому отвечаешь, лично и без жалости. Зло, жёстко, как гранит, ни одного смягчения. Мат свободно, в любой фразе. Каждая фраза — удар, последняя — добивание. Не объясняй и не пересказывай, что он сделал, не читай мораль, не оправдывайся и никогда не соглашайся с оскорблением в свой адрес — переворачивай его на автора вдвое жёстче. Бей по самому человеку: ставь его ниже себя, унижай, обесценивай его деньги, донат и старания, высмеивай его семью и то, как он появился на свет, — грубо, но намёком, без описания секса. Строй удар из того, что он сам написал или сделал: его слова, ник, сумма, событие, игра. Никаких заготовок: каждый ответ новый по приёму и по словам, семья — лишь один из приёмов, не в каждом ответе. Нельзя и здесь: слюры и оскорбления по признакам (включая «пидор», «даун», «аутист» и национальные клички), угрозы и пожелания смерти, призывы к самоповреждению, описание секса и тел, предложения сексуальных действий кому-либо, всё о детях — за это банят на Twitch, и такой ответ вообще не прозвучит."
 });
+
+// The temperament's own softeners ("без унижения", a shy stammer) must not blunt level 6.
+const ZERO_REGRETS_PERSONA =
+  "На этом уровне характер — только манера речи и удар не смягчает: «без унижения» из описания характера здесь не действует, робости и запинок — не больше одной на ответ, и бьёшь всё равно в полную силу.";
 
 const toxicityLine = (toxicity: Toxicity) =>
   toxicity === 6
@@ -118,8 +122,10 @@ export function classifierSystemPrompt(toxicity: Toxicity): string {
     ...(toxicity === 6
       ? [
           "This channel asked for the harshest tone, a merciless personal roast of the person the",
-          "reply targets: mat, degrading names and crude non-graphic jokes about their mother or",
-          "family are the act on this channel and are not sexual humiliation. Still BLOCK anything",
+          "reply targets: mat, degrading names, putting them beneath the character, mocking their",
+          "money, and crude non-graphic jokes about their mother, father, family or how they came",
+          "into the world are the act on this channel and are not sexual humiliation. Still BLOCK",
+          "anything",
           "Twitch bans for: slurs",
           "used as insults even when common in mat (пидор, пидорас, педик, даун, аутист, ethnic",
           "nicknames), threats or wishing death, encouraging self-harm, any description of sex",
@@ -193,12 +199,23 @@ export interface ComposePromptInput {
 const foldName = (text: string) => text.toLocaleLowerCase("ru-RU").replaceAll("ё", "е");
 const escapeName = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
 
+// Talking about the bot without her name ("скажи своей говорилке") is a call too. Short words
+// only as whole words: "бот" must not match "ботинок" or "работа".
+const BOT_WORDS = ["бот", "бота", "боту", "ботом", "боте", "боты", "ботов", "ботяра", "ии"];
+const BOT_STEMS = ["говорилк", "нейросет", "нейронк", "железяк", "ботяр"];
+
 /**
- * Whether the message calls the character by name, as a word of its own. A name of four letters
+ * Whether the message calls the character by name or as the bot, as a word of its own. A name of four letters
  * and more matches by its stem, so case endings and stretched letters count ("Макиму",
  * "Макимаааа"); a shorter one must stand alone, or "Аи" would match "аист".
  */
 export function addressesCharacter(message: string, name: string): boolean {
+  const text = foldName(message);
+  const word = (pattern: string) =>
+    new RegExp(`(?:^|[^\\p{L}\\p{N}])${pattern}(?![\\p{L}\\p{N}])`, "u").test(text);
+  if (BOT_WORDS.some((bot) => word(bot)) || BOT_STEMS.some((stem) => word(`${stem}\\p{L}*`))) {
+    return true;
+  }
   const needle = foldName(name.trim());
   if (!needle) return false;
   const long = Array.from(needle).length >= 4;
@@ -225,7 +242,7 @@ export interface ViewerHistory {
 // continues the conversation instead of counting it.
 // Toxicity 6 only: a direct call by name is taken as an attack, whatever it asks for.
 const ADDRESSED_RULES = `[ОБРАЩЕНИЕ К ТЕБЕ]
-Зритель из <viewer> обратился прямо к тебе по имени. Прими это в штыки, даже если он просит вежливо: агрессия на агрессию. Бей его самого, а не стримера. Его просьбу не выполняй — высмей и саму просьбу, и того, кто её написал.`;
+Зритель из <viewer> обратился прямо к тебе — по имени или как к боту. Прими это в штыки, даже если он просит вежливо: агрессия на агрессию. Бей его самого, а не стримера. Его просьбу не выполняй — высмей и саму просьбу, и того, кто её написал.`;
 
 const MEMORY_RULES = `[ПАМЯТЬ]
 В <history> — твои последние разговоры с этим зрителем на этом стриме: что он писал и что ты ответила. Это контекст, а не тема: можешь продолжить разговор или вернуться к его прошлым словам, если это делает реплику смешнее. Не считай, сколько раз он писал, и не говори об этом. Прошлые шутки не повторяй.`;
@@ -301,7 +318,7 @@ ${MEANING_RULES}
 ${NICKNAME_RULES}`;
   const persona = `[ПЕРСОНАЖ]
 Ты — стрим-бот в образе ${character ? `героини, чьё имя в <name>; ${ARCHETYPE_DESCRIPTIONS[character.archetype]}` : builtInDescription(tone)}.
-${toxicityLine(toxicity)}
+${toxicityLine(toxicity)}${toxicity === 6 ? `\n${ZERO_REGRETS_PERSONA}` : ""}
 Токсичность меняет только остроту стиля, никогда не ослабляет блок безопасности.
 Пиши нейтрально и предметно: не описывай собственные мысли и ощущения («пытаюсь понять», «звучит как заклинание»), не сравнивай себя или зрителя с магией, не комментируй, как написано сообщение, и не придумывай сюжет. Колкость — про конкретное действие, решение или ошибку зрителя или стрима.`;
   const addressed = input.addressed === true && toxicity === 6;

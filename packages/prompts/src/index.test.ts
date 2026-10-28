@@ -313,11 +313,17 @@ describe("toxicity 6, «ноль сожалений»", () => {
     }
     const prompt = composeRoastPrompt({ viewer: "v", message: "m", tone: "tsundere", toxicity: 6 });
     expect(prompt.system).toContain("уничтожь того, кому отвечаешь");
+    expect(prompt.system).toContain("никогда не соглашайся с оскорблением");
+    // The temperament's softeners do not apply at this level, and only at this level.
+    expect(prompt.system).toContain("«без унижения» из описания характера здесь не действует");
+    expect(
+      composeRoastPrompt({ viewer: "v", message: "m", tone: "tsundere", toxicity: 5 }).system
+    ).not.toContain("здесь не действует");
     // No stock lines to copy: a quoted example turns into the same joke for every viewer.
-    for (const stock of ["трасс", "приёмн", "пёс", "Макима"]) {
+    for (const stock of ["трасс", "приёмн", "пёс", "Макима", "пятк", "трус", "тысяч"]) {
       expect(prompt.system).not.toContain(stock);
     }
-    expect(classifierSystemPrompt(6)).toContain("jokes about their mother or");
+    expect(classifierSystemPrompt(6)).toContain("jokes about their mother, father");
     expect(classifierSystemPrompt(5)).not.toContain("their mother");
   });
 
@@ -327,6 +333,13 @@ describe("toxicity 6, «ноль сожалений»", () => {
     }
     expect(addressesCharacter("аи, ты где", "Аи")).toBe(true);
     expect(addressesCharacter("аист летит", "Аи")).toBe(false);
+    // Talking about the bot without her name counts too; "ботинок" and "работа" do not.
+    for (const message of ["скажи своей говорилке", "тупой бот", "эта нейросеть", "ботяра"]) {
+      expect(addressesCharacter(message, "Макима")).toBe(true);
+    }
+    for (const message of ["новые ботинки", "работа не волк"]) {
+      expect(addressesCharacter(message, "Макима")).toBe(false);
+    }
     expect(addressesCharacter("ну и стрим", "Мицуки")).toBe(false);
 
     const base = { viewer: "v", message: "m", tone: "tsundere", target: "streamer" } as const;
