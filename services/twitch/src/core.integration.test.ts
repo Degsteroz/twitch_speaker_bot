@@ -1,4 +1,8 @@
-import { ROAST_REQUESTED_QUEUE, ROAST_REQUESTED_QUEUE_OPTIONS } from "@roastbot/shared";
+import {
+  ROAST_REQUESTED_QUEUE,
+  ROAST_REQUESTED_QUEUE_OPTIONS,
+  STREAMER_JOB_PRIORITY
+} from "@roastbot/shared";
 import { createTestChannel, startTestDatabase, type TestDatabase } from "@roastbot/testing";
 import { PgBoss } from "pg-boss";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -42,6 +46,27 @@ describe("chat intake", () => {
       and data->>'channelId'=${channel.channelId}`;
     expect(jobs).toHaveLength(1);
     expect(jobs[0]!.data).toMatchObject({ source: "chat_command", inputText: "мой aim" });
+  });
+
+  it("puts the streamer's own request ahead of the viewers' in the queue", async () => {
+    const channel = await createTestChannel(db.sql);
+    const base = {
+      channelId: channel.channelId,
+      source: "chat_keyword" as const,
+      inputText: "ну что",
+      target: "viewer" as const,
+      raw: {}
+    };
+    await enqueueEvent(db.sql, boss, { ...base, providerEventId: "v1", viewerLogin: "viewer" });
+    await enqueueEvent(db.sql, boss, {
+      ...base,
+      providerEventId: "s1",
+      viewerLogin: channel.login,
+      target: "streamer",
+      priority: STREAMER_JOB_PRIORITY
+    });
+    const [first] = await boss.fetch<{ viewerLogin: string }>(ROAST_REQUESTED_QUEUE);
+    expect(first!.data.viewerLogin).toBe(channel.login);
   });
 
   it("pre-filters channel and viewer cooldowns", async () => {

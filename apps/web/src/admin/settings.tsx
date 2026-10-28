@@ -45,6 +45,22 @@ const LIMIT_FIELDS: SettingField[] = [
     hint: "На весь сервис, по 3 на посетителя. 0 скрывает демо. Деньги идут в общий бюджет."
   }
 ];
+const SIGNUP_FIELDS: SettingField[] = [
+  {
+    key: "signup_daily_limit",
+    label: "Новых аккаунтов в день без проверки",
+    kind: "number",
+    fallback: 50,
+    hint: "Сверх лимита новые входы попадают в заявки во вкладке «Стримеры». 0 — проверять всех."
+  },
+  {
+    key: "signup_min_account_age_days",
+    label: "Минимальный возраст аккаунта Twitch, дней",
+    kind: "number",
+    fallback: 7,
+    hint: "Аккаунты моложе попадают в заявки: так сложнее нафармить бесплатные каналы."
+  }
+];
 const MODEL_FIELDS: SettingField[] = [
   { key: "model", label: "Генерация", kind: "model", fallback: "claude-sonnet-5-5" },
   // Chat words on the premium tier; events, the command and rewards use "model".
@@ -85,6 +101,14 @@ export function AdminSettings() {
           title="Лимиты и бюджет"
           note="Проверяются до вызова модели. Лимит в консоли Anthropic остаётся последней защитой."
           fields={LIMIT_FIELDS}
+          values={values}
+          reload={load}
+        />
+        <SettingsGroup
+          key={`signup${key}`}
+          title="Регистрация"
+          note="Вход открыт всем: новый стример сразу получает бесплатный тариф. Подозрительные входы ждут вашего решения."
+          fields={SIGNUP_FIELDS}
           values={values}
           reload={load}
         />

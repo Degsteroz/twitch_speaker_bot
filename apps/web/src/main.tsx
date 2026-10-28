@@ -4,7 +4,7 @@ import { createRoot } from "react-dom/client";
 import { AskHost } from "./ask.js";
 import { Admin } from "./admin/index.js";
 import { api, ApiError, type Session } from "./api.js";
-import { MfaChallenge, MfaSetup, Pending, Security } from "./auth.js";
+import { MfaChallenge, MfaSetup, Pending, Security, Suspended } from "./auth.js";
 import { Dashboard } from "./dashboard/index.js";
 import { InvitePage } from "./invite.js";
 import { Landing } from "./landing.js";
@@ -44,6 +44,7 @@ function App() {
   if (route.page === "invite") return <InvitePage code={route.code} signedIn={Boolean(session)} />;
   if (!session) return <Landing />;
   if (session.status === "pending") return <Pending session={session} />;
+  if (session.status === "suspended") return <Suspended session={session} />;
   if (session.mfaRequired) return <MfaChallenge session={session} onDone={loadSession} />;
   if (route.page === "admin") {
     if (session.role !== "owner") {

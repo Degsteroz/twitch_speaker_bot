@@ -274,6 +274,43 @@ describe("what the bot answers and what it says", () => {
   });
 });
 
+describe("toxicity 6, «ноль сожалений»", () => {
+  it("frees mat but still blocks every word Twitch bans for", () => {
+    for (const reply of ["Бля, ну ты и криворукий, сука", "Нахуй такую катку"]) {
+      expect(inspectOutput(reply, "x", [], 6)).toEqual({ allowed: true });
+    }
+    for (const reply of [
+      "Ну ты и пидор",
+      "Играешь как даун",
+      "Аутист за рулём",
+      "Все хачи так играют",
+      "Соси, неудачник",
+      "Сдохни уже",
+      "Хайль гитлер"
+    ]) {
+      expect(inspectOutput(reply, "x", [], 6)).toMatchObject({ allowed: false });
+    }
+  });
+
+  it("keeps the safety block first and spells the Twitch limits out to model and classifier", () => {
+    const prompt = composeRoastPrompt({
+      viewer: "v",
+      message: "m",
+      tone: "tsundere",
+      toxicity: 6
+    });
+    expect(prompt.systemBlocks[0].startsWith(SAFETY_BLOCK)).toBe(true);
+    expect(prompt.system).toContain("«ноль сожалений»");
+    expect(prompt.system).toContain("банят на Twitch");
+    expect(prompt.system).not.toContain("6/5");
+    const classifier = classifierSystemPrompt(6);
+    expect(classifier).toContain("This channel allows Russian mat");
+    expect(classifier).toContain("пидорас");
+    expect(classifier).not.toMatch(/ [.;]/u);
+    expect(classifierSystemPrompt(5)).not.toContain("harshest tone");
+  });
+});
+
 describe("output inspection", () => {
   it("blocks links, contacts, prompt leaks and verbatim echoes of the viewer's text", () => {
     expect(inspectOutput("Зайди на mysite.ru, зритель", "x")).toMatchObject({

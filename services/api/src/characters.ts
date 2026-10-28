@@ -74,15 +74,17 @@ export async function normalizeCharacterImage(input: Buffer): Promise<Buffer | n
 }
 
 async function planAllowsCharacters(sql: Sql, channelId: string): Promise<boolean> {
-  const [row] = await sql<{ plan: string | null }[]>`
-    select p.code plan from channels c
+  const [row] = await sql<{ plan: string | null; unlimited: boolean }[]>`
+    select p.code plan, (u.role='owner' or coalesce(o.unlimited,false)) unlimited
+    from channels c join users u on u.id=c.user_id
+    left join channel_overrides o on o.channel_id=c.id
     left join lateral (
       select plan_id from subscriptions sub where sub.user_id=c.user_id
       and (sub.valid_until is null or sub.valid_until>now()) order by sub.created_at desc limit 1
     ) sub on true
     left join plans p on p.id=sub.plan_id
     where c.id=${channelId}`;
-  return CUSTOM_CHARACTER_PLANS.has(row?.plan ?? "");
+  return Boolean(row?.unlimited) || CUSTOM_CHARACTER_PLANS.has(row?.plan ?? "");
 }
 
 /** The built-in stop list and the service-wide words; a name is said aloud on stream. */

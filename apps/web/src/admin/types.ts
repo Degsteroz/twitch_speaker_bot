@@ -16,6 +16,27 @@ export interface UserRow {
   cost_usd: number;
   enabled: boolean | null;
   created_at: string;
+  /** The owner's channel or an unlimited favourite. */
+  unlimited: boolean;
+  /** The owner's exceptions to the plan for this channel; null: none. */
+  override: ChannelOverride | null;
+  premium_used: number;
+  /** The plan's own values, shown next to the override fields. */
+  plan_premium_roasts: number | null;
+  plan_limit: number | null;
+}
+
+export interface ChannelOverride {
+  unlimited: boolean;
+  zeroRegrets: boolean;
+  monthlyRoastLimit: number | null;
+  premiumRoasts: number | null;
+  minCooldownSec: number | null;
+  model: string | null;
+  chatModel: string | null;
+  economyModel: string | null;
+  economyVoice: "yandex" | "piper" | null;
+  note: string | null;
 }
 
 export interface Roast {

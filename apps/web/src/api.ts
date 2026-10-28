@@ -11,8 +11,13 @@ export class ApiError extends Error {
 }
 
 // Answers that mean "the session changed under you": the app re-reads /me/session and shows
-// the matching screen (2FA prompt, pending approval) instead of a broken page.
-const SESSION_CHANGED_CODES = new Set(["mfa_required", "mfa_setup_required", "pending_approval"]);
+// the matching screen (2FA prompt, pending approval, suspension) instead of a broken page.
+const SESSION_CHANGED_CODES = new Set([
+  "mfa_required",
+  "mfa_setup_required",
+  "pending_approval",
+  "account_suspended"
+]);
 
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const headers = new Headers(init?.headers);
@@ -135,7 +140,7 @@ export const uploadCharacterImage = (id: string, file: File) =>
 export interface Settings {
   tone: "tsundere" | "yandere";
   voice: "male" | "female";
-  toxicity: 1 | 2 | 3 | 4 | 5;
+  toxicity: 1 | 2 | 3 | 4 | 5 | 6;
   cooldownSec: number;
   userCooldownSec: number;
   triggers: Triggers;
@@ -242,6 +247,10 @@ export type BotState = "working" | "paused" | "limit" | "suspended";
 export interface Status {
   month: string;
   plan: string | null;
+  /** The owner's channel or a favourite: no quota, pauses or test limit. */
+  unlimited: boolean;
+  /** The owner opened toxicity 6, "Ноль сожалений", for this channel. */
+  zeroRegrets: boolean;
   /** `!роаст` is a paid feature. */
   commandAvailable: boolean;
   /** The shortest pause the plan allows, in seconds. */
@@ -250,8 +259,8 @@ export interface Status {
   branding: boolean;
   /** Roasts left this month on the best model and voice; null when all of them are. */
   premium: { total: number; remaining: number } | null;
-  /** Dashboard tests today; they never spend the monthly quota. */
-  tests: { limit: number; remaining: number };
+  /** Dashboard tests today; they never spend the monthly quota. null: no limit. */
+  tests: { limit: number; remaining: number } | null;
   /** The overlay page is open right now (in OBS or a browser tab). */
   overlayConnected: boolean;
   /** Twitch's answer to our EventSub subscriptions; null when the channel needs none. */

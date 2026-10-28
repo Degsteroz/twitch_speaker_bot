@@ -15,11 +15,15 @@ export const DEFAULT_USER_COOLDOWN_SECONDS = 120;
 // these, whatever is stored (streamers set 0 and burned a month of quota in an hour).
 export const PREMIUM_MIN_COOLDOWN_SECONDS = 40;
 export const MIN_COOLDOWN_SECONDS = 60;
-export const minCooldownSeconds = (planCode: string | null | undefined) =>
-  planCode === "premium" ? PREMIUM_MIN_COOLDOWN_SECONDS : MIN_COOLDOWN_SECONDS;
-/** The pause that applies: the stored one, never below the plan's minimum. */
-export const effectiveCooldown = (seconds: number, planCode: string | null | undefined) =>
-  Math.max(seconds, minCooldownSeconds(planCode));
+/** The plan's shortest pause, or the owner's override for this channel (channel_overrides). */
+export const minCooldownSeconds = (planCode: string | null | undefined, override?: number | null) =>
+  override ?? (planCode === "premium" ? PREMIUM_MIN_COOLDOWN_SECONDS : MIN_COOLDOWN_SECONDS);
+/** The pause that applies: the stored one, never below the plan's (or override's) minimum. */
+export const effectiveCooldown = (
+  seconds: number,
+  planCode: string | null | undefined,
+  override?: number | null
+) => Math.max(seconds, minCooldownSeconds(planCode, override));
 // One viewer gets at most this many real answers to chat and rewards per window; past it they
 // get stubs. Paid events never count and are never limited.
 export const VIEWER_ROAST_LIMIT = 3;
@@ -67,6 +71,11 @@ export const gameContext = (name: string | null | undefined) => {
   const game = name?.trim().slice(0, 100);
   return game && game !== JUST_CHATTING ? game : undefined;
 };
+// Unlimited channels (the owner's own, and favourites the owner marks) always get the premium
+// tier, and this model unless their override names another: Opus everywhere would eat the budget.
+export const UNLIMITED_MODEL = "claude-sonnet-5-5";
+// pg-boss fetches by priority, then age: the streamer's own messages and rewards jump the line.
+export const STREAMER_JOB_PRIORITY = 1;
 export const ROAST_REQUESTED_QUEUE = "roast.requested";
 // A roast older than the overlay TTL is useless on stream, so jobs are never retried or kept long.
 // notify=true wakes the worker through LISTEN/NOTIFY instead of its 2-second poll.
@@ -87,6 +96,11 @@ export const DEMO_REQUESTED_QUEUE_OPTIONS = Object.freeze({
   retentionSeconds: 600
 });
 export const DEMO_PER_IP_DAILY = 3;
+
+// Open registration with two brakes against account farms: Twitch accounts younger than this and
+// new accounts past the day's limit (UTC) wait for the owner's review. A limit of 0 reviews all.
+export const DEFAULT_SIGNUP_DAILY_LIMIT = 50;
+export const DEFAULT_SIGNUP_MIN_ACCOUNT_AGE_DAYS = 7;
 export const DEFAULT_DEMO_DAILY_LIMIT = 30;
 export const DEMO_MAX_CHARACTERS = 200;
 export const demoRequestSchema = z
@@ -207,8 +221,23 @@ export const toxicitySchema = z.union([
   z.literal(2),
   z.literal(3),
   z.literal(4),
-  z.literal(5)
+  z.literal(5),
+  z.literal(6)
 ]);
+// "Ноль сожалений": past the top of the scale, only where the owner ticked it for the channel
+// (channel_overrides.zero_regrets, or the owner's own channel). Mat is free, the tone is angry;
+// the stop list's always-blocked categories and the classifier do not move. Without the tick the
+// worker plays 6 as 5.
+export const ZERO_REGRETS_TOXICITY = 6;
+export const MAX_REGULAR_TOXICITY = 5;
+// The calls that matter get Sonnet at this level whatever the tier: donations, the command, a call
+// by name and rewards. Ordinary chat words stay on the channel's chat model, angry but cheap.
+export const ZERO_REGRETS_MODEL = "claude-sonnet-5-5";
+export const zeroRegretsUsesSonnet = (source: RoastSource, named: boolean | undefined) =>
+  source === "donation" ||
+  source === "chat_command" ||
+  source === "reward" ||
+  (source === "chat_keyword" && named === true);
 export const roastSourceSchema = z.enum([
   "chat_command",
   "chat_keyword",
@@ -270,6 +299,38 @@ export const roastTierSchema = z.enum(["premium", "economy"]);
 export const voiceProviderSchema = z.enum(["elevenlabs", "yandex", "piper"]);
 /** The best voice an economy roast may use; the next ones still take over on failure. */
 export const economyVoiceSchema = z.enum(["yandex", "piper"]);
+/**
+ * The owner's per-channel exceptions to the plan ("favourites"). null keeps the plan's value.
+ * `unlimited` lifts the quota, pauses, frequency, viewer and test limits and plan features; the
+ * kill switch, the service budget and cap, the stop list and the classifier still apply.
+ */
+export const channelOverrideSchema = z
+  .object({
+    unlimited: z.boolean().default(false),
+    // Opens toxicity 6, "Ноль сожалений", in the streamer's panel.
+    zeroRegrets: z.boolean().default(false),
+    monthlyRoastLimit: z.number().int().min(0).max(100_000).nullable().default(null),
+    premiumRoasts: z.number().int().min(0).max(100_000).nullable().default(null),
+    minCooldownSec: z.number().int().min(0).max(3_600).nullable().default(null),
+    model: z
+      .string()
+      .regex(/^claude-[a-z0-9-]+$/u)
+      .nullable()
+      .default(null),
+    chatModel: z
+      .string()
+      .regex(/^claude-[a-z0-9-]+$/u)
+      .nullable()
+      .default(null),
+    economyModel: z
+      .string()
+      .regex(/^claude-[a-z0-9-]+$/u)
+      .nullable()
+      .default(null),
+    economyVoice: economyVoiceSchema.nullable().default(null),
+    note: z.string().trim().max(500).nullable().default(null)
+  })
+  .strict();
 export const roastStatusSchema = z.enum([
   "queued",
   "blocked_input",
@@ -669,6 +730,7 @@ export type Verdict = z.infer<typeof verdictSchema>;
 export type RoastTier = z.infer<typeof roastTierSchema>;
 export type VoiceProvider = z.infer<typeof voiceProviderSchema>;
 export type EconomyVoice = z.infer<typeof economyVoiceSchema>;
+export type ChannelOverride = z.infer<typeof channelOverrideSchema>;
 export type SimulatedEvent = z.infer<typeof simulatedEventSchema>;
 export type TargetMode = z.infer<typeof targetModeSchema>;
 export type ChannelSettings = z.infer<typeof channelSettingsSchema>;

@@ -129,14 +129,16 @@ export function TestRoast({
         )}
         <button
           className="button secondary"
-          disabled={busy || !viewerLogin.trim() || tests.remaining === 0}
+          disabled={busy || !viewerLogin.trim() || tests?.remaining === 0}
         >
           {busy ? "Генерируем…" : "Запустить тест"}
         </button>
         <small className="hint below">
-          {tests.remaining === 0
-            ? `Тесты на сегодня закончились (${String(tests.limit)} в день). Завтра будут новые.`
-            : `Сегодня осталось ${String(tests.remaining)} из ${String(tests.limit)} тестов.`}
+          {!tests
+            ? "Тесты без ограничений."
+            : tests.remaining === 0
+              ? `Тесты на сегодня закончились (${String(tests.limit)} в день). Завтра будут новые.`
+              : `Сегодня осталось ${String(tests.remaining)} из ${String(tests.limit)} тестов.`}
         </small>
         {result && (
           <p className="feedback" role="status">

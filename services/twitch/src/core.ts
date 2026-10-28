@@ -60,6 +60,8 @@ export async function enqueueEvent(
     declined?: boolean;
     /** A chat word that calls the character by name: the worker may answer it with a stub. */
     named?: boolean;
+    /** pg-boss priority; the streamer's own requests get STREAMER_JOB_PRIORITY. */
+    priority?: number;
     raw: JSONValue;
   }
 ): Promise<boolean> {
@@ -85,7 +87,10 @@ export async function enqueueEvent(
       ...(input.named ? { named: true } : {}),
       requestedAt: new Date().toISOString()
     },
-    input.delaySeconds ? { startAfter: input.delaySeconds } : {}
+    {
+      ...(input.delaySeconds ? { startAfter: input.delaySeconds } : {}),
+      ...(input.priority ? { priority: input.priority } : {})
+    }
   );
   return true;
 }

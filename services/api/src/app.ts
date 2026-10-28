@@ -12,7 +12,11 @@ import {
   COMMAND_PLANS,
   DASHBOARD_TEST_DAILY_LIMIT,
   DEFAULT_DEMO_DAILY_LIMIT,
+  DEFAULT_SIGNUP_DAILY_LIMIT,
+  DEFAULT_SIGNUP_MIN_ACCOUNT_AGE_DAYS,
   DEMO_PER_IP_DAILY,
+  MAX_REGULAR_TOXICITY,
+  ZERO_REGRETS_TOXICITY,
   DEMO_REQUESTED_QUEUE,
   DEMO_REQUESTED_QUEUE_OPTIONS,
   demoRequestSchema,
@@ -25,6 +29,7 @@ import {
   ROAST_REQUESTED_QUEUE,
   ROAST_REQUESTED_QUEUE_OPTIONS,
   TWITCH_SCOPES,
+  channelOverrideSchema,
   channelSettingsSchema,
   economyVoiceSchema,
   effectiveCooldown,
@@ -34,6 +39,7 @@ import {
   storedOverlayRoastSchema,
   testRoastRequestSchema,
   updateSettingsRequestSchema,
+  type UpdateSettingsRequest,
   VOICE_SAMPLE_QUEUE,
   YANDEX_TTS_RUB_PER_REQUEST,
   yandexBillingMonth
@@ -101,7 +107,11 @@ const globalSettingSchemas = {
   yandex_tts_monthly_limit_rub: z.number().min(0).max(100_000),
   elevenlabs_monthly_char_limit: z.number().int().min(0).max(10_000_000),
   // Landing demo answers a day for the whole service; 0 hides the demo.
-  demo_daily_limit: z.number().int().min(0).max(1_000)
+  demo_daily_limit: z.number().int().min(0).max(1_000),
+  // Open registration's brakes: new accounts a day (0 sends everyone to review) and the youngest
+  // Twitch account that skips review.
+  signup_daily_limit: z.number().int().min(0).max(10_000),
+  signup_min_account_age_days: z.number().int().min(0).max(3_650)
 } as const;
 type GlobalSettingKey = keyof typeof globalSettingSchemas;
 
@@ -170,6 +180,10 @@ export async function buildApp(config: ApiConfig) {
     if (!user) return denied(reply, 401, "unauthorized", "Сессия устарела");
     if (user.status === "pending") {
       return denied(reply, 403, "pending_approval", "Заявка ещё не одобрена владельцем");
+    }
+    // With open registration suspension is the owner's main tool: it closes the panel at once.
+    if (user.status === "suspended") {
+      return denied(reply, 403, "account_suspended", "Аккаунт приостановлен владельцем");
     }
     if (user.mfaEnabled && !session(request).mfaAt) {
       return denied(reply, 403, "mfa_required", "Подтвердите вход кодом 2FA");
@@ -374,13 +388,40 @@ export async function buildApp(config: ApiConfig) {
     const role = config.ownerIds.has(twitchUser.id) ? "owner" : "user";
     const login = twitchUser.login.toLowerCase();
 
+    const accountAgeDays = twitchUser.created_at
+      ? (Date.now() - Date.parse(twitchUser.created_at)) / 86_400_000
+      : Number.NaN;
+
     const rows = await sql.begin(async (tx) => {
-      // New logins wait for the owner's approval; the owner and invited logins pass at once.
-      // An existing account keeps its status, except that pending is lifted for the owner.
+      // Open registration: a new login is active at once, unless the Twitch account is too young
+      // or the day's signups are used up; then it waits for the owner like before. The owner and
+      // invited logins always pass. An existing account keeps its status; a pending one is
+      // lifted for the owner, or once it passes the same checks (the account grew old enough).
+      // The lock makes the daily count exact under parallel logins.
+      await tx`select pg_advisory_xact_lock(hashtext('roastbot-signup'))`;
+      const [signup] = await tx<
+        { existing: string | null; today: number; limit: number; minAge: number }[]
+      >`
+        select (select status::text from users where twitch_id=${twitchUser.id}) existing,
+          (select count(*) from users where role='user' and status<>'pending'
+            and created_at >= date_trunc('day', now() at time zone 'UTC') at time zone 'UTC')::int today,
+          coalesce((select (value #>> '{}')::int from global_settings where key='signup_daily_limit'),
+            ${DEFAULT_SIGNUP_DAILY_LIMIT})::int "limit",
+          coalesce((select (value #>> '{}')::int from global_settings
+            where key='signup_min_account_age_days'), ${DEFAULT_SIGNUP_MIN_ACCOUNT_AGE_DAYS})::int "minAge"`;
+      // An unknown account age (Twitch left it out) counts as too young: review, not a pass.
+      const reviewReason =
+        role === "owner" || (signup?.existing && signup.existing !== "pending")
+          ? null
+          : !signup || signup.today >= signup.limit
+            ? "daily_limit"
+            : !(accountAgeDays >= signup.minAge)
+              ? "young_account"
+              : null;
       const [user] = await tx<{ id: string; status: string; created: boolean }[]>`
         insert into users (twitch_id, login, display_name, role, status)
         values (${twitchUser.id}, ${login}, ${twitchUser.display_name}, ${role},
-          ${role === "owner" ? "active" : "pending"})
+          ${reviewReason ? "pending" : "active"})
         on conflict (twitch_id) do update set login=excluded.login,
           display_name=excluded.display_name, role=excluded.role,
           status=case when users.status='pending' and excluded.status='active'
@@ -396,8 +437,12 @@ export async function buildApp(config: ApiConfig) {
         }
       }
       if (user.created) {
+        const payload = {
+          status: user.status,
+          ...(user.status === "pending" && reviewReason ? { review: reviewReason } : {})
+        };
         await tx`insert into audit_log(actor_user_id,action,target,payload)
-          values(${user.id},'user.signup',${login},${sql.json({ status: user.status })})`;
+          values(${user.id},'user.signup',${login},${sql.json(payload)})`;
       }
       const [channel] = await tx<{ id: string }[]>`
         insert into channels (user_id, twitch_login, overlay_token)
@@ -547,8 +592,9 @@ export async function buildApp(config: ApiConfig) {
       : !mfaAt || Date.now() - mfaAt > OWNER_MFA_MAX_AGE_MS
         ? "verify"
         : "ok";
-    // The overlay token is a credential: not before approval and the second factor.
-    const restricted = row.status === "pending" || mfaRequired;
+    // The overlay token is a credential: not before approval and the second factor, and not
+    // for a suspended account.
+    const restricted = row.status !== "active" || mfaRequired;
     const { scopes, ...sessionRow } = row;
     return {
       ...sessionRow,
@@ -667,45 +713,78 @@ export async function buildApp(config: ApiConfig) {
   });
 
   // The plan's minimum pause applies whatever is stored; the panel sees and saves the real one.
-  const planCode = async (channelId: string) => {
-    const [row] = await sql<{ code: string | null }[]>`
-      select p.code from channels c left join lateral (
+  // The owner's override for the channel replaces the plan's floor; an unlimited channel has none.
+  // It also says whether the owner opened toxicity 6 ("Ноль сожалений") for the channel.
+  const pauseFloor = async (channelId: string) => {
+    const [row] = await sql<
+      {
+        code: string | null;
+        unlimited: boolean;
+        minCooldownSec: number | null;
+        zeroRegrets: boolean;
+      }[]
+    >`
+      select p.code, (u.role='owner' or coalesce(o.unlimited,false)) unlimited,
+        o.min_cooldown_sec "minCooldownSec",
+        (u.role='owner' or coalesce(o.zero_regrets,false)) "zeroRegrets"
+      from channels c join users u on u.id=c.user_id left join lateral (
         select plan_id from subscriptions sub where sub.user_id=c.user_id
         and (sub.valid_until is null or sub.valid_until>now()) order by sub.created_at desc limit 1
-      ) sub on true left join plans p on p.id=sub.plan_id where c.id=${channelId}`;
-    return row?.code ?? null;
+      ) sub on true left join plans p on p.id=sub.plan_id
+      left join channel_overrides o on o.channel_id=c.id where c.id=${channelId}`;
+    return {
+      plan: row?.code ?? null,
+      override: row?.unlimited ? 0 : (row?.minCooldownSec ?? null),
+      zeroRegrets: row?.zeroRegrets ?? false
+    };
   };
-  const withPlanPauses = async <T extends { cooldown_sec: number; user_cooldown_sec: number }>(
+  /** A stored 6 without the owner's tick (taken back later) is shown and played as 5. */
+  const allowedToxicity = (toxicity: number, zeroRegrets: boolean) =>
+    toxicity === ZERO_REGRETS_TOXICITY && !zeroRegrets ? MAX_REGULAR_TOXICITY : toxicity;
+  const withPlanPauses = async <
+    T extends { cooldown_sec: number; user_cooldown_sec: number; toxicity: number }
+  >(
     row: T | undefined,
     channelId: string
   ) => {
     if (!row) return row;
-    const plan = await planCode(channelId);
+    const { plan, override, zeroRegrets } = await pauseFloor(channelId);
     return {
       ...row,
-      cooldown_sec: effectiveCooldown(row.cooldown_sec, plan),
-      user_cooldown_sec: effectiveCooldown(row.user_cooldown_sec, plan)
+      toxicity: allowedToxicity(row.toxicity, zeroRegrets),
+      cooldown_sec: effectiveCooldown(row.cooldown_sec, plan, override),
+      user_cooldown_sec: effectiveCooldown(row.user_cooldown_sec, plan, override)
     };
   };
 
   app.get("/settings", { preHandler: requireUser }, async (request) => {
     const { channelId } = session(request);
-    const [row] = await sql<{ cooldown_sec: number; user_cooldown_sec: number }[]>`
-      select * from settings where channel_id=${channelId}`;
+    const [row] = await sql<
+      { cooldown_sec: number; user_cooldown_sec: number; toxicity: number }[]
+    >`select * from settings where channel_id=${channelId}`;
     return withPlanPauses(row, channelId);
   });
-  app.patch("/settings", { preHandler: requireUser }, async (request) => {
-    const patch = updateSettingsRequestSchema.parse(request.body);
+  app.patch("/settings", { preHandler: requireUser }, async (request, reply) => {
+    // Zod 4 fills defaults even into partial fields: keep only what the request actually sent,
+    // or a one-field patch would reset triggers, stop words and toxicity to the defaults.
+    const sent = request.body && typeof request.body === "object" ? request.body : {};
+    const patch: UpdateSettingsRequest = Object.fromEntries(
+      Object.entries(updateSettingsRequestSchema.parse(sent)).filter(([key]) => key in sent)
+    );
     const [current] = await sql<{ settings: unknown }[]>`
       select jsonb_build_object('tone',tone,'voice',voice,'toxicity',toxicity,'cooldownSec',cooldown_sec,
        'userCooldownSec',user_cooldown_sec,'triggers',triggers,'stopWords',stop_words,'enabled',enabled) settings
       from settings where channel_id=${session(request).channelId}`;
     const merged = channelSettingsSchema.parse({ ...(current?.settings as object), ...patch });
-    const plan = await planCode(session(request).channelId);
+    const { plan, override, zeroRegrets } = await pauseFloor(session(request).channelId);
+    if (patch.toxicity === ZERO_REGRETS_TOXICITY && !zeroRegrets) {
+      return denied(reply, 403, "zero_regrets_not_allowed", "Этот уровень открывает владелец");
+    }
     const [updated] = await sql<{ cooldown_sec: number; user_cooldown_sec: number }[]>`
-      update settings set tone=${merged.tone}, voice=${merged.voice}, toxicity=${merged.toxicity},
-       cooldown_sec=${effectiveCooldown(merged.cooldownSec, plan)},
-       user_cooldown_sec=${effectiveCooldown(merged.userCooldownSec, plan)},
+      update settings set tone=${merged.tone}, voice=${merged.voice},
+       toxicity=${allowedToxicity(merged.toxicity, zeroRegrets)},
+       cooldown_sec=${effectiveCooldown(merged.cooldownSec, plan, override)},
+       user_cooldown_sec=${effectiveCooldown(merged.userCooldownSec, plan, override)},
        triggers=${sql.json(merged.triggers)}, stop_words=${merged.stopWords}, enabled=${merged.enabled},
        updated_at=now() where channel_id=${session(request).channelId} returning *`;
     return updated;
@@ -884,10 +963,18 @@ export async function buildApp(config: ApiConfig) {
         premiumRoasts: number | null;
         premiumUsed: number;
         testsUsed: number;
+        unlimited: boolean;
+        minCooldownSec: number | null;
+        zeroRegrets: boolean;
       }[]
     >`
       select s.enabled, u.status "userStatus", coalesce(um.roasts,0)::int used, p.code plan,
-        coalesce(p.monthly_roast_limit,0)::int "limit", p.premium_roasts "premiumRoasts",
+        coalesce(o.monthly_roast_limit, p.monthly_roast_limit, 0)::int "limit",
+        case when o.premium_roasts is not null then o.premium_roasts else p.premium_roasts end
+          "premiumRoasts",
+        (u.role='owner' or coalesce(o.unlimited,false)) unlimited,
+        (u.role='owner' or coalesce(o.zero_regrets,false)) "zeroRegrets",
+        o.min_cooldown_sec "minCooldownSec",
         coalesce(um.premium_roasts,0)::int "premiumUsed",
         coalesce((select roasts from test_usage_daily
           where channel_id=c.id and day=${currentDay()}),0)::int "testsUsed",
@@ -899,6 +986,7 @@ export async function buildApp(config: ApiConfig) {
         and (sub.valid_until is null or sub.valid_until>now()) order by sub.created_at desc limit 1
       ) sub on true
       left join plans p on p.id=sub.plan_id
+      left join channel_overrides o on o.channel_id=c.id
       left join usage_monthly um on um.channel_id=c.id and um.month=${month}
       where c.id=${session(request).channelId}`;
     if (!row) throw new Error("channel_not_found");
@@ -923,7 +1011,7 @@ export async function buildApp(config: ApiConfig) {
         ? "suspended"
         : !row.enabled || killSwitch
           ? "paused"
-          : remaining === 0 || globalLimitReached
+          : (remaining === 0 && !row.unlimited) || globalLimitReached
             ? "limit"
             : "working";
     const channelId = session(request).channelId;
@@ -947,23 +1035,30 @@ export async function buildApp(config: ApiConfig) {
               .map(([type]) => type)
           }
         : null,
+      // The owner's channel and unlimited favourites: no quota, pauses or test limit.
+      unlimited: row.unlimited,
+      // The panel shows toxicity 6, "Ноль сожалений", only when the owner opened it.
+      zeroRegrets: row.zeroRegrets,
       // `!роаст` is a paid feature; the panel shows the switch disabled on the free plan.
-      commandAvailable: COMMAND_PLANS.has(row.plan ?? ""),
-      // The shortest pause the plan allows; the panel's fields start there.
-      minCooldownSec: minCooldownSeconds(row.plan),
+      commandAvailable: row.unlimited || COMMAND_PLANS.has(row.plan ?? ""),
+      // The shortest pause the plan (or the owner's override) allows; the fields start there.
+      minCooldownSec: row.unlimited ? 0 : minCooldownSeconds(row.plan, row.minCooldownSec),
       branding: BRANDED_PLANS.has(row.plan ?? ""),
       // Best model and voice left this month; null when every roast gets them.
       premium:
-        row.premiumRoasts === null
+        row.premiumRoasts === null || row.unlimited
           ? null
           : {
               total: row.premiumRoasts,
               remaining: Math.max(0, row.premiumRoasts - row.premiumUsed)
             },
-      tests: {
-        limit: DASHBOARD_TEST_DAILY_LIMIT,
-        remaining: Math.max(0, DASHBOARD_TEST_DAILY_LIMIT - row.testsUsed)
-      },
+      // null: no daily test limit.
+      tests: row.unlimited
+        ? null
+        : {
+            limit: DASHBOARD_TEST_DAILY_LIMIT,
+            remaining: Math.max(0, DASHBOARD_TEST_DAILY_LIMIT - row.testsUsed)
+          },
       enabled: row.enabled,
       used: row.used,
       limit: row.limit,
@@ -981,9 +1076,13 @@ export async function buildApp(config: ApiConfig) {
     const body = testRoastRequestSchema.parse(request.body ?? {});
     const { channelId } = session(request);
     // A quick answer for the panel; the worker's booking under its lock is the real limit.
-    const [tests] = await sql<{ roasts: number }[]>`
-      select roasts from test_usage_daily where channel_id=${channelId} and day=${currentDay()}`;
-    if ((tests?.roasts ?? 0) >= DASHBOARD_TEST_DAILY_LIMIT) {
+    const [tests] = await sql<{ roasts: number; unlimited: boolean }[]>`
+      select coalesce((select roasts from test_usage_daily
+          where channel_id=c.id and day=${currentDay()}),0)::int roasts,
+        (u.role='owner' or coalesce(o.unlimited,false)) unlimited
+      from channels c join users u on u.id=c.user_id
+      left join channel_overrides o on o.channel_id=c.id where c.id=${channelId}`;
+    if (!tests?.unlimited && (tests?.roasts ?? 0) >= DASHBOARD_TEST_DAILY_LIMIT) {
       return denied(
         reply,
         429,
@@ -1346,12 +1445,23 @@ export async function buildApp(config: ApiConfig) {
       select u.id, u.twitch_id, u.login, u.display_name, u.role, u.status, u.created_at,
         u.totp_enabled_at is not null mfa_enabled, c.id channel_id, c.twitch_login, s.enabled,
         coalesce(p.code::text,'none') plan, sub.valid_until,
-        coalesce(um.roasts,0)::int used, coalesce(p.monthly_roast_limit,0)::int "limit",
+        coalesce(um.roasts,0)::int used,
+        coalesce(o.monthly_roast_limit, p.monthly_roast_limit, 0)::int "limit",
         coalesce(um.cost_usd,0)::float8 cost_usd,
         coalesce((select sum(amount-used) from gifted_quota g
-          where g.channel_id=c.id and g.month=${month}),0)::int gifted
+          where g.channel_id=c.id and g.month=${month}),0)::int gifted,
+        (u.role='owner' or coalesce(o.unlimited,false)) unlimited,
+        case when o.channel_id is null then null else jsonb_build_object(
+          'unlimited',o.unlimited,'zeroRegrets',o.zero_regrets,
+          'monthlyRoastLimit',o.monthly_roast_limit,
+          'premiumRoasts',o.premium_roasts,'minCooldownSec',o.min_cooldown_sec,'model',o.model,
+          'chatModel',o.chat_model,'economyModel',o.economy_model,'economyVoice',o.economy_voice,
+          'note',o.note) end override,
+        coalesce(um.premium_roasts,0)::int premium_used, p.premium_roasts plan_premium_roasts,
+        p.monthly_roast_limit plan_limit
       from users u left join channels c on c.user_id=u.id
       left join settings s on s.channel_id=c.id
+      left join channel_overrides o on o.channel_id=c.id
       left join lateral (
         select plan_id, valid_until from subscriptions where user_id=u.id
         and (valid_until is null or valid_until>now()) order by created_at desc limit 1
@@ -1379,6 +1489,39 @@ export async function buildApp(config: ApiConfig) {
     });
     return { id, status: "active" };
   });
+  // Favourites: the owner's exceptions to the plan for one channel. Saving all-null fields with
+  // unlimited off is the same as removing the row.
+  app.put("/admin/users/:id/override", { preHandler: requireOwner }, async (request, reply) => {
+    const { id } = userIdParams.parse(request.params);
+    const body = channelOverrideSchema.parse(request.body);
+    const [channel] = await sql<{ id: string }[]>`select id from channels where user_id=${id}`;
+    if (!channel) return denied(reply, 404, "channel_not_found", "У аккаунта нет канала");
+    const empty = Object.values(body).every(
+      (value) => value === null || value === "" || value === false
+    );
+    await sql.begin(async (tx) => {
+      if (empty) await tx`delete from channel_overrides where channel_id=${channel.id}`;
+      else {
+        await tx`insert into channel_overrides(channel_id,unlimited,zero_regrets,monthly_roast_limit,
+            premium_roasts,min_cooldown_sec,model,chat_model,economy_model,economy_voice,note,
+            updated_by_user_id)
+          values(${channel.id},${body.unlimited},${body.zeroRegrets},${body.monthlyRoastLimit},
+            ${body.premiumRoasts},
+            ${body.minCooldownSec},${body.model},${body.chatModel},${body.economyModel},
+            ${body.economyVoice},${body.note || null},${session(request).userId})
+          on conflict(channel_id) do update set unlimited=excluded.unlimited,
+            zero_regrets=excluded.zero_regrets,
+            monthly_roast_limit=excluded.monthly_roast_limit, premium_roasts=excluded.premium_roasts,
+            min_cooldown_sec=excluded.min_cooldown_sec, model=excluded.model,
+            chat_model=excluded.chat_model, economy_model=excluded.economy_model,
+            economy_voice=excluded.economy_voice, note=excluded.note,
+            updated_by_user_id=excluded.updated_by_user_id, updated_at=now()`;
+      }
+      await audit(tx, request, empty ? "override.delete" : "override.set", id, body);
+    });
+    return { id, override: empty ? null : body };
+  });
+
   // Support case: a streamer lost the phone and the recovery codes. The owner's own factor is
   // never reset from the UI: a stolen owner session must not be able to drop the owner's 2FA.
   app.post("/admin/users/:id/mfa/reset", { preHandler: requireOwner }, async (request, reply) => {

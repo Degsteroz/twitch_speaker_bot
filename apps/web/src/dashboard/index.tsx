@@ -19,7 +19,7 @@ import {
 import { ActivityLog } from "./activity.js";
 import { BillingCard } from "./billing.js";
 import { CustomCharacters } from "./characters.js";
-import { Choice, ScaleChoice, targetSteps, TOXICITY_STEPS } from "./controls.js";
+import { Choice, ScaleChoice, targetSteps, TOXICITY_STEPS, ZERO_REGRETS_STEP } from "./controls.js";
 import { OptOuts } from "./optouts.js";
 import { OverlaySetup } from "./overlay.js";
 import { TelegramCard } from "./telegram.js";
@@ -206,7 +206,7 @@ export function Dashboard({
           ? "Бот выключен кнопкой справа."
           : status.globalLimitReached
             ? "Достигнут общий лимит сервиса на этот месяц."
-            : status.remaining === 0
+            : status.remaining === 0 && !status.unlimited
               ? "Квота канала на месяц закончилась."
               : `Канал #${session.channelLogin} подключён`;
   const total = status.limit + status.gifted;
@@ -216,7 +216,7 @@ export function Dashboard({
     roastsPerMinute(settings.triggers, settings.cooldownSec, status.commandAvailable)
   );
   // A typical stream is a few hours; less than that means the quota burns out on air.
-  const quotaShort = minutes !== null && status.remaining > 0 && minutes < 180;
+  const quotaShort = !status.unlimited && minutes !== null && status.remaining > 0 && minutes < 180;
   return (
     <Shell session={session}>
       <div className="page-title">
@@ -294,32 +294,47 @@ export function Dashboard({
         </Card>
         <Card tour="quota">
           <p className="label">КВОТА · {status.month}</p>
-          <div className="quota">
-            <strong>{status.remaining}</strong>
-            <span>
-              осталось
-              <br />
-              из {total}
-            </span>
-          </div>
-          <div className="progress">
-            <i
-              style={{
-                width: `${String(Math.min(100, (status.used / Math.max(1, total)) * 100))}%`
-              }}
-            />
-          </div>
-          <small>
-            Использовано {status.used}
-            {status.gifted ? <> · подарено {status.gifted}</> : null}
-          </small>
+          {status.unlimited ? (
+            <div className="quota">
+              <strong>∞</strong>
+              <span>
+                без ограничений
+                <br />
+                использовано {status.used}
+              </span>
+            </div>
+          ) : (
+            <div className="quota">
+              <strong>{status.remaining}</strong>
+              <span>
+                осталось
+                <br />
+                из {total}
+              </span>
+            </div>
+          )}
+          {!status.unlimited && (
+            <>
+              <div className="progress">
+                <i
+                  style={{
+                    width: `${String(Math.min(100, (status.used / Math.max(1, total)) * 100))}%`
+                  }}
+                />
+              </div>
+              <small>
+                Использовано {status.used}
+                {status.gifted ? <> · подарено {status.gifted}</> : null}
+              </small>
+            </>
+          )}
           {status.premium && (
             <small className="hint below">
               Лучшая модель и голос: осталось {status.premium.remaining} из {status.premium.total} в
               этом месяце, дальше героиня отвечает попроще.
             </small>
           )}
-          {minutes !== null && status.remaining > 0 && (
+          {!status.unlimited && minutes !== null && status.remaining > 0 && (
             <p className={`quota-estimate ${quotaShort ? "warn" : ""}`} role="status">
               С такими триггерами квоты хватит примерно на <strong>{durationText(minutes)}</strong>{" "}
               эфира.
@@ -371,7 +386,7 @@ export function Dashboard({
             <ScaleChoice
               label="Токсичность"
               value={settings.toxicity}
-              steps={TOXICITY_STEPS}
+              steps={status.zeroRegrets ? [...TOXICITY_STEPS, ZERO_REGRETS_STEP] : TOXICITY_STEPS}
               onChange={(value) => patch("toxicity", value as Settings["toxicity"])}
             />
           </Card>

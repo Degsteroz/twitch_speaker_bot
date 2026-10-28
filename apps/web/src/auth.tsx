@@ -13,14 +13,34 @@ export function Pending({ session }: { session: Session }) {
         <p className="label">ЗАЯВКА ОТПРАВЛЕНА</p>
         <h2>Ждём одобрения владельца</h2>
         <p>
-          Канал <strong>#{session.channelLogin}</strong> зарегистрирован. Доступ к панели откроется,
-          когда владелец сервиса одобрит заявку. Повторно входить не нужно — просто обновите
-          страницу позже.
+          Канал <strong>#{session.channelLogin}</strong> зарегистрирован. Совсем новые аккаунты
+          Twitch и регистрации сверх дневного лимита владелец сервиса проверяет вручную. Доступ к
+          панели откроется после одобрения — просто обновите страницу позже.
         </p>
         <div className="auth-actions">
           <button className="button primary" onClick={() => location.reload()}>
             Проверить снова
           </button>
+          <button className="button secondary" onClick={() => void logout()}>
+            Выйти
+          </button>
+        </div>
+      </section>
+    </main>
+  );
+}
+
+export function Suspended({ session }: { session: Session }) {
+  return (
+    <main className="auth-page">
+      <section className="card auth-card">
+        <p className="label">ДОСТУП ЗАКРЫТ</p>
+        <h2>Аккаунт приостановлен</h2>
+        <p>
+          Бот на канале <strong>#{session.channelLogin}</strong> выключен владельцем сервиса. Если
+          это ошибка, свяжитесь с ним.
+        </p>
+        <div className="auth-actions">
           <button className="button secondary" onClick={() => void logout()}>
             Выйти
           </button>

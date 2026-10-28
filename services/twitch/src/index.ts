@@ -10,6 +10,7 @@ import {
   REWARD_EVERY,
   ROAST_REQUESTED_QUEUE,
   ROAST_REQUESTED_QUEUE_OPTIONS,
+  STREAMER_JOB_PRIORITY,
   TELEGRAM_NOTIFY_QUEUE,
   triggerSettingsSchema,
   type TriggerSettings
@@ -72,6 +73,8 @@ interface ChannelRow {
   triggers: unknown;
   scopes: string[];
   planCode: string | null;
+  /** The owner's channel or an unlimited favourite: no frequency, pauses or plan gates. */
+  unlimited: boolean;
   /** The premium character's name on this channel, when she is usable. */
   characterName: string | null;
   accessCiphertext: string;
@@ -96,6 +99,7 @@ async function activeChannels(): Promise<Channel[]> {
       t.access_token_iv "accessIv",t.access_token_tag "accessTag",
       t.refresh_token_ciphertext "refreshCiphertext",t.refresh_token_iv "refreshIv",
       t.refresh_token_tag "refreshTag",t.expires_at "expiresAt",p.code "planCode",
+      (u.role='owner' or coalesce(o.unlimited,false)) unlimited,
       coalesce(s.character_name, ch.name) "characterName"
     from channels c join users u on u.id=c.user_id join settings s on s.channel_id=c.id
     join twitch_tokens t on t.channel_id=c.id
@@ -107,6 +111,7 @@ async function activeChannels(): Promise<Channel[]> {
       order by sub.created_at desc limit 1
     ) sub on true
     left join plans p on p.id=sub.plan_id
+    left join channel_overrides o on o.channel_id=c.id
     where u.status='active' and s.enabled=true`;
   return rows.flatMap((row) => {
     // Rows saved before newer trigger fields existed are completed with defaults here.
@@ -159,25 +164,28 @@ chat.on("message", (channelName, tags, message, self) => {
     ).catch(console.error);
     return;
   }
+  const isBroadcaster = tags["user-id"] === channel.twitchId;
   const roast = chatTrigger(
     {
       message,
       username: viewerLogin,
       displayName: tags["display-name"] ?? viewerLogin,
-      isBroadcaster: tags["user-id"] === channel.twitchId
+      isBroadcaster
     },
     channel.triggers,
     {
-      commandAllowed: COMMAND_PLANS.has(channel.planCode ?? ""),
-      ...(channel.characterName && CUSTOM_CHARACTER_PLANS.has(channel.planCode ?? "")
+      commandAllowed: channel.unlimited || COMMAND_PLANS.has(channel.planCode ?? ""),
+      ...(channel.characterName &&
+      (channel.unlimited || CUSTOM_CHARACTER_PLANS.has(channel.planCode ?? ""))
         ? { characterName: channel.characterName }
         : {})
     }
   );
   if (!roast) return;
   void (async () => {
-    // Only every Nth message with a trigger word is answered; the others stay silent.
-    if (roast.source === "chat_keyword") {
+    // Only every Nth message with a trigger word is answered; the others stay silent. An
+    // unlimited channel answers every one.
+    if (roast.source === "chat_keyword" && !channel.unlimited) {
       if (!keywordGate.due(channel.id, KEYWORD_EVERY[channel.triggers.chatFrequency])) return;
       // A plain word on a pause is dropped and stays due; a call by name still reaches the worker,
       // which answers it with a stub so the viewer knows the bot heard them.
@@ -193,6 +201,7 @@ chat.on("message", (channelName, tags, message, self) => {
       inputText: roast.inputText,
       target: roast.target,
       ...(roast.named ? { named: true } : {}),
+      ...(isBroadcaster ? { priority: STREAMER_JOB_PRIORITY } : {}),
       ...(await withGame(channel)),
       raw: { tags, message }
     });
@@ -407,7 +416,7 @@ class EventSubConnection {
     if (!roast) return;
     // Every Nth reward gets a roast, the others a short "no" (REWARD_DECLINED_STUB).
     let declined = false;
-    if (roast.source === "reward") {
+    if (roast.source === "reward" && !this.channel.unlimited) {
       declined = !rewardGate.due(
         this.channel.id,
         REWARD_EVERY[this.channel.triggers.chatFrequency]
@@ -424,6 +433,8 @@ class EventSubConnection {
       target: roast.target,
       ...(roast.eventSummary ? { eventSummary: roast.eventSummary } : {}),
       ...(declined ? { declined } : {}),
+      // The streamer redeeming their own reward is the streamer's request too.
+      ...(roast.viewerId === this.channel.twitchId ? { priority: STREAMER_JOB_PRIORITY } : {}),
       ...(await withGame(this.channel)),
       raw: JSON.parse(raw) as JSONValue
     });

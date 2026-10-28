@@ -890,6 +890,147 @@ describe("model and voice by plan", () => {
   });
 });
 
+describe("owner and favourites", () => {
+  it("lifts every channel limit for the owner and answers on Sonnet with the best voice", async () => {
+    channel = await createTestChannel(db.sql, { role: "owner", plan: "free" });
+    await db.sql`update global_settings set value='"claude-opus-5-5"'::jsonb where key='model'`;
+    await db.sql`update plans set monthly_roast_limit=1 where code='free'`;
+    await db.sql`delete from test_usage_daily`;
+    try {
+      const anthropic = fakeAnthropic({ text: "Раз" });
+      const pipeline = deps(anthropic.client);
+      pipeline.config = {
+        ...pipeline.config,
+        ELEVENLABS_API_KEY: "el-key",
+        ELEVENLABS_VOICE_TSUNDERE: "voice-mitsuki"
+      };
+      // The command on the free plan, a chat word, the same viewer again and again, past the quota
+      // and the daily tests: no pause, no stub, no cheap model.
+      const sources: RoastSource[] = [
+        "chat_command",
+        "chat_command",
+        "chat_keyword",
+        "chat_command",
+        "reward"
+      ];
+      for (const source of sources) {
+        expect((await processRoast(await job({ source }), pipeline)).status).toBe("done");
+      }
+      for (let index = 0; index <= DASHBOARD_TEST_DAILY_LIMIT; index += 1) {
+        expect((await processRoast(await job({ source: "dashboard_test" }), pipeline)).status).toBe(
+          "done"
+        );
+      }
+      const rows = await db.sql<{ tier: string; model: string; voice_provider: string }[]>`
+        select tier, model, voice_provider from roasts where channel_id=${channel.channelId}`;
+      expect(new Set(rows.map((row) => `${row.tier}/${row.model}/${row.voice_provider}`))).toEqual(
+        new Set(["premium/claude-sonnet-5-5/elevenlabs"])
+      );
+      expect(
+        await db.sql`select 1 from cooldown_state where channel_id=${channel.channelId}`
+      ).toHaveLength(0);
+      // Counted for statistics and the service cap; tests are not.
+      expect(await usage()).toMatchObject({ roasts: sources.length });
+
+      // The global guards still hold.
+      await db.sql`update global_settings set value='true'::jsonb where key='kill_switch'`;
+      expect(await processRoast(await job(), pipeline)).toMatchObject({
+        status: "skipped",
+        reason: "global_kill_switch"
+      });
+    } finally {
+      await db.sql`update global_settings set value='"claude-sonnet-5-5"'::jsonb where key='model'`;
+      await db.sql`update plans set monthly_roast_limit=10 where code='free'`;
+      await db.sql`delete from test_usage_daily`;
+    }
+  });
+
+  it("applies a favourite's own limit, models and pause floor to that channel only", async () => {
+    await db.sql`insert into channel_overrides(channel_id,monthly_roast_limit,model,chat_model,
+        min_cooldown_sec)
+      values(${channel.channelId},2,'claude-opus-5-5','claude-sonnet-5-5',5)`;
+    await db.sql`update settings set cooldown_sec=0, user_cooldown_sec=0
+      where channel_id=${channel.channelId}`;
+    const anthropic = fakeAnthropic({ text: "Раз" });
+    expect((await processRoast(await job(), deps(anthropic.client))).status).toBe("done");
+    expect(anthropic.create.mock.calls[0]![0].model).toBe("claude-opus-5-5");
+    const [pause] = await db.sql<{ seconds: number }[]>`
+      select extract(epoch from next_allowed_at - now())::int seconds from cooldown_state
+      where channel_id=${channel.channelId} and scope='channel'`;
+    expect(pause!.seconds).toBeLessThanOrEqual(5);
+
+    await db.sql`delete from cooldown_state where channel_id=${channel.channelId}`;
+    anthropic.create.mockClear();
+    expect(
+      (await processRoast(await job({ source: "chat_keyword" }), deps(anthropic.client))).status
+    ).toBe("done");
+    expect(anthropic.create.mock.calls[0]![0].model).toBe("claude-sonnet-5-5");
+    // The classifier never follows the override.
+    expect(anthropic.create.mock.calls[1]![0].model).toBe("claude-sonnet-5-5");
+    // Premium's 300 a month is 2 for this channel.
+    expect(await processRoast(await job({ source: "raid" }), deps(anthropic.client))).toMatchObject(
+      { status: "skipped", reason: "channel_quota_exceeded" }
+    );
+
+    // Another premium channel keeps the plan's values.
+    channel = await createTestChannel(db.sql, { plan: "premium" });
+    const other = fakeAnthropic({ text: "Раз" });
+    await processRoast(await job({ source: "raid" }), deps(other.client));
+    expect(other.create.mock.calls[0]![0].model).toBe("claude-sonnet-5-5");
+  });
+});
+
+describe("«ноль сожалений»", () => {
+  it("sends donations, the command, calls by name and rewards to Sonnet, chat words to the chat model", async () => {
+    await db.sql`insert into channel_overrides(channel_id,zero_regrets)
+      values(${channel.channelId},true)`;
+    await db.sql`update settings set toxicity=6, cooldown_sec=0, user_cooldown_sec=0
+      where channel_id=${channel.channelId}`;
+    await db.sql`update global_settings set value='"claude-opus-5-5"'::jsonb where key='model'`;
+    try {
+      const anthropic = fakeAnthropic({ text: "Бля, ну и катка" });
+      const runs: [Parameters<typeof job>[0], string][] = [
+        [{ source: "donation" }, "claude-sonnet-5-5"],
+        [{ source: "chat_command" }, "claude-sonnet-5-5"],
+        [{ source: "reward" }, "claude-sonnet-5-5"],
+        [{ source: "chat_keyword", named: true }, "claude-sonnet-5-5"],
+        [{ source: "chat_keyword" }, "claude-haiku-5-5"],
+        // Other events keep the global model.
+        [{ source: "raid" }, "claude-opus-5-5"]
+      ];
+      for (const [index, [overrides, model]] of runs.entries()) {
+        await db.sql`delete from cooldown_state where channel_id=${channel.channelId}`;
+        anthropic.create.mockClear();
+        const outcome = await processRoast(
+          await job({ ...overrides, viewerLogin: `viewer${String(index)}` }),
+          deps(anthropic.client)
+        );
+        // Mat passes the output checks at this level.
+        expect(outcome.status).toBe("done");
+        const [generation, classifier] = anthropic.create.mock.calls.map(([request]) => request);
+        expect(generation!.model).toBe(model);
+        expect(systemText(generation)).toContain("«ноль сожалений»");
+        expect(classifier!.model).toBe("claude-sonnet-5-5");
+      }
+      const [stored] = await db.sql<{ toxicity: number }[]>`
+        select toxicity from roasts where channel_id=${channel.channelId} limit 1`;
+      expect(stored!.toxicity).toBe(6);
+    } finally {
+      await db.sql`update global_settings set value='"claude-sonnet-5-5"'::jsonb where key='model'`;
+    }
+  });
+
+  it("plays a stored 6 as 5 once the owner takes the tick back", async () => {
+    await db.sql`update settings set toxicity=6 where channel_id=${channel.channelId}`;
+    const anthropic = fakeAnthropic({ text: "Раз" });
+    const outcome = await processRoast(await job({ source: "reward" }), deps(anthropic.client));
+    expect(systemText(anthropic.create.mock.calls[0]![0])).toContain("Уровень токсичности: 5/5");
+    const [row] = await db.sql<{ toxicity: number }[]>`
+      select toxicity from roasts where id=${outcome.roastId}`;
+    expect(row!.toxicity).toBe(5);
+  });
+});
+
 describe("viewer opt-out", () => {
   it("skips the viewer's chat triggers and turns their paid events on the streamer", async () => {
     await db.sql`insert into viewer_optouts(channel_id,viewer_login)

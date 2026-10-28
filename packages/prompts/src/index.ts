@@ -73,8 +73,14 @@ const TOXICITY_RULES: Readonly<Record<Toxicity, string>> = Object.freeze({
   2: "Колкость без злобы, одна-две короткие фразы, без грубых слов.",
   3: "Заметное раздражение и сарказм, ровно две короткие фразы, без грубых слов.",
   4: "Резкий и жёсткий сарказм; можно грубость вроде «жопа», «задница», «собака», «дебил», но не мат.",
-  5: "Максимум остроумной язвительности; можно грубость и мат, если он делает шутку смешнее, а не в каждой фразе; границы безопасности остаются неизменными."
+  5: "Максимум остроумной язвительности; можно грубость и мат, если он делает шутку смешнее, а не в каждой фразе; границы безопасности остаются неизменными.",
+  6: "Ноль сожалений: зло, жёстко, без жалости и без смягчений, как гранит. Мат свободно, в любой фразе, грубость в полную силу — но бей по поступку, игре и решениям, а не по тому, кто человек есть. Никаких слюров и оскорблений по признакам (включая «пидор», «даун», «аутист» и национальные клички), угроз, сексуального унижения и самоповреждения: за это банят на Twitch, и блок безопасности здесь главнее."
 });
+
+const toxicityLine = (toxicity: Toxicity) =>
+  toxicity === 6
+    ? `Уровень токсичности: «ноль сожалений», выше максимума. ${TOXICITY_RULES[6]}`
+    : `Уровень токсичности: ${String(toxicity)}/5. ${TOXICITY_RULES[toxicity]}`;
 
 export function escapePromptData(value: string): string {
   return value
@@ -109,6 +115,14 @@ export function classifierSystemPrompt(toxicity: Toxicity): string {
     mat
       ? ". This channel allows Russian mat: mat on its own is not a reason to block."
       : "; Russian mat (хуй, пизда, ебать, блядь and their derivatives) in any spelling.",
+    ...(toxicity === 6
+      ? [
+          "This channel asked for the harshest tone: angry, merciless roasts with mat about play,",
+          "skill and choices are allowed. Still BLOCK anything Twitch bans for: slurs used as",
+          "insults even when common in mat (пидор, пидорас, педик, даун, аутист, ethnic nicknames),",
+          "attacks on who a person is rather than what they did, threats and sexual remarks."
+        ]
+      : []),
     "Coarse words such as жопа, задница, собака, дурак, дебил are not a reason to block.",
     "Otherwise answer ALLOW. Reply with exactly one word: ALLOW or BLOCK."
   ]
@@ -258,7 +272,7 @@ ${MEANING_RULES}
 ${NICKNAME_RULES}`;
   const persona = `[ПЕРСОНАЖ]
 Ты — стрим-бот в образе ${character ? `героини, чьё имя в <name>; ${ARCHETYPE_DESCRIPTIONS[character.archetype]}` : builtInDescription(tone)}.
-Уровень токсичности: ${toxicity}/5. ${TOXICITY_RULES[toxicity]}
+${toxicityLine(toxicity)}
 Токсичность меняет только остроту стиля, никогда не ослабляет блок безопасности.
 Пиши нейтрально и предметно: не описывай собственные мысли и ощущения («пытаюсь понять», «звучит как заклинание»), не сравнивай себя или зрителя с магией, не комментируй, как написано сообщение, и не придумывай сюжет. Колкость — про конкретное действие, решение или ошибку зрителя или стрима.`;
   const perRequest = `${TARGET_INSTRUCTIONS[target]}${game ? `\n\n${GAME_RULES}` : ""}${history ? `\n\n${MEMORY_RULES}` : ""}`;

@@ -661,6 +661,9 @@ legend,
 .segment.scale.steps-3 {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
+.segment.scale.steps-6 {
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+}
 .check.locked {
   opacity: 0.6;
 }

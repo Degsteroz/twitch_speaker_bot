@@ -55,6 +55,11 @@ import {
   type Tone,
   type Toxicity,
   type Voice,
+  MAX_REGULAR_TOXICITY,
+  UNLIMITED_MODEL,
+  ZERO_REGRETS_MODEL,
+  ZERO_REGRETS_TOXICITY,
+  zeroRegretsUsesSonnet,
   yandexBillingMonth,
   yandexTtsRequestLimit
 } from "@roastbot/shared";
@@ -84,6 +89,17 @@ interface ChannelContext {
   premiumRoasts: number | null;
   economyModel: string;
   economyVoice: EconomyVoice;
+  /**
+   * The owner's own channel or a favourite marked unlimited: no quota, pauses or viewer limit,
+   * every plan feature, always the premium tier. Global guards and moderation still apply.
+   */
+  unlimited: boolean;
+  /** The owner's per-channel models and pause floor (channel_overrides); null keeps the default. */
+  overrideModel: string | null;
+  overrideChatModel: string | null;
+  minCooldownSec: number | null;
+  /** The owner opened toxicity 6 for this channel; without it a stored 6 plays as 5. */
+  zeroRegrets: boolean;
   /** The chosen premium character, when it is usable: own or published, with a picture. */
   characterId: string | null;
   characterName: string | null;
@@ -167,9 +183,18 @@ async function loadContext(sql: Sql, channelId: string): Promise<ChannelContext 
     select u.status "userStatus", c.twitch_login "streamerLogin", s.enabled, s.tone, s.voice,
       s.toxicity,
       s.cooldown_sec "cooldownSec", s.user_cooldown_sec "userCooldownSec",
-      s.stop_words "stopWords", s.triggers, p.monthly_roast_limit "monthlyLimit",
-      p.code "planCode", p.premium_roasts "premiumRoasts", p.economy_model "economyModel",
-      p.economy_voice "economyVoice", ch.id "characterId",
+      s.stop_words "stopWords", s.triggers,
+      case when p.id is not null then coalesce(o.monthly_roast_limit, p.monthly_roast_limit)
+        end "monthlyLimit",
+      p.code "planCode",
+      case when o.premium_roasts is not null then o.premium_roasts else p.premium_roasts end
+        "premiumRoasts",
+      coalesce(o.economy_model, p.economy_model) "economyModel",
+      coalesce(o.economy_voice, p.economy_voice::text) "economyVoice",
+      (u.role='owner' or coalesce(o.unlimited, false)) unlimited,
+      (u.role='owner' or coalesce(o.zero_regrets, false)) "zeroRegrets",
+      o.model "overrideModel", o.chat_model "overrideChatModel",
+      o.min_cooldown_sec "minCooldownSec", ch.id "characterId",
       coalesce(s.character_name, ch.name) "characterName", ch.archetype,
       v.id "characterVoiceId", ch.image_hash "imageHash"
     from channels c join users u on u.id=c.user_id join settings s on s.channel_id=c.id
@@ -179,10 +204,14 @@ async function loadContext(sql: Sql, channelId: string): Promise<ChannelContext 
       order by sub.created_at desc limit 1
     ) sub on true
     left join plans p on p.id=sub.plan_id
+    left join channel_overrides o on o.channel_id=c.id
     left join characters ch on ch.id=s.character_id and ch.image_hash is not null
       and (ch.author_channel_id=c.id or ch.status='published')
     left join voices v on v.id=ch.voice_id and v.enabled
     where c.id=${channelId}`;
+  if (context && context.toxicity === ZERO_REGRETS_TOXICITY && !context.zeroRegrets) {
+    context.toxicity = MAX_REGULAR_TOXICITY;
+  }
   return context;
 }
 
@@ -190,7 +219,7 @@ function rejectionFor(context: ChannelContext | undefined): string | undefined {
   if (!context) return "channel_not_found";
   if (context.userStatus !== "active") return "user_suspended";
   if (!context.enabled) return "channel_disabled";
-  if (context.monthlyLimit === null) return "no_active_plan";
+  if (context.monthlyLimit === null && !context.unlimited) return "no_active_plan";
   return undefined;
 }
 
@@ -238,6 +267,17 @@ async function reserve(
       return rejected("global_budget_exceeded");
     }
 
+    if (context.unlimited) {
+      // The owner's channel and unlimited favourites: past the global guards nothing stops them.
+      // The roast is still counted, so the service cap and the statistics stay true.
+      if (job.source !== "dashboard_test") {
+        await tx`
+          insert into usage_monthly(channel_id,month,roasts) values(${job.channelId},${month},1)
+          on conflict(channel_id,month) do update set roasts=usage_monthly.roasts+1,updated_at=now()`;
+      }
+      return { tier: "premium" };
+    }
+
     if (job.source === "dashboard_test") {
       // Tests skip the monthly quota and cooldowns but not the global guards above.
       const booked = await tx`
@@ -276,8 +316,16 @@ async function reserve(
         if ((answered?.count ?? 0) >= VIEWER_ROAST_LIMIT) return rejected("viewer_limit");
       }
       // Never below the plan's minimum, whatever the channel stored.
-      const channelPause = effectiveCooldown(context.cooldownSec, context.planCode);
-      const viewerPause = effectiveCooldown(context.userCooldownSec, context.planCode);
+      const channelPause = effectiveCooldown(
+        context.cooldownSec,
+        context.planCode,
+        context.minCooldownSec
+      );
+      const viewerPause = effectiveCooldown(
+        context.userCooldownSec,
+        context.planCode,
+        context.minCooldownSec
+      );
       await tx`
         insert into cooldown_state(channel_id,scope,subject_key,next_allowed_at) values
          (${job.channelId},'channel','*',now()+${channelPause}*interval '1 second'),
@@ -733,7 +781,11 @@ export async function processRoast(
     }
     // `!роаст` is a paid feature. The twitch service drops it on free channels already; this is
     // the authoritative check for a job queued before a downgrade.
-    if (job.source === "chat_command" && !COMMAND_PLANS.has(context.planCode ?? "")) {
+    if (
+      job.source === "chat_command" &&
+      !context.unlimited &&
+      !COMMAND_PLANS.has(context.planCode ?? "")
+    ) {
       return await settle("skipped", "command_not_in_plan");
     }
     // The viewer said "!роаст-стоп": chat triggers from them are skipped, paid events still play
@@ -761,7 +813,7 @@ export async function processRoast(
       context.characterName &&
       context.archetype &&
       context.imageHash &&
-      CUSTOM_CHARACTER_PLANS.has(context.planCode ?? "")
+      (context.unlimited || CUSTOM_CHARACTER_PLANS.has(context.planCode ?? ""))
         ? {
             id: context.characterId,
             name: context.characterName,
@@ -776,7 +828,7 @@ export async function processRoast(
     // A reward the frequency passed over: a short "no", no quota, no model.
     if (job.declined) return await stub("stub_declined");
 
-    const reservation = await reserve(deps, job, context.monthlyLimit!, context);
+    const reservation = await reserve(deps, job, context.monthlyLimit ?? 0, context);
     if ("rejected" in reservation) {
       // Someone called the bot directly during a pause or past their limit: a stub, so nobody
       // thinks the bot is down. Everything else (quota, budget) stays silent.
@@ -788,16 +840,27 @@ export async function processRoast(
 
     const globalModel = await globalValue(deps.sql, "model", DEFAULT_ANTHROPIC_MODEL);
     // Chat words are background chatter nobody paid for: the cheap chat model answers them on the
-    // premium tier too. Paid events, the command and rewards get the global model.
+    // premium tier too. Paid events, the command and rewards get the global model. The owner's
+    // override for the channel wins; an unlimited channel never drops to the cheap chat model.
+    // "Ноль сожалений" sends the calls that matter to Sonnet on any tier; plain chat words keep
+    // whatever chat model the channel has.
     const model =
-      tier !== "premium"
-        ? context.economyModel
-        : job.source === "chat_keyword"
-          ? await globalValue(deps.sql, "chat_model", DEFAULT_CHAT_MODEL)
-          : globalModel;
+      context.toxicity === ZERO_REGRETS_TOXICITY && zeroRegretsUsesSonnet(job.source, job.named)
+        ? ZERO_REGRETS_MODEL
+        : context.unlimited
+          ? ((job.source === "chat_keyword" ? context.overrideChatModel : null) ??
+            context.overrideModel ??
+            UNLIMITED_MODEL)
+          : tier !== "premium"
+            ? context.economyModel
+            : job.source === "chat_keyword"
+              ? (context.overrideChatModel ??
+                (await globalValue(deps.sql, "chat_model", DEFAULT_CHAT_MODEL)))
+              : (context.overrideModel ?? globalModel);
     // The classifier is the safety net: it stays the same on every tier.
     const classifierModel = await globalValue(deps.sql, "classifier_model", globalModel);
     await deps.sql`update roasts set tier=${tier}, model=${model}, tone=${archetype},
+      toxicity=${context.toxicity},
       character_id=${character?.id ?? null} where id=${roastId}`;
     // Instructions go in `system`, the viewer's data alone in the user turn. Thinking and effort
     // per model live in modelRequest().

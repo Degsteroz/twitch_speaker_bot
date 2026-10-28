@@ -5,6 +5,8 @@ import {
   DEFAULT_ELEVENLABS_MONTHLY_CHAR_LIMIT,
   DEFAULT_CHANNEL_MONTHLY_ROASTS,
   DEFAULT_DEMO_DAILY_LIMIT,
+  DEFAULT_SIGNUP_DAILY_LIMIT,
+  DEFAULT_SIGNUP_MIN_ACCOUNT_AGE_DAYS,
   DEFAULT_GLOBAL_MONTHLY_ROAST_CAP,
   DEFAULT_MONTHLY_BUDGET_USD,
   DEFAULT_YANDEX_TTS_MONTHLY_LIMIT_RUB,
@@ -71,7 +73,9 @@ export async function seedDatabase(
       { key: "input_retention_days", value: 30 },
       { key: "yandex_tts_monthly_limit_rub", value: DEFAULT_YANDEX_TTS_MONTHLY_LIMIT_RUB },
       { key: "elevenlabs_monthly_char_limit", value: DEFAULT_ELEVENLABS_MONTHLY_CHAR_LIMIT },
-      { key: "demo_daily_limit", value: DEFAULT_DEMO_DAILY_LIMIT }
+      { key: "demo_daily_limit", value: DEFAULT_DEMO_DAILY_LIMIT },
+      { key: "signup_daily_limit", value: DEFAULT_SIGNUP_DAILY_LIMIT },
+      { key: "signup_min_account_age_days", value: DEFAULT_SIGNUP_MIN_ACCOUNT_AGE_DAYS }
     ];
 
     for (const setting of defaults) {

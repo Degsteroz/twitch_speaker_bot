@@ -11,6 +11,8 @@ export interface TwitchUser {
   id: string;
   login: string;
   display_name: string;
+  /** When the Twitch account was made (ISO); young accounts wait for review at signup. */
+  created_at?: string;
 }
 
 export interface TwitchReward {

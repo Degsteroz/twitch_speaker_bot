@@ -126,7 +126,7 @@ describe("channelSettingsSchema", () => {
   });
 
   it("rejects unsupported toxicity and unknown fields", () => {
-    expect(() => channelSettingsSchema.parse({ toxicity: 6 })).toThrow();
+    expect(() => channelSettingsSchema.parse({ toxicity: 7 })).toThrow();
     expect(() => channelSettingsSchema.parse({ unsafe: true })).toThrow();
   });
 });

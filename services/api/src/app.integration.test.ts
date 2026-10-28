@@ -577,7 +577,89 @@ describe("back-office", () => {
       commandAvailable: true
     });
     await call("POST", `/admin/users/${streamer.userId}/suspend`, owner);
-    expect((await call("GET", "/status", streamer)).json()).toMatchObject({ state: "suspended" });
+    // Suspension closes the panel at once and hides the overlay credential.
+    const closed = await call("GET", "/status", streamer);
+    expect(closed.statusCode).toBe(403);
+    expect(closed.json()).toMatchObject({ error: { code: "account_suspended" } });
+    expect((await call("GET", "/me/session", streamer)).json()).toMatchObject({
+      status: "suspended",
+      overlayToken: null
+    });
+    await call("POST", `/admin/users/${streamer.userId}/activate`, owner);
+  });
+
+  it("sets a favourite's limits and models for one channel and removes them again", async () => {
+    const path = `/admin/users/${streamer.userId}/override`;
+    const body = {
+      unlimited: false,
+      monthlyRoastLimit: 25,
+      premiumRoasts: 7,
+      minCooldownSec: 10,
+      model: "claude-opus-5-5",
+      chatModel: null,
+      economyModel: null,
+      economyVoice: "piper",
+      note: "друг канала"
+    };
+    expect((await call("PUT", path, owner, body)).statusCode).toBe(200);
+    expect((await call("PUT", path, streamer, body)).statusCode).toBe(403);
+    expect((await call("PUT", path, owner, { ...body, model: "gpt-5" })).statusCode).toBe(400);
+    const [listed] = (await call("GET", `/admin/users?search=${streamer.login}`, owner)).json<
+      { override: unknown; unlimited: boolean; limit: number }[]
+    >();
+    expect(listed).toMatchObject({ override: body, unlimited: false, limit: 25 });
+    expect((await call("GET", "/status", streamer)).json()).toMatchObject({
+      limit: 25,
+      minCooldownSec: 10,
+      premium: { total: 7 },
+      unlimited: false
+    });
+    const saved = await call("PATCH", "/settings", streamer, { cooldownSec: 0 });
+    expect(saved.json()).toMatchObject({ cooldown_sec: 10 });
+
+    await call("PUT", path, owner, { unlimited: true });
+    expect((await call("GET", "/status", streamer)).json()).toMatchObject({
+      unlimited: true,
+      commandAvailable: true,
+      minCooldownSec: 0,
+      premium: null,
+      tests: null
+    });
+
+    // All fields empty: the favourite is gone and the plan applies again.
+    expect((await call("PUT", path, owner, {})).json()).toEqual({
+      id: streamer.userId,
+      override: null
+    });
+    expect(
+      await db.sql`select 1 from channel_overrides where channel_id=${streamer.channelId}`
+    ).toHaveLength(0);
+    const [audit] = await db.sql<{ action: string }[]>`
+      select action from audit_log where target=${streamer.userId} order by created_at desc limit 1`;
+    expect(audit).toEqual({ action: "override.delete" });
+    await call("PATCH", "/settings", streamer, { cooldownSec: 60 });
+  });
+
+  it("opens «ноль сожалений» only where the owner ticked it", async () => {
+    const path = `/admin/users/${streamer.userId}/override`;
+    const denied = await call("PATCH", "/settings", streamer, { toxicity: 6 });
+    expect(denied.statusCode).toBe(403);
+    expect(denied.json()).toMatchObject({ error: { code: "zero_regrets_not_allowed" } });
+    expect((await call("GET", "/status", streamer)).json()).toMatchObject({ zeroRegrets: false });
+
+    await call("PUT", path, owner, { zeroRegrets: true });
+    expect((await call("GET", "/status", streamer)).json()).toMatchObject({ zeroRegrets: true });
+    expect((await call("PATCH", "/settings", streamer, { toxicity: 6 })).json()).toMatchObject({
+      toxicity: 6
+    });
+
+    // Taken back: the panel shows 5, and saving anything else stores 5.
+    await call("PUT", path, owner, {});
+    expect((await call("GET", "/settings", streamer)).json()).toMatchObject({ toxicity: 5 });
+    expect((await call("PATCH", "/settings", streamer, { tone: "yandere" })).json()).toMatchObject({
+      toxicity: 5
+    });
+    await call("PATCH", "/settings", streamer, { tone: "tsundere", toxicity: 2 });
   });
 
   it("runs the moderation queue and grows the global stop-list", async () => {
@@ -605,7 +687,10 @@ describe("back-office", () => {
 });
 
 /** Runs the OAuth callback with Twitch mocked and returns the issued session cookie. */
-async function twitchLogin(user: { id: string; login: string }, extraCookie = "") {
+async function twitchLogin(
+  user: { id: string; login: string; created_at?: string },
+  extraCookie = ""
+) {
   globalThis.fetch = vi.fn((url: string | URL | Request) =>
     Promise.resolve(
       (url instanceof Request ? url.url : url.toString()).includes("oauth2/token")
@@ -615,7 +700,7 @@ async function twitchLogin(user: { id: string; login: string }, extraCookie = ""
             expires_in: 3600,
             scope: ["channel:read:redemptions"]
           })
-        : Response.json({ data: [{ id: user.id, login: user.login, display_name: user.login }] })
+        : Response.json({ data: [{ ...user, display_name: user.login }] })
     )
   );
   const response = await app.inject({
@@ -629,8 +714,46 @@ async function twitchLogin(user: { id: string; login: string }, extraCookie = ""
 
 const randomTwitchId = () => `7${String(Math.floor(Math.random() * 1e8))}`;
 
+const yearsAgo = (years: number) => new Date(Date.now() - years * 365 * 86_400_000).toISOString();
+
 describe("registration", () => {
-  it("keeps new Twitch logins pending until the owner approves them", async () => {
+  it("opens the panel at once for an established Twitch account", async () => {
+    await call("PUT", "/admin/settings/signup_daily_limit", owner, 10_000);
+    const id = randomTwitchId();
+    const login = `open_${id}`;
+    const cookie = await twitchLogin({ id, login, created_at: yearsAgo(2) });
+    const me = (await call("GET", "/me/session", cookie)).json<{ overlayToken: unknown }>();
+    expect(me).toMatchObject({ status: "active", role: "user" });
+    expect(typeof me.overlayToken).toBe("string");
+    expect((await call("GET", "/status", cookie)).json()).toMatchObject({ plan: "free" });
+    const [signup] = await db.sql<{ payload: unknown }[]>`
+      select payload from audit_log where target=${login} and action='user.signup'`;
+    expect(signup).toEqual({ payload: { status: "active" } });
+  });
+
+  it("sends signups past the daily limit to review and lets them in once there is room", async () => {
+    await call("PUT", "/admin/settings/signup_daily_limit", owner, 0);
+    const id = randomTwitchId();
+    const login = `crowd_${id}`;
+    const cookie = await twitchLogin({ id, login, created_at: yearsAgo(2) });
+    expect((await call("GET", "/me/session", cookie)).json()).toMatchObject({ status: "pending" });
+    const [signup] = await db.sql<{ payload: unknown }[]>`
+      select payload from audit_log where target=${login} and action='user.signup'`;
+    expect(signup).toEqual({ payload: { status: "pending", review: "daily_limit" } });
+    await call("PUT", "/admin/settings/signup_daily_limit", owner, 10_000);
+    const again = await twitchLogin({ id, login, created_at: yearsAgo(2) });
+    expect((await call("GET", "/me/session", again)).json()).toMatchObject({ status: "active" });
+
+    // A suspended account stays suspended whatever the checks say.
+    const [user] = await db.sql<{ id: string }[]>`select id from users where login=${login}`;
+    await call("POST", `/admin/users/${user!.id}/suspend`, owner);
+    const third = await twitchLogin({ id, login, created_at: yearsAgo(2) });
+    expect((await call("GET", "/me/session", third)).json()).toMatchObject({
+      status: "suspended"
+    });
+  });
+
+  it("keeps young or unknown-age Twitch accounts pending until the owner approves them", async () => {
     const id = randomTwitchId();
     const login = `newbie_${id}`;
     const cookie = await twitchLogin({ id, login });
@@ -645,7 +768,16 @@ describe("registration", () => {
     expect((await call("POST", "/roasts/test", cookie, { viewerLogin: "x" })).statusCode).toBe(403);
     const [signup] = await db.sql<{ action: string; payload: unknown }[]>`
       select action, payload from audit_log where target=${login}`;
-    expect(signup).toEqual({ action: "user.signup", payload: { status: "pending" } });
+    expect(signup).toEqual({
+      action: "user.signup",
+      payload: { status: "pending", review: "young_account" }
+    });
+    const young = await twitchLogin({
+      id: randomTwitchId(),
+      login: `young_${id}`,
+      created_at: new Date(Date.now() - 86_400_000).toISOString()
+    });
+    expect((await call("GET", "/me/session", young)).json()).toMatchObject({ status: "pending" });
 
     const [listed] = (await call("GET", `/admin/users?search=${login}`, owner)).json<
       { id: string; status: string }[]

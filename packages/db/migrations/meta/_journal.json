@@ -134,6 +134,20 @@
       "when": 1794124800000,
       "tag": "0018_cheaper_answers",
       "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "19",
+      "when": 1794211200000,
+      "tag": "0019_open_signup_and_overrides",
+      "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "20",
+      "when": 1794297600000,
+      "tag": "0020_zero_regrets",
+      "breakpoints": true
     }
   ]
 }

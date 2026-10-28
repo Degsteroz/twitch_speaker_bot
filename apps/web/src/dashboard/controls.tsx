@@ -21,6 +21,12 @@ export const TOXICITY_STEPS: ScaleStep[] = [
     note: "Максимум язвительности и лёгкая грубость. Мат, оскорбления и угрозы запрещены всегда."
   }
 ];
+// Toxicity 6: only on channels where the owner ticked it for the streamer.
+export const ZERO_REGRETS_STEP: ScaleStep = {
+  value: 6,
+  label: "Ноль сожалений",
+  note: "Мира может пососать"
+};
 export const CHAT_FREQUENCY_STEPS: ScaleStep<ChatFrequency>[] = [
   {
     value: "rare",

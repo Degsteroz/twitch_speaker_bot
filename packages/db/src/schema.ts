@@ -139,7 +139,7 @@ export const settings = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow()
   },
   (table) => [
-    check("settings_toxicity_check", sql`${table.toxicity} between 1 and 5`),
+    check("settings_toxicity_check", sql`${table.toxicity} between 1 and 6`),
     check("settings_cooldown_sec_check", sql`${table.cooldownSec} between 0 and 3600`),
     check("settings_user_cooldown_sec_check", sql`${table.userCooldownSec} between 0 and 86400`)
   ]
@@ -302,7 +302,7 @@ export const roasts = pgTable(
     uniqueIndex("roasts_event_id_uidx").on(table.eventId),
     index("roasts_channel_created_idx").on(table.channelId, table.createdAt),
     index("roasts_status_created_idx").on(table.status, table.createdAt),
-    check("roasts_toxicity_check", sql`${table.toxicity} between 1 and 5`),
+    check("roasts_toxicity_check", sql`${table.toxicity} between 1 and 6`),
     check(
       "roasts_counters_check",
       sql`${table.tokensIn} >= 0 and ${table.tokensOut} >= 0 and ${table.ttsChars} >= 0`
@@ -375,6 +375,38 @@ export const ttsUsageMonthly = pgTable(
     primaryKey({ columns: [table.provider, table.month] }),
     check("tts_usage_monthly_month_check", sql`${table.month} ~ '^[0-9]{4}-(0[1-9]|1[0-2])$'`),
     check("tts_usage_monthly_requests_check", sql`${table.requests} >= 0`)
+  ]
+);
+
+/** The owner's per-channel exceptions to the plan ("favourites"); null keeps the plan's value. */
+export const channelOverrides = pgTable(
+  "channel_overrides",
+  {
+    channelId: uuid("channel_id")
+      .primaryKey()
+      .references(() => channels.id, { onDelete: "cascade" }),
+    unlimited: boolean("unlimited").notNull().default(false),
+    zeroRegrets: boolean("zero_regrets").notNull().default(false),
+    monthlyRoastLimit: integer("monthly_roast_limit"),
+    premiumRoasts: integer("premium_roasts"),
+    minCooldownSec: integer("min_cooldown_sec"),
+    model: text("model"),
+    chatModel: text("chat_model"),
+    economyModel: text("economy_model"),
+    economyVoice: text("economy_voice"),
+    note: text("note"),
+    updatedByUserId: uuid("updated_by_user_id").references(() => users.id, {
+      onDelete: "set null"
+    }),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow()
+  },
+  (table) => [
+    check(
+      "channel_overrides_limits_check",
+      sql`coalesce(${table.monthlyRoastLimit}, 0) >= 0 and coalesce(${table.premiumRoasts}, 0) >= 0
+        and coalesce(${table.minCooldownSec}, 0) >= 0`
+    ),
+    check("channel_overrides_voice_check", sql`${table.economyVoice} in ('yandex', 'piper')`)
   ]
 );
 
