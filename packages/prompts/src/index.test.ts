@@ -25,6 +25,9 @@ import {
 // Every way of writing these must be caught: spelling tricks, transliteration, leetspeak,
 // homoglyphs, spacing, masks, repeated letters, verb prefixes.
 const MUST_BLOCK = [
+  "потрогать мои сисечки",
+  "пока твой хозяин тебе очко не порвал",
+  "тебе очко порвут",
   "может тебе еще хуй пососать",
   "пососи у деда",
   "ты у меня пососешь",
@@ -117,6 +120,8 @@ const MUST_BLOCK = [
 
 // Innocent words that share letters with the list above.
 const MUST_ALLOW = [
+  "очко за раунд",
+  "порвал соперника",
   "соседи по команде",
   "сосиски в тесте",
   "посоветую сменить мышку",
@@ -314,6 +319,11 @@ describe("toxicity 6, «ноль сожалений»", () => {
     const prompt = composeRoastPrompt({ viewer: "v", message: "m", tone: "tsundere", toxicity: 6 });
     expect(prompt.system).toContain("уничтожь того, кому отвечаешь");
     expect(prompt.system).toContain("никогда не соглашайся с оскорблением");
+    expect(prompt.system).toContain("Мат обязателен");
+    expect(prompt.system).toContain("не повторяй его слов про тело и секс");
+    expect(inspectOutput("За двести рублей жри говно, нищая собака", "x", [], 6)).toEqual({
+      allowed: true
+    });
     // The temperament's softeners do not apply at this level, and only at this level.
     expect(prompt.system).toContain("«без унижения» из описания характера здесь не действует");
     expect(

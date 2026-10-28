@@ -208,6 +208,18 @@ export const BLOCKLIST: readonly BlockTerm[] = Object.freeze([
   ...group("ru", "sexual", "exact", ["соси", "сосни", "отсоси", "пососи", "пососешь"]),
   // "Пососать" and its forms: a sexual act offered to someone, what Twitch bans for.
   ...group("ru", "sexual", "word", ["пососат"]),
+  // Breasts named in a reply, and sexual violence ("очко порвёт"): a viewer's lewd request must
+  // not come back on air in the character's voice.
+  ...group("ru", "sexual", "word", ["сиськ", "сисек", "сисечк", "сисяндр"]),
+  ...group("ru", "sexual", "word", [
+    "очко порв",
+    "очко не порв",
+    "порвал очко",
+    "порвет очко",
+    "порвут очко",
+    "порвать очко",
+    "очко разорв"
+  ]),
 
   // Self-harm and death wishes.
   ...group("ru", "self_harm", "word", [
