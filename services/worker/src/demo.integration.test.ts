@@ -7,8 +7,9 @@ import { createDatabase } from "@roastbot/db";
 import { startTestDatabase, type TestDatabase } from "@roastbot/testing";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
+import type { PipelineDependencies } from "./context.js";
 import { processDemo } from "./demo.js";
-import type { PipelineDependencies } from "./pipeline.js";
+import { demoSpendSql } from "./limits.js";
 
 let db: TestDatabase;
 let worker: ReturnType<typeof createDatabase>;
@@ -123,5 +124,27 @@ describe("landing demo", () => {
       await processDemo({ demoId: await demo("привет") }, deps(anthropic.client))
     ).toMatchObject({ status: "skipped", reason: "global_budget_exceeded" });
     expect(anthropic.create).not.toHaveBeenCalled();
+  });
+});
+
+describe("demo spend", () => {
+  it("counts exactly the UTC calendar month, its first and last instant included", async () => {
+    await db.sql`insert into demo_requests(ip_hash,day,input_text,cost_usd,created_at) values
+      ('h','2026-01-31','a',1,'2026-01-31T23:59:59.999Z'),
+      ('h','2026-02-01','b',2,'2026-02-01T00:00:00Z'),
+      ('h','2026-02-28','c',4,'2026-02-28T23:59:59.999Z'),
+      ('h','2026-03-01','d',8,'2026-03-01T00:00:00Z'),
+      ('h','2026-12-31','e',16,'2026-12-31T23:59:59Z'),
+      ('h','2027-01-01','f',32,'2027-01-01T00:00:00Z')`;
+    const spent = async (month: string) => {
+      const [row] = await worker.client<{ spent: number }[]>`
+        select ${demoSpendSql(worker.client, month)}::float8 spent`;
+      return row?.spent;
+    };
+    expect(await spent("2026-01")).toBe(1);
+    expect(await spent("2026-02")).toBe(6);
+    expect(await spent("2026-03")).toBe(8);
+    expect(await spent("2026-12")).toBe(16);
+    expect(await spent("2027-01")).toBe(32);
   });
 });

@@ -13,6 +13,8 @@ const schema = z.object({
   ELEVENLABS_VOICE_TSUNDERE: z.string().optional(),
   ELEVENLABS_VOICE_YANDERE: z.string().optional(),
   AUDIO_DIR: z.string().default("/data/audio"),
+  // Roasts this process writes at once (4 when unset).
+  WORKER_CONCURRENCY: z.coerce.number().int().min(1).max(32).optional(),
   TELEGRAM_BOT_TOKEN: z.string().optional(),
   // Optional: the daily Telegram report links straight to failed roasts and the moderation queue.
   DASHBOARD_URL: z.string().url().optional(),

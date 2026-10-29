@@ -15,20 +15,20 @@ RoastBot — Twitch-сервис: зритель пишет `!роаст` в ч�
 
 Компоненты (`services/`, `apps/`, `packages/`):
 
-| Путь               | Что делает                                                          |
-| ------------------ | ------------------------------------------------------------------- |
-| `services/api`     | Fastify: OAuth Twitch, REST для панели, WebSocket оверлея, `/admin` |
-| `services/worker`  | pg-boss: генерация, модерация, квоты, TTS, outbox оверлея, очистка  |
-| `services/twitch`  | tmi.js (чат) и EventSub WebSocket (награды)                         |
-| `services/tts`     | FastAPI над Piper, `POST /synth` → WAV                              |
-| `apps/web`         | React + Vite: панель, `/admin` (`src/admin/`, файл на вкладку), тур |
-| `apps/overlay`     | Страница для OBS Browser Source                                     |
-| `packages/db`      | Схема Drizzle, миграции, seed, очистка данных                       |
-| `packages/shared`  | zod-схемы, константы, типы событий                                  |
-| `packages/prompts` | Промпты, стоп-лист, оценка стоимости, классификатор                 |
-| `packages/testing` | Одноразовый PostgreSQL 16 для интеграционных тестов                 |
-| `deploy/`          | docker-compose, Caddy, скрипты backup/restore/preflight             |
-| `scripts/demo.mjs` | Локальный демо-стенд без Docker и Twitch                            |
+| Путь               | Что делает                                                                                                   |
+| ------------------ | ------------------------------------------------------------------------------------------------------------ |
+| `services/api`     | Fastify: OAuth Twitch, REST для панели, WebSocket оверлея, `/admin` (`app.ts` — сборка, маршруты по модулям) |
+| `services/worker`  | pg-boss: генерация (`pipeline`), лимиты (`limits`), заглушки (`stubs`), TTS, outbox оверлея, очистка         |
+| `services/twitch`  | tmi.js (чат, JOIN через `JoinQueue`) и EventSub WebSocket (награды)                                          |
+| `services/tts`     | FastAPI над Piper, `POST /synth` → WAV                                                                       |
+| `apps/web`         | React + Vite: панель, `/admin` (`src/admin/`, файл на вкладку), тур                                          |
+| `apps/overlay`     | Страница для OBS Browser Source                                                                              |
+| `packages/db`      | Схема Drizzle, миграции, seed, очистка данных                                                                |
+| `packages/shared`  | zod-схемы, константы, типы событий                                                                           |
+| `packages/prompts` | Промпты, стоп-лист, оценка стоимости, классификатор                                                          |
+| `packages/testing` | Одноразовый PostgreSQL 16 для интеграционных тестов                                                          |
+| `deploy/`          | docker-compose, Caddy, скрипты backup/restore/preflight                                                      |
+| `scripts/demo.mjs` | Локальный демо-стенд без Docker и Twitch                                                                     |
 
 ---
 
@@ -49,7 +49,7 @@ pnpm lint
 pnpm format:check
 ```
 
-Ожидаемый результат на момент передачи: `pnpm test` — 348 тестов проходят;
+Ожидаемый результат на момент передачи: `pnpm test` — 377 тестов проходят;
 `pnpm lint` и `pnpm format:check` — без ошибок.
 
 Python-тесты TTS:
@@ -162,18 +162,19 @@ Docker для них не нужен. Anthropic и TTS в тестах заме�
    классификатор (Sonnet 5.5); любой ответ кроме `ALLOW` блокируется (fail-closed). Инструкции идут
    только в `system`, данные зрителя — только в user-сообщение, экранированные и в тегах.
    Новое слово в списке — с примером в `MUST_BLOCK`, а если есть риск коллизии, и в `MUST_ALLOW`
-   (`packages/prompts/src/index.test.ts`).
+   (`packages/prompts/src/examples.ts`; `scripts/classifier-eval.mjs` прогоняет их через две модели
+   классификатора перед сменой `classifier_model`).
 3. **Параметры запроса — только через `modelRequest()`** (`services/worker/src/models.ts`).
    `temperature` не передаётся никогда (400 на всех моделях). Opus 5.5, Sonnet 5.5 и Fable не
    отключают thinking (`disabled` — 400): им `effort: "low"` и запас `max_tokens`; Haiku 5.5 —
    `thinking: {type: "disabled"}`.
 4. **Квоты и бюджет проверяются до вызова API** в транзакции под advisory lock
-   (`reserve()` в `services/worker/src/pipeline.ts`). Стоимость записывается и при успехе,
+   (`reserve()` в `services/worker/src/limits.ts`). Стоимость записывается и при успехе,
    и при сбое после вызова Anthropic.
 5. **Повторно доставленная задача не тратит квоту.** Если роаст уже не `queued`,
    воркер возвращает его статус без работы.
 6. **Очередь без ретраев** (`retryLimit: 0`): роаст старше TTL оверлея не имеет смысла.
-7. **Аудиоссылка подписывается в момент доставки** (`signedAudioUrl` в API), а не в воркере.
+7. **Аудиоссылка подписывается в момент доставки** (`signAudioPath` в `services/api/src/overlay.ts`), а не в воркере.
 8. **Оверлейные токены сравниваются через БД.** Перевыпуск токена закрывает открытые сокеты.
 9. **Владелец проверяется по БД** (`requireOwner`), а не по JWT.
 10. **Cookie сессии `HttpOnly`**, в проде `Secure`.
@@ -239,8 +240,9 @@ Docker для них не нужен. Anthropic и TTS в тестах заме�
     (`effectiveCooldown` в `reserve()` и в API), один зритель — не больше `VIEWER_ROAST_LIMIT`
     ответов за `VIEWER_ROAST_WINDOW_MINUTES` в `reserve()`.
     Команда, награда и вызов по имени персонажа (`named`, `isStubCall()`), которым нельзя ответить
-    роастом (пауза, лимит зрителя, исчерпанная квота или бюджет), слышат заглушку (`playStub()`):
-    без квоты и модели, одна заглушка на зрителя в очереди оверлея. Половина заглушек — голосовые
+    роастом (пауза, лимит зрителя, исчерпанная квота или бюджет), слышат заглушку (`playStub()`
+    в `services/worker/src/stubs.ts`): без квоты и модели, одна заглушка на зрителя в очереди
+    оверлея (повторная проверка под lock на зрителя в `publishStub()`). Половина заглушек — голосовые
     (`speak()` и `stub_audio`); вторая половина — бесплатные (`playVisualStub()`): аватар, подпись
     из `STUB_VISUALS` и звук эффекта без голоса. «Мммммм, нет!» у награды — тоже в обоих видах.
     Одна подпись (`aiDraft`) пишется Haiku под зрителя, проходит проверку выхода и классификатор,
@@ -256,7 +258,7 @@ Docker для них не нужен. Anthropic и TTS в тестах заме�
     (`channelOverrideSchema` в `packages/shared`): `null` — значение тарифа. Флаг `unlimited` и
     канал владельца (`role='owner'`) обходят в `reserve()` квоту, паузы, лимит зрителя и тестов,
     в сервисе чата — частоту и проверку тарифа для команды и героини; тир всегда `premium`,
-    модель — `override.model ?? UNLIMITED_MODEL`. Kill switch, бюджет, общий лимит сервиса,
+    модель — `override.model ?? UNLIMITED_MODEL` (вся маршрутизация моделей — `pickModel()`). Kill switch, бюджет, общий лимит сервиса,
     резервы голосов, стоп-лист и классификатор не обходятся никогда. Классификатор не
     переопределяется. Запросы самого стримера идут в очередь с `STREAMER_JOB_PRIORITY`.
     Токсичность 6 — только при `channel_overrides.zero_regrets` или на канале владельца: API отвечает
@@ -268,11 +270,17 @@ Docker для них не нужен. Anthropic и TTS в тестах заме�
     автора, кроме событий без автора и opt-out, и добавляет в промпт `[ОБРАЩЕНИЕ К ТЕБЕ]`.
     Примеров ответов в правилах уровня 6 нет намеренно: модель копирует их всем.
 
+25. **Воркер параллельный** (`WORKER_CONCURRENCY`, по умолчанию 4, и можно запускать несколько
+    воркеров). Любая проверка «уже есть / ещё нет» перед записью делается под advisory lock в той
+    же транзакции, что и сама запись: квоты и паузы — в `reserve()`, одна заглушка на зрителя —
+    в `publishStub()`. Проверка до lock — только дешёвый фильтр. Тесты на это —
+    `Promise.all` в `pipeline.integration.test.ts`.
+
 ## 8. Статус проверок
 
 | Что                                                                                         | Статус                                          |
 | ------------------------------------------------------------------------------------------- | ----------------------------------------------- |
-| Сборка, lint, format, 348 тестов                                                            | ✅                                              |
+| Сборка, lint, format, 377 тестов                                                            | ✅                                              |
 | Python-тесты TTS                                                                            | ✅                                              |
 | Синтез Piper в Linux-контейнере (arm64, оба голоса)                                         | ✅                                              |
 | Регистрация по заявке и 2FA в браузере                                                      | ⬜ покрыто API-тестами, вживую не проверялось   |

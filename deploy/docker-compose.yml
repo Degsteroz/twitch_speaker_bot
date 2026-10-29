@@ -125,6 +125,8 @@ services:
       ELEVENLABS_VOICE_YANDERE: ${ELEVENLABS_VOICE_YANDERE:-}
       TTS_URL: http://tts:8000
       AUDIO_DIR: /data/audio
+      # Roasts written at once; raise with the CPU and the Anthropic rate limit.
+      WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-4}
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
       TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
       # Links in the Telegram report.

@@ -25,7 +25,15 @@ import { recordVoiceSample, syncVoices } from "./voices.js";
 const AUDIO_MAX_AGE_MS = 10 * 60 * 1000;
 
 const config = loadConfig();
-const database = createDatabase(config.DATABASE_URL, { applicationName: "roastbot-worker" });
+// Roasts written at once by this process. Each one mostly waits on Anthropic and the voice, and
+// reserve() books every limit under one lock, so parallel roasts never overspend; more workers
+// can run beside this one the same way.
+const roastConcurrency = config.WORKER_CONCURRENCY ?? 4;
+// A connection per roast in flight, plus the demo, the samples and the maintenance jobs.
+const database = createDatabase(config.DATABASE_URL, {
+  applicationName: "roastbot-worker",
+  maxConnections: Math.max(10, roastConcurrency + 6)
+});
 const boss = new PgBoss({ connectionString: config.DATABASE_URL, useListenNotify: true });
 // The SDK retries 429/5xx itself; keep the whole call short enough for a live stream.
 const anthropic = new Anthropic({
@@ -40,7 +48,8 @@ await boss.createQueue(ROAST_REQUESTED_QUEUE, { ...ROAST_REQUESTED_QUEUE_OPTIONS
 // createQueue is a no-op for an existing queue; updateQueue applies changed options on upgrade.
 await boss.updateQueue(ROAST_REQUESTED_QUEUE, { ...ROAST_REQUESTED_QUEUE_OPTIONS });
 const workOptions = { batchSize: 1, localConcurrency: 1, pollingIntervalSeconds: 0.5 };
-await boss.work(ROAST_REQUESTED_QUEUE, workOptions, async (jobs) => {
+const roastOptions = { ...workOptions, localConcurrency: roastConcurrency };
+await boss.work(ROAST_REQUESTED_QUEUE, roastOptions, async (jobs) => {
   for (const job of jobs) {
     const outcome = await processRoast(job.data, { sql: database.client, anthropic, config });
     console.log(JSON.stringify({ msg: "roast.processed", ...outcome }));

@@ -480,6 +480,51 @@ describe("processRoast against PostgreSQL", () => {
     await db.sql`update plans set monthly_roast_limit=300 where code='basic'`;
   });
 
+  it("books the quota exactly when one channel's jobs run in parallel", async () => {
+    const [plan] = await db.sql<{ id: string }[]>`
+      insert into plans(code,monthly_roast_limit,monthly_tts_limit) values('basic',5,1000)
+      on conflict(code) do update set monthly_roast_limit=5 returning id`;
+    await db.sql`update subscriptions set plan_id=${plan!.id} where user_id=${channel.userId}`;
+    try {
+      const anthropic = fakeAnthropic({ text: "Раз" });
+      // Raids skip cooldowns, so only the quota holds them back: a raid train lands at once.
+      const jobs = await Promise.all(Array.from({ length: 10 }, () => job({ source: "raid" })));
+      const outcomes = await Promise.all(
+        jobs.map((item) => processRoast(item, deps(anthropic.client)))
+      );
+      expect(outcomes.filter((outcome) => outcome.status === "done")).toHaveLength(5);
+      expect(
+        outcomes.filter((outcome) => outcome.reason === "channel_quota_exceeded")
+      ).toHaveLength(5);
+      expect(await usage()).toMatchObject({ roasts: 5 });
+    } finally {
+      await db.sql`update plans set monthly_roast_limit=300 where code='basic'`;
+    }
+  });
+
+  it("queues one stub per viewer even when their calls are processed in parallel", async () => {
+    const anthropic = fakeAnthropic({ text: "Раз" });
+    expect((await processRoast(await job(), deps(anthropic.client))).status).toBe("done");
+    // Slow speech: every call passes the first "nothing waits yet" check before any is queued.
+    const slowSpeech = deps(
+      anthropic.client,
+      () =>
+        new Promise((resolve) =>
+          setTimeout(() => resolve(new Response(new Uint8Array([82, 73, 70, 70, 0, 0, 0, 0]))), 300)
+        )
+    );
+    const spam = await Promise.all(
+      Array.from({ length: 6 }, () => job({ viewerLogin: "spammer" }))
+    );
+    const outcomes = await Promise.all(spam.map((item) => processRoast(item, slowSpeech)));
+    expect(outcomes.every((outcome) => outcome.reason === "stub_cooldown")).toBe(true);
+    expect(slowSpeech.fetch.mock.calls.length).toBeGreaterThan(1);
+    const queued = await db.sql`
+      select 1 from overlay_events e join roasts r on r.id=e.roast_id
+      where r.channel_id=${channel.channelId} and r.viewer_login='spammer'`;
+    expect(queued).toHaveLength(1);
+  });
+
   it("gives dashboard tests a daily allowance apart from the monthly quota", async () => {
     await db.sql`delete from test_usage_daily`;
     const anthropic = fakeAnthropic({ text: "Раз" });

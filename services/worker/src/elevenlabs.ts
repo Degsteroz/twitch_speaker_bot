@@ -8,7 +8,7 @@ import { DEFAULT_ELEVENLABS_MONTHLY_CHAR_LIMIT, ELEVENLABS_PLAN_MARGIN } from "@
 import { z } from "zod";
 
 import type { WorkerConfig } from "./config.js";
-import type { Sql } from "./pipeline.js";
+import type { Sql } from "./context.js";
 
 const SUBSCRIPTION_URL = "https://api.elevenlabs.io/v1/user/subscription";
 const SYNC_TIMEOUT_MS = 10_000;

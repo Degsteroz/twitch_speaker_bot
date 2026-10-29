@@ -4,7 +4,7 @@
 import { telegramCall, type TelegramNotifyJob } from "@roastbot/shared";
 
 import type { WorkerConfig } from "./config.js";
-import type { Sql } from "./pipeline.js";
+import type { Sql } from "./context.js";
 
 export async function notifyStreamer(
   sql: Sql,

@@ -6,7 +6,8 @@ import { elevenLabsVoiceIdSchema, VOICE_SAMPLE_TEXT, voiceSampleJobSchema } from
 
 import type { WorkerConfig } from "./config.js";
 import { elevenLabsCharLimit, releaseElevenLabsCharacters } from "./elevenlabs.js";
-import { reserveElevenLabsCharacters, type Sql } from "./pipeline.js";
+import type { Sql } from "./context.js";
+import { reserveElevenLabsCharacters } from "./limits.js";
 import { speak } from "./tts.js";
 
 // The first synthesis in a voice from the ElevenLabs library is slower than the live roast timeout;

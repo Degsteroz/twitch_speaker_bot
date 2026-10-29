@@ -148,6 +148,13 @@
       "when": 1794297600000,
       "tag": "0020_zero_regrets",
       "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "21",
+      "when": 1794384000000,
+      "tag": "0021_global_usage_index",
+      "breakpoints": true
     }
   ]
 }

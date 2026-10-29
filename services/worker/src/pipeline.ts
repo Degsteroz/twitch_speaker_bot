@@ -1,384 +1,58 @@
-import { randomBytes, randomUUID } from "node:crypto";
-import { mkdir, rename, writeFile } from "node:fs/promises";
-import { join } from "node:path";
-
-import type Anthropic from "@anthropic-ai/sdk";
-import type { createDatabase } from "@roastbot/db";
 import {
   addressesCharacter,
-  calculateCostUsd,
   classifierInput,
   classifierSystemPrompt,
   composeRoastPrompt,
   enforceOutputLimit,
-  escapePromptData,
   findStopListMatch,
   inspectInput,
   inspectOutput,
   parseClassifierVerdict,
-  pricingForModel,
   spokenText,
   type ViewerHistory
 } from "@roastbot/prompts";
 import {
-  ARCHETYPE_THEME,
   BLOCKED_OUTPUT_FALLBACK,
   CHARACTER_NAMES,
-  BRANDED_PLANS,
   CUSTOM_CHARACTER_PLANS,
-  COOLDOWN_SOURCES,
-  DASHBOARD_TEST_DAILY_LIMIT,
   OPTOUT_SKIPPED_SOURCES,
   DEFAULT_ANTHROPIC_MODEL,
   DEFAULT_CHAT_MODEL,
-  DEFAULT_GLOBAL_MONTHLY_ROAST_CAP,
-  DEFAULT_MONTHLY_BUDGET_USD,
-  DEFAULT_YANDEX_TTS_MONTHLY_LIMIT_RUB,
   OVERLAY_EVENT_TTL_SECONDS,
-  REWARD_DECLINED_STUB,
-  STUB_CAPTION_MAX_CHARACTERS,
-  STUB_PHRASES,
   isStubCall,
-  STUB_VISUALS,
-  VIEWER_LIMITED_SOURCES,
-  VIEWER_ROAST_LIMIT,
-  VIEWER_ROAST_WINDOW_MINUTES,
-  effectiveCooldown,
   roastRequestedJobSchema,
   triggerSettingsSchema,
   COMMAND_PLANS,
   type Archetype,
   type RoastRequestedJob,
-  type EconomyVoice,
+  type RoastSource,
   type RoastStatus,
   type RoastTier,
-  type StoredOverlayRoast,
-  type StubSound,
-  type Tone,
   type Toxicity,
-  type Voice,
-  MAX_REGULAR_TOXICITY,
   UNLIMITED_MODEL,
   ZERO_REGRETS_MODEL,
   ZERO_REGRETS_TOXICITY,
-  zeroRegretsUsesSonnet,
-  yandexBillingMonth,
-  yandexTtsRequestLimit
+  zeroRegretsUsesSonnet
 } from "@roastbot/shared";
 
-import type { WorkerConfig } from "./config.js";
-import { elevenLabsCharLimit, releaseElevenLabsCharacters } from "./elevenlabs.js";
+import {
+  globalValue,
+  loadContext,
+  rejectionFor,
+  type PipelineDependencies,
+  type RoastOutcome,
+  type Sql
+} from "./context.js";
+import { reserve, voiceReservations } from "./limits.js";
 import { modelRequest } from "./models.js";
+import { publishOverlay, storeAudio } from "./overlay.js";
+import { recordSpend, spendOf, textFrom, type Spend } from "./spend.js";
+import { playStub, STUB_REJECTIONS } from "./stubs.js";
 import { notifyStreamer, quotaNotice } from "./telegram.js";
-import { elevenLabsVoiceFor, speak, type Speech, type VoiceReservations } from "./tts.js";
+import { speak } from "./tts.js";
 
-export type Sql = ReturnType<typeof createDatabase>["client"];
+export type { PipelineDependencies, RoastOutcome } from "./context.js";
 
-interface ChannelContext {
-  userStatus: string;
-  streamerLogin: string;
-  enabled: boolean;
-  tone: Tone;
-  voice: Voice;
-  toxicity: Toxicity;
-  cooldownSec: number;
-  userCooldownSec: number;
-  stopWords: string[];
-  triggers: unknown;
-  monthlyLimit: number | null;
-  planCode: string | null;
-  /** Premium roasts a month; null means every roast is premium. */
-  premiumRoasts: number | null;
-  economyModel: string;
-  economyVoice: EconomyVoice;
-  /**
-   * The owner's own channel or a favourite marked unlimited: no quota, pauses or viewer limit,
-   * every plan feature, always the premium tier. Global guards and moderation still apply.
-   */
-  unlimited: boolean;
-  /** The owner's per-channel models and pause floor (channel_overrides); null keeps the default. */
-  overrideModel: string | null;
-  overrideChatModel: string | null;
-  minCooldownSec: number | null;
-  /** The owner opened toxicity 6 for this channel; without it a stored 6 plays as 5. */
-  zeroRegrets: boolean;
-  /** The chosen premium character, when it is usable: own or published, with a picture. */
-  characterId: string | null;
-  characterName: string | null;
-  archetype: Archetype | null;
-  /** Her ElevenLabs voice, when the owner still offers it. */
-  characterVoiceId: string | null;
-  imageHash: string | null;
-}
-
-export interface PipelineDependencies {
-  sql: Sql;
-  anthropic: Anthropic;
-  config: WorkerConfig;
-  now?: () => Date;
-  fetch?: typeof globalThis.fetch;
-  /** Picks between a spoken and a free stub; tests pin it. */
-  random?: () => number;
-}
-
-export interface RoastOutcome {
-  roastId: string;
-  status: RoastStatus;
-  reason?: string;
-}
-
-interface Spend {
-  model: string;
-  /** All input, cached or not. */
-  tokensIn: number;
-  tokensOut: number;
-  /** The part of tokensIn written to and read from the prompt cache. */
-  cacheWrite?: number;
-  cacheRead?: number;
-  /** Flat cost on top of tokens, e.g. a paid speech synthesis request. */
-  fixedUsd?: number;
-}
-
-/** What a Messages response cost, with the cached part of the input billed at its own rates. */
-function spendOf(model: string, usage: Anthropic.Beta.BetaUsage): Spend {
-  const cacheWrite = usage.cache_creation_input_tokens ?? 0;
-  const cacheRead = usage.cache_read_input_tokens ?? 0;
-  return {
-    model,
-    tokensIn: usage.input_tokens + cacheWrite + cacheRead,
-    tokensOut: usage.output_tokens,
-    cacheWrite,
-    cacheRead
-  };
-}
-
-export function textFrom(message: Anthropic.Beta.BetaMessage): string {
-  return message.content
-    .flatMap((block) => (block.type === "text" ? [block.text] : []))
-    .join(" ")
-    .trim();
-}
-
-export function costOf(spend: Spend): number {
-  const cacheWrite = spend.cacheWrite ?? 0;
-  const cacheRead = spend.cacheRead ?? 0;
-  return (
-    calculateCostUsd(
-      {
-        input: spend.tokensIn - cacheWrite - cacheRead,
-        output: spend.tokensOut,
-        cacheWrite,
-        cacheRead
-      },
-      pricingForModel(spend.model)
-    ) + (spend.fixedUsd ?? 0)
-  );
-}
-
-export async function globalValue<T>(sql: Sql, key: string, fallback: T): Promise<T> {
-  const [row] = await sql<{ value: T }[]>`select value from global_settings where key=${key}`;
-  return row?.value ?? fallback;
-}
-
-async function loadContext(sql: Sql, channelId: string): Promise<ChannelContext | undefined> {
-  const [context] = await sql<ChannelContext[]>`
-    select u.status "userStatus", c.twitch_login "streamerLogin", s.enabled, s.tone, s.voice,
-      s.toxicity,
-      s.cooldown_sec "cooldownSec", s.user_cooldown_sec "userCooldownSec",
-      s.stop_words "stopWords", s.triggers,
-      case when p.id is not null then coalesce(o.monthly_roast_limit, p.monthly_roast_limit)
-        end "monthlyLimit",
-      p.code "planCode",
-      case when o.premium_roasts is not null then o.premium_roasts else p.premium_roasts end
-        "premiumRoasts",
-      coalesce(o.economy_model, p.economy_model) "economyModel",
-      coalesce(o.economy_voice, p.economy_voice::text) "economyVoice",
-      (u.role='owner' or coalesce(o.unlimited, false)) unlimited,
-      (u.role='owner' or coalesce(o.zero_regrets, false)) "zeroRegrets",
-      o.model "overrideModel", o.chat_model "overrideChatModel",
-      o.min_cooldown_sec "minCooldownSec", ch.id "characterId",
-      coalesce(s.character_name, ch.name) "characterName", ch.archetype,
-      v.id "characterVoiceId", ch.image_hash "imageHash"
-    from channels c join users u on u.id=c.user_id join settings s on s.channel_id=c.id
-    left join lateral (
-      select sub.plan_id from subscriptions sub
-      where sub.user_id=u.id and (sub.valid_until is null or sub.valid_until>now())
-      order by sub.created_at desc limit 1
-    ) sub on true
-    left join plans p on p.id=sub.plan_id
-    left join channel_overrides o on o.channel_id=c.id
-    left join characters ch on ch.id=s.character_id and ch.image_hash is not null
-      and (ch.author_channel_id=c.id or ch.status='published')
-    left join voices v on v.id=ch.voice_id and v.enabled
-    where c.id=${channelId}`;
-  if (context && context.toxicity === ZERO_REGRETS_TOXICITY && !context.zeroRegrets) {
-    context.toxicity = MAX_REGULAR_TOXICITY;
-  }
-  return context;
-}
-
-function rejectionFor(context: ChannelContext | undefined): string | undefined {
-  if (!context) return "channel_not_found";
-  if (context.userStatus !== "active") return "user_suspended";
-  if (!context.enabled) return "channel_disabled";
-  if (context.monthlyLimit === null && !context.unlimited) return "no_active_plan";
-  return undefined;
-}
-
-/** Landing demo money of this month, part of the same budget. */
-export const demoSpendSql = (sql: Sql, month: string) => sql`(select coalesce(sum(cost_usd),0)
-  from demo_requests where to_char(created_at at time zone 'UTC','YYYY-MM')=${month})`;
-
-/** A booked roast's tier; `quota` is the channel's count after booking (absent for tests). */
-type Reservation =
-  { rejected: string } | { tier: RoastTier; quota?: { used: number; limit: number } };
-
-/**
- * Atomically checks every limit and books one roast against the quota and cooldowns, or a
- * dashboard test against the channel's daily test allowance. Returns the rejection reason, or the
- * tier the roast may spend API money on: the plan's premium allowance is booked here too.
- */
-async function reserve(
-  deps: PipelineDependencies,
-  job: RoastRequestedJob,
-  monthlyLimit: number,
-  context: ChannelContext
-): Promise<Reservation> {
-  const now = deps.now?.() ?? new Date();
-  const month = now.toISOString().slice(0, 7);
-  const rejected = (reason: string): Reservation => ({ rejected: reason });
-  return deps.sql.begin(async (tx): Promise<Reservation> => {
-    await tx`select pg_advisory_xact_lock(hashtext('roastbot-global-quota'))`;
-    const [killSwitch] = await tx<{ value: boolean }[]>`
-      select value from global_settings where key='kill_switch'`;
-    if (killSwitch?.value === true) return rejected("global_kill_switch");
-
-    const [limits] = await tx<{ roastCap: number; budget: number; used: number; spent: number }[]>`
-      select
-        coalesce((select (value #>> '{}')::int from global_settings where key='global_monthly_limit'),
-          ${DEFAULT_GLOBAL_MONTHLY_ROAST_CAP})::int "roastCap",
-        coalesce((select (value #>> '{}')::float8 from global_settings where key='monthly_budget_usd'),
-          ${DEFAULT_MONTHLY_BUDGET_USD})::float8 budget,
-        coalesce(sum(roasts),0)::int used,
-        (coalesce(sum(cost_usd),0) + ${demoSpendSql(tx as unknown as Sql, month)})::float8 spent
-      from usage_monthly where month=${month}`;
-    if ((limits?.used ?? 0) >= (limits?.roastCap ?? DEFAULT_GLOBAL_MONTHLY_ROAST_CAP)) {
-      return rejected("global_quota_exceeded");
-    }
-    if ((limits?.spent ?? 0) >= (limits?.budget ?? DEFAULT_MONTHLY_BUDGET_USD)) {
-      return rejected("global_budget_exceeded");
-    }
-
-    if (context.unlimited) {
-      // The owner's channel and unlimited favourites: past the global guards nothing stops them.
-      // The roast is still counted, so the service cap and the statistics stay true.
-      if (job.source !== "dashboard_test") {
-        await tx`
-          insert into usage_monthly(channel_id,month,roasts) values(${job.channelId},${month},1)
-          on conflict(channel_id,month) do update set roasts=usage_monthly.roasts+1,updated_at=now()`;
-      }
-      return { tier: "premium" };
-    }
-
-    if (job.source === "dashboard_test") {
-      // Tests skip the monthly quota and cooldowns but not the global guards above.
-      const booked = await tx`
-        insert into test_usage_daily(channel_id,day,roasts)
-        values(${job.channelId},${now.toISOString().slice(0, 10)},1)
-        on conflict(channel_id,day) do update set roasts=test_usage_daily.roasts+1
-          where test_usage_daily.roasts < ${DASHBOARD_TEST_DAILY_LIMIT}
-        returning roasts`;
-      if (!booked.length) return rejected("test_limit_reached");
-      return { tier: await bookTier(tx as unknown as Sql, job.channelId, month, context) };
-    }
-
-    const [usage] = await tx<{ roasts: number; gifted: number }[]>`
-      select coalesce(um.roasts,0)::int roasts,
-        coalesce((select sum(amount-used) from gifted_quota
-          where channel_id=${job.channelId} and month=${month}),0)::int gifted
-      from (select 1) x
-      left join usage_monthly um on um.channel_id=${job.channelId} and um.month=${month}`;
-    const used = usage?.roasts ?? 0;
-    if (used >= monthlyLimit + (usage?.gifted ?? 0)) return rejected("channel_quota_exceeded");
-
-    if (COOLDOWN_SOURCES.has(job.source)) {
-      const cooldowns = await tx<{ scope: string }[]>`
-        select scope from cooldown_state where channel_id=${job.channelId} and next_allowed_at>now()
-        and ((scope='channel' and subject_key='*') or (scope='viewer' and subject_key=${job.viewerLogin}))`;
-      if (cooldowns.length) return rejected("cooldown_active");
-      if (VIEWER_LIMITED_SOURCES.has(job.source)) {
-        // Answers this viewer already got in the window: finished ones and ones booked but still
-        // being written (the tier is set right after booking).
-        const [answered] = await tx<{ count: number }[]>`
-          select count(*)::int count from roasts
-          where channel_id=${job.channelId} and lower(viewer_login)=lower(${job.viewerLogin})
-            and source::text in ${tx([...VIEWER_LIMITED_SOURCES])}
-            and (status in ('done','blocked_output','failed') or (status='queued' and tier is not null))
-            and created_at > now() - ${VIEWER_ROAST_WINDOW_MINUTES} * interval '1 minute'`;
-        if ((answered?.count ?? 0) >= VIEWER_ROAST_LIMIT) return rejected("viewer_limit");
-      }
-      // Never below the plan's minimum, whatever the channel stored.
-      const channelPause = effectiveCooldown(
-        context.cooldownSec,
-        context.planCode,
-        context.minCooldownSec
-      );
-      const viewerPause = effectiveCooldown(
-        context.userCooldownSec,
-        context.planCode,
-        context.minCooldownSec
-      );
-      await tx`
-        insert into cooldown_state(channel_id,scope,subject_key,next_allowed_at) values
-         (${job.channelId},'channel','*',now()+${channelPause}*interval '1 second'),
-         (${job.channelId},'viewer',${job.viewerLogin},now()+${viewerPause}*interval '1 second')
-        on conflict(channel_id,scope,subject_key)
-        do update set next_allowed_at=excluded.next_allowed_at,updated_at=now()`;
-    }
-
-    if (used >= monthlyLimit) {
-      const gifted = await tx`
-        update gifted_quota set used=used+1 where id=(
-          select id from gifted_quota where channel_id=${job.channelId} and month=${month}
-          and used<amount order by created_at for update skip locked limit 1
-        ) returning id`;
-      if (!gifted.length) return rejected("channel_quota_exceeded");
-    }
-    await tx`
-      insert into usage_monthly(channel_id,month,roasts) values(${job.channelId},${month},1)
-      on conflict(channel_id,month) do update set roasts=usage_monthly.roasts+1,updated_at=now()`;
-    return {
-      tier: await bookTier(tx as unknown as Sql, job.channelId, month, context),
-      quota: { used: used + 1, limit: monthlyLimit + (usage?.gifted ?? 0) }
-    };
-  });
-}
-
-/**
- * Premium while the plan's monthly premium allowance lasts (tests included: the streamer's first
- * roasts should sound the best), economy after it. Runs inside reserve() under its lock.
- */
-async function bookTier(
-  tx: Sql,
-  channelId: string,
-  month: string,
-  context: ChannelContext
-): Promise<RoastTier> {
-  if (context.premiumRoasts === null) return "premium";
-  if (context.premiumRoasts <= 0) return "economy";
-  const booked = await tx`
-    insert into usage_monthly(channel_id,month,premium_roasts) values(${channelId},${month},1)
-    on conflict(channel_id,month) do update
-      set premium_roasts=usage_monthly.premium_roasts+1, updated_at=now()
-      where usage_monthly.premium_roasts < ${context.premiumRoasts}
-    returning premium_roasts`;
-  return booked.length ? "premium" : "economy";
-}
-
-/**
- * Atomically reserves Yandex requests for the Moscow-time billing month. The upsert only grows
- * the counter while it stays within the cap, so parallel roasts cannot overshoot it together.
- */
 // Enough for the thread of a conversation; older lines only add tokens.
 const HISTORY_EXCHANGES = 3;
 
@@ -402,341 +76,41 @@ async function viewerHistory(
   return rows.length ? { exchanges: rows.reverse() } : undefined;
 }
 
-export async function reserveYandexRequests(
-  sql: Sql,
-  now: Date,
-  requests: number,
-  limitRub: number
-) {
-  const limit = yandexTtsRequestLimit(limitRub);
-  if (requests > limit) return false;
-  const reserved = await sql`
-    insert into tts_usage_monthly(provider,month,requests)
-    values('yandex',${yandexBillingMonth(now)},${requests})
-    on conflict(provider,month) do update
-      set requests=tts_usage_monthly.requests+excluded.requests, updated_at=now()
-      where tts_usage_monthly.requests+excluded.requests <= ${limit}
-    returning requests`;
-  return reserved.length > 0;
-}
-
-// ElevenLabs counts characters per calendar month; same atomic upsert as Yandex, the row
-// stores characters in `requests`.
-export async function reserveElevenLabsCharacters(
-  sql: Sql,
-  now: Date,
-  characters: number,
-  limit: number
-) {
-  if (characters > limit) return false;
-  const reserved = await sql`
-    insert into tts_usage_monthly(provider,month,requests)
-    values('elevenlabs',${now.toISOString().slice(0, 7)},${characters})
-    on conflict(provider,month) do update
-      set requests=tts_usage_monthly.requests+excluded.requests, updated_at=now()
-      where tts_usage_monthly.requests+excluded.requests <= ${limit}
-    returning requests`;
-  return reserved.length > 0;
-}
-
-export async function storeAudio(bytes: Uint8Array, audioDir: string): Promise<string> {
-  const filename = `${randomUUID()}.wav`;
-  await mkdir(audioDir, { recursive: true });
-  const temporary = join(audioDir, `.${randomBytes(12).toString("hex")}.tmp`);
-  await writeFile(temporary, bytes, { flag: "wx" });
-  await rename(temporary, join(audioDir, filename));
-  return filename;
-}
-
-async function recordSpend(sql: Sql, channelId: string, month: string, spends: Spend[]) {
-  const tokensIn = spends.reduce((sum, spend) => sum + spend.tokensIn, 0);
-  const tokensOut = spends.reduce((sum, spend) => sum + spend.tokensOut, 0);
-  const cost = spends.reduce((sum, spend) => sum + costOf(spend), 0);
-  await sql`insert into usage_monthly(channel_id,month,tokens_in,tokens_out,cost_usd)
-    values(${channelId},${month},${tokensIn},${tokensOut},${cost})
-    on conflict(channel_id,month) do update set tokens_in=usage_monthly.tokens_in+excluded.tokens_in,
-      tokens_out=usage_monthly.tokens_out+excluded.tokens_out,
-      cost_usd=usage_monthly.cost_usd+excluded.cost_usd,updated_at=now()`;
-  return { tokensIn, tokensOut, cost };
-}
-
-/** The premium character on air, when the plan includes her. */
-interface OnAirCharacter {
-  id: string;
-  name: string;
-  archetype: Archetype;
-  voiceId: string | null;
-  imagePath: string;
-}
-
-/** Reservations against the owner's monthly caps for the paid voices. */
-async function voiceReservations(deps: PipelineDependencies): Promise<VoiceReservations> {
-  const clock = () => deps.now?.() ?? new Date();
-  const yandexLimitRub = await globalValue<number>(
-    deps.sql,
-    "yandex_tts_monthly_limit_rub",
-    DEFAULT_YANDEX_TTS_MONTHLY_LIMIT_RUB
-  );
-  const elevenLabsLimit = await elevenLabsCharLimit(deps.sql);
-  return {
-    yandex: (requests) => reserveYandexRequests(deps.sql, clock(), requests, yandexLimitRub),
-    elevenlabs: (characters) =>
-      reserveElevenLabsCharacters(deps.sql, clock(), characters, elevenLabsLimit),
-    releaseElevenlabs: (characters) => releaseElevenLabsCharacters(deps.sql, clock(), characters)
-  };
-}
-
-/** Queues a spoken reply for the channel's overlay and wakes the API's dispatcher. */
-async function publishOverlay(
-  tx: Sql,
-  input: {
-    job: RoastRequestedJob;
-    roastId: string;
-    text: string;
-    archetype: Archetype;
-    character: OnAirCharacter | undefined;
-    planCode: string | null;
-    /** A spoken reply; a free stub has none and plays `sound` instead. */
-    audioFile?: string;
-    sound?: StubSound;
-    now: Date;
-    expiresAt: Date;
-  }
-) {
-  const { job, character } = input;
-  const overlayId = randomUUID();
-  const payload: StoredOverlayRoast = {
-    version: 1,
-    type: "roast.play",
-    eventId: overlayId,
-    roastId: input.roastId,
-    viewerLogin: job.viewerLogin,
-    text: input.text,
-    tone: ARCHETYPE_THEME[input.archetype],
-    ...(character ? { character: { name: character.name, imagePath: character.imagePath } } : {}),
-    ...(BRANDED_PLANS.has(input.planCode ?? "") ? { branding: true } : {}),
-    ...(input.audioFile ? { audioFile: input.audioFile } : {}),
-    ...(input.sound ? { sound: input.sound } : {}),
-    expiresAt: input.expiresAt.toISOString(),
-    sentAt: input.now.toISOString()
-  };
-  await tx`insert into overlay_events(id,channel_id,roast_id,payload,expires_at)
-    values(${overlayId},${job.channelId},${input.roastId},${tx.json(payload)},${input.expiresAt.toISOString()})`;
-  await tx`select pg_notify('overlay_events',${job.channelId})`;
-}
-
-const CAPTION_SYSTEM = [
-  "Ты пишешь одну короткую подпись к звуковой заглушке стрима: персонаж не отвечает зрителю.",
-  "Пиши по-русски, иронично, без оскорблений, мата, ссылок и обращений к модели.",
-  "Имя зрителя из <viewer> вставь в подпись точно как есть. Ответ — одна строка, только подпись."
-].join("\n");
-
-/**
- * Haiku writes this viewer's caption. The draft passes the same output checks as a roast, the
- * classifier included; anything refused, or any failure, falls back to the template.
- */
-async function draftCaption(
-  deps: PipelineDependencies,
-  input: { login: string; template: string; toxicity: Toxicity }
-): Promise<{ text: string; spends: Spend[] }> {
-  const { login, template, toxicity } = input;
-  const spends: Spend[] = [];
-  try {
-    const model = await globalValue(deps.sql, "chat_model", DEFAULT_CHAT_MODEL);
-    const drafted = await deps.anthropic.beta.messages.create(
-      modelRequest(model, "generate", CAPTION_SYSTEM, `<viewer>${escapePromptData(login)}</viewer>`)
-    );
-    spends.push(spendOf(drafted.model || model, drafted.usage));
-    const line = enforceOutputLimit(
-      textFrom(drafted).split("\n")[0]?.trim() ?? "",
-      STUB_CAPTION_MAX_CHARACTERS
-    );
-    if (!line.includes(login) || !inspectOutput(line, login, [], toxicity).allowed) {
-      return { text: template, spends };
-    }
-    const classifierModel = await globalValue(deps.sql, "classifier_model", model);
-    const classified = await deps.anthropic.beta.messages.create(
-      modelRequest(
-        classifierModel,
-        "classify",
-        classifierSystemPrompt(toxicity),
-        classifierInput(line)
-      )
-    );
-    spends.push(spendOf(classified.model || classifierModel, classified.usage));
-    const refused =
-      classified.stop_reason === "refusal" ||
-      parseClassifierVerdict(textFrom(classified)) === "block";
-    return { text: refused ? template : line, spends };
-  } catch {
-    return { text: template, spends };
-  }
+export interface ModelChoice {
+  source: RoastSource;
+  named?: boolean | undefined;
+  toxicity: Toxicity;
+  unlimited: boolean;
+  tier: RoastTier;
+  economyModel: string;
+  overrideModel: string | null;
+  overrideChatModel: string | null;
+  /** global_settings.model and chat_model. */
+  globalModel: string;
+  chatModel: string;
 }
 
 /**
- * A free stub: the character's picture, a caption with the viewer's name and a sound effect. No
- * voice, no model for the caption unless the variant asks for it, so it costs nothing to repeat.
+ * Which model writes the roast. Chat words are background chatter nobody paid for: the cheap chat
+ * model answers them on the premium tier too. Paid events, the command and rewards get the global
+ * model. The owner's override for the channel wins; an unlimited channel never drops to the cheap
+ * chat model. "Ноль сожалений" sends the calls that matter to Sonnet on any tier; plain chat words
+ * keep whatever chat model the channel has.
  */
-async function playVisualStub(
-  deps: PipelineDependencies,
-  input: {
-    job: RoastRequestedJob;
-    roastId: string;
-    context: ChannelContext;
-    character: OnAirCharacter | undefined;
-    archetype: Archetype;
-    reason: string;
-    started: number;
-    roll: number;
+export function pickModel(choice: ModelChoice): string {
+  const chatWord = choice.source === "chat_keyword";
+  if (
+    choice.toxicity === ZERO_REGRETS_TOXICITY &&
+    zeroRegretsUsesSonnet(choice.source, choice.named)
+  ) {
+    return ZERO_REGRETS_MODEL;
   }
-): Promise<RoastOutcome> {
-  const { job, roastId, context, character, archetype, reason } = input;
-  // The roll only chose the branch: rescale it to pick one of the variants evenly. A declined
-  // reward always says its own "no".
-  const variant =
-    job.declined && job.source === "reward"
-      ? { text: REWARD_DECLINED_STUB, sound: "tap" as const }
-      : (STUB_VISUALS[Math.floor(input.roll * 2 * STUB_VISUALS.length)] ?? STUB_VISUALS[0]!);
-  const template = variant.text.replaceAll("%USER_NAME%", job.viewerLogin);
-  const drafted = variant.aiDraft
-    ? await draftCaption(deps, { login: job.viewerLogin, template, toxicity: context.toxicity })
-    : { text: template, spends: [] };
-  const now = deps.now?.() ?? new Date();
-  const expiresAt = new Date(now.getTime() + OVERLAY_EVENT_TTL_SECONDS * 1000);
-  await deps.sql.begin(async (tx) => {
-    const spent = drafted.spends.length
-      ? await recordSpend(
-          tx as unknown as Sql,
-          job.channelId,
-          now.toISOString().slice(0, 7),
-          drafted.spends
-        )
-      : { cost: 0 };
-    await tx`update roasts set status='skipped', error=${reason}, output_text=${drafted.text},
-      cost_usd=${spent.cost}, latency_ms=${Date.now() - input.started} where id=${roastId}`;
-    await publishOverlay(tx as unknown as Sql, {
-      job,
-      roastId,
-      text: drafted.text,
-      archetype,
-      character,
-      planCode: context.planCode,
-      sound: variant.sound,
-      now,
-      expiresAt
-    });
-  });
-  return { roastId, status: "skipped", reason };
-}
-
-// Rejections that a direct call answers with a stub instead of silence.
-const STUB_REJECTIONS: Readonly<Record<string, string>> = {
-  cooldown_active: "stub_cooldown",
-  viewer_limit: "stub_viewer_limit",
-  // A stub costs nothing, so an empty quota or budget still gets an answer.
-  channel_quota_exceeded: "stub_quota",
-  global_quota_exceeded: "stub_quota",
-  global_budget_exceeded: "stub_quota"
-};
-
-/**
- * A prerecorded answer instead of a roast: no quota, no model, no classifier (the phrases are
- * ours). The audio is synthesized once per ElevenLabs voice and phrase and kept in stub_audio;
- * without ElevenLabs the next voice speaks and nothing is kept. One stub waits in the overlay
- * queue per viewer at most, so a spammer cannot fill it.
- */
-async function playStub(
-  deps: PipelineDependencies,
-  input: {
-    job: RoastRequestedJob;
-    roastId: string;
-    context: ChannelContext;
-    character: OnAirCharacter | undefined;
-    archetype: Archetype;
-    reason: string;
-    started: number;
+  if (choice.unlimited) {
+    return (chatWord ? choice.overrideChatModel : null) ?? choice.overrideModel ?? UNLIMITED_MODEL;
   }
-): Promise<RoastOutcome> {
-  const { job, roastId, context, character, archetype, reason } = input;
-  const outcome: RoastOutcome = { roastId, status: "skipped", reason };
-  const [waiting] = await deps.sql`
-    select 1 from overlay_events e join roasts r on r.id=e.roast_id
-    where e.channel_id=${job.channelId} and e.status='pending' and left(r.error,5)='stub_'
-      and lower(r.viewer_login)=lower(${job.viewerLogin}) limit 1`;
-  if (waiting) {
-    await deps.sql`update roasts set status='skipped', error=${reason},
-      latency_ms=${Date.now() - input.started} where id=${roastId}`;
-    return outcome;
-  }
-
-  // Half the stubs are free ones: picture, caption and a sound. The other half is spoken.
-  const roll = (deps.random ?? Math.random)();
-  if (roll < 0.5) {
-    return await playVisualStub(deps, {
-      job,
-      roastId,
-      context,
-      character,
-      archetype,
-      reason,
-      started: input.started,
-      roll
-    });
-  }
-
-  const phrases = STUB_PHRASES[archetype];
-  const text =
-    job.source === "reward"
-      ? REWARD_DECLINED_STUB
-      : phrases[Math.floor(Math.random() * phrases.length)]!;
-  const voiceId = elevenLabsVoiceFor(archetype, deps.config, character && character.voiceId);
-  const voiceKey = voiceId ? `elevenlabs:${voiceId}` : null;
-  const [cached] = voiceKey
-    ? await deps.sql<{ audio: Buffer }[]>`
-        select audio from stub_audio where voice_key=${voiceKey} and text=${text}`
-    : [];
-  let speech: Speech;
-  if (cached) speech = { audio: new Uint8Array(cached.audio), provider: "elevenlabs", costUsd: 0 };
-  else {
-    speech = await speak(
-      text,
-      archetype,
-      deps.config,
-      deps.fetch ?? globalThis.fetch,
-      await voiceReservations(deps),
-      character ? { voiceId: character.voiceId } : {}
-    );
-    if (voiceKey && speech.provider === "elevenlabs") {
-      await deps.sql`insert into stub_audio(voice_key,text,audio)
-        values(${voiceKey},${text},${Buffer.from(speech.audio)}) on conflict do nothing`;
-    }
-  }
-  const audioFile = await storeAudio(speech.audio, deps.config.AUDIO_DIR);
-  const now = deps.now?.() ?? new Date();
-  const expiresAt = new Date(now.getTime() + OVERLAY_EVENT_TTL_SECONDS * 1000);
-  const { provider, costUsd } = speech;
-  await deps.sql.begin(async (tx) => {
-    const spent = costUsd
-      ? await recordSpend(tx as unknown as Sql, job.channelId, now.toISOString().slice(0, 7), [
-          { model: `tts:${provider}`, tokensIn: 0, tokensOut: 0, fixedUsd: costUsd }
-        ])
-      : { cost: 0 };
-    await tx`update roasts set status='skipped', error=${reason}, output_text=${text},
-      voice_provider=${provider}, tts_chars=${Array.from(text).length}, cost_usd=${spent.cost},
-      latency_ms=${Date.now() - input.started} where id=${roastId}`;
-    await publishOverlay(tx as unknown as Sql, {
-      job,
-      roastId,
-      text,
-      archetype,
-      character,
-      planCode: context.planCode,
-      audioFile,
-      now,
-      expiresAt
-    });
-  });
-  return outcome;
+  if (choice.tier !== "premium") return choice.economyModel;
+  if (chatWord) return choice.overrideChatModel ?? choice.chatModel;
+  return choice.overrideModel ?? choice.globalModel;
 }
 
 export async function processRoast(
@@ -841,24 +215,18 @@ export async function processRoast(
     const { tier, quota } = reservation;
 
     const globalModel = await globalValue(deps.sql, "model", DEFAULT_ANTHROPIC_MODEL);
-    // Chat words are background chatter nobody paid for: the cheap chat model answers them on the
-    // premium tier too. Paid events, the command and rewards get the global model. The owner's
-    // override for the channel wins; an unlimited channel never drops to the cheap chat model.
-    // "Ноль сожалений" sends the calls that matter to Sonnet on any tier; plain chat words keep
-    // whatever chat model the channel has.
-    const model =
-      context.toxicity === ZERO_REGRETS_TOXICITY && zeroRegretsUsesSonnet(job.source, job.named)
-        ? ZERO_REGRETS_MODEL
-        : context.unlimited
-          ? ((job.source === "chat_keyword" ? context.overrideChatModel : null) ??
-            context.overrideModel ??
-            UNLIMITED_MODEL)
-          : tier !== "premium"
-            ? context.economyModel
-            : job.source === "chat_keyword"
-              ? (context.overrideChatModel ??
-                (await globalValue(deps.sql, "chat_model", DEFAULT_CHAT_MODEL)))
-              : (context.overrideModel ?? globalModel);
+    const model = pickModel({
+      source: job.source,
+      named: job.named,
+      toxicity: context.toxicity,
+      unlimited: context.unlimited,
+      tier,
+      economyModel: context.economyModel,
+      overrideModel: context.overrideModel,
+      overrideChatModel: context.overrideChatModel,
+      globalModel,
+      chatModel: await globalValue(deps.sql, "chat_model", DEFAULT_CHAT_MODEL)
+    });
     // The classifier is the safety net: it stays the same on every tier.
     const classifierModel = await globalValue(deps.sql, "classifier_model", globalModel);
     await deps.sql`update roasts set tier=${tier}, model=${model}, tone=${archetype},

@@ -4,7 +4,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vites
 
 import type { WorkerConfig } from "./config.js";
 import { elevenLabsCharLimit, syncElevenLabsUsage } from "./elevenlabs.js";
-import { reserveElevenLabsCharacters } from "./pipeline.js";
+import { reserveElevenLabsCharacters } from "./limits.js";
 import { speak } from "./tts.js";
 
 let db: TestDatabase;

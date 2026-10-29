@@ -338,6 +338,8 @@ export const usageMonthly = pgTable(
   },
   (table) => [
     primaryKey({ columns: [table.channelId, table.month] }),
+    // The service-wide sum of a month: reserve(), the panel's status and /admin.
+    index("usage_monthly_month_idx").on(table.month),
     check("usage_monthly_premium_roasts_check", sql`${table.premiumRoasts} >= 0`),
     check("usage_monthly_month_check", sql`${table.month} ~ '^[0-9]{4}-(0[1-9]|1[0-2])$'`),
     check(

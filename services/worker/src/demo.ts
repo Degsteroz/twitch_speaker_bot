@@ -19,15 +19,10 @@ import {
 } from "@roastbot/shared";
 
 import { modelRequest } from "./models.js";
-import {
-  costOf,
-  demoSpendSql,
-  globalValue,
-  reserveYandexRequests,
-  storeAudio,
-  textFrom,
-  type PipelineDependencies
-} from "./pipeline.js";
+import { globalValue, type PipelineDependencies } from "./context.js";
+import { demoSpendSql, reserveYandexRequests } from "./limits.js";
+import { storeAudio } from "./overlay.js";
+import { costOf, textFrom } from "./spend.js";
 import { speak } from "./tts.js";
 
 // Ai on the landing page: a mild yandere at toxicity 2, voiced by Yandex only.

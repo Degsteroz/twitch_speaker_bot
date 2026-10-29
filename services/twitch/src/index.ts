@@ -5,59 +5,26 @@ import {
   COMMAND_PLANS,
   CUSTOM_CHARACTER_PLANS,
   donationDelaySeconds,
-  gameContext,
   KEYWORD_EVERY,
   REWARD_EVERY,
   ROAST_REQUESTED_QUEUE,
   ROAST_REQUESTED_QUEUE_OPTIONS,
   STREAMER_JOB_PRIORITY,
-  TELEGRAM_NOTIFY_QUEUE,
-  triggerSettingsSchema,
-  type TriggerSettings
+  TELEGRAM_NOTIFY_QUEUE
 } from "@roastbot/shared";
 import { PgBoss } from "pg-boss";
 import tmi from "tmi.js";
 import type { JSONValue } from "postgres";
-import WebSocket from "ws";
-import { z } from "zod";
 
-import {
-  decryptToken,
-  encryptToken,
-  enqueueEvent,
-  isOnCooldown,
-  reconnectDelayMs
-} from "./core.js";
+import { activeChannels, channelApi, specsKey, type Channel } from "./channels.js";
+import { loadConfig } from "./config.js";
+import { enqueueEvent, isOnCooldown } from "./core.js";
 import { DonationAlertsConnection, type DonationAlertsAccount } from "./donationalerts.js";
-import {
-  EveryNth,
-  chatTrigger,
-  donationRoast,
-  eventRoast,
-  optOutCommand,
-  subscriptionSpecs,
-  type SubscriptionSpec
-} from "./triggers.js";
+import { EventSubConnection, type EventSubHooks } from "./eventsub.js";
+import { JOIN_INTERVAL_MS, JoinQueue } from "./join-queue.js";
+import { EveryNth, chatTrigger, donationRoast, eventRoast, optOutCommand } from "./triggers.js";
 
-const config = z
-  .object({
-    DATABASE_URL: z.string().min(1),
-    TWITCH_CLIENT_ID: z.string().min(1),
-    TWITCH_CLIENT_SECRET: z.string().min(1),
-    TOKEN_ENCRYPTION_KEY: z.string().regex(/^[a-fA-F0-9]{64}$/u),
-    // Optional: without both, connected DonationAlerts accounts are not listened to.
-    DONATIONALERTS_CLIENT_ID: z.string().optional(),
-    DONATIONALERTS_CLIENT_SECRET: z.string().optional(),
-    // Twitch CLI mock (`twitch event websocket start-server`) for local checks:
-    // ws://127.0.0.1:8080/ws and http://127.0.0.1:8080/eventsub/subscriptions.
-    TWITCH_EVENTSUB_WS_URL: z.string().url().default("wss://eventsub.wss.twitch.tv/ws"),
-    TWITCH_EVENTSUB_SUBSCRIPTIONS_URL: z
-      .string()
-      .url()
-      .default("https://api.twitch.tv/helix/eventsub/subscriptions")
-  })
-  .parse(process.env);
-
+const config = loadConfig();
 const database = createDatabase(config.DATABASE_URL, { applicationName: "roastbot-twitch" });
 const sql = database.client;
 const boss = new PgBoss(config.DATABASE_URL);
@@ -66,68 +33,18 @@ await boss.start();
 await boss.createQueue(ROAST_REQUESTED_QUEUE, { ...ROAST_REQUESTED_QUEUE_OPTIONS });
 await boss.createQueue(TELEGRAM_NOTIFY_QUEUE);
 
-interface ChannelRow {
-  id: string;
-  twitchId: string;
-  twitchLogin: string;
-  triggers: unknown;
-  scopes: string[];
-  planCode: string | null;
-  /** The owner's channel or an unlimited favourite: no frequency, pauses or plan gates. */
-  unlimited: boolean;
-  /** The premium character's name on this channel, when she is usable. */
-  characterName: string | null;
-  accessCiphertext: string;
-  accessIv: string;
-  accessTag: string;
-  refreshCiphertext: string;
-  refreshIv: string;
-  refreshTag: string;
-  expiresAt: Date;
-}
+const { accessToken, withGame } = channelApi(sql, config);
 
-interface Channel extends Omit<ChannelRow, "triggers"> {
-  triggers: TriggerSettings;
-  /** EventSub subscriptions this channel needs; empty means no EventSub connection. */
-  specs: SubscriptionSpec[];
-}
-
-async function activeChannels(): Promise<Channel[]> {
-  const rows = await sql<ChannelRow[]>`
-    select c.id,c.twitch_login "twitchLogin",u.twitch_id "twitchId",s.triggers,t.scopes,
-      t.access_token_ciphertext "accessCiphertext",
-      t.access_token_iv "accessIv",t.access_token_tag "accessTag",
-      t.refresh_token_ciphertext "refreshCiphertext",t.refresh_token_iv "refreshIv",
-      t.refresh_token_tag "refreshTag",t.expires_at "expiresAt",p.code "planCode",
-      (u.role='owner' or coalesce(o.unlimited,false)) unlimited,
-      coalesce(s.character_name, ch.name) "characterName"
-    from channels c join users u on u.id=c.user_id join settings s on s.channel_id=c.id
-    join twitch_tokens t on t.channel_id=c.id
-    left join characters ch on ch.id=s.character_id and ch.image_hash is not null
-      and (ch.author_channel_id=c.id or ch.status='published')
-    left join lateral (
-      select sub.plan_id from subscriptions sub
-      where sub.user_id=u.id and (sub.valid_until is null or sub.valid_until>now())
-      order by sub.created_at desc limit 1
-    ) sub on true
-    left join plans p on p.id=sub.plan_id
-    left join channel_overrides o on o.channel_id=c.id
-    where u.status='active' and s.enabled=true`;
-  return rows.flatMap((row) => {
-    // Rows saved before newer trigger fields existed are completed with defaults here.
-    const parsed = triggerSettingsSchema.safeParse(row.triggers ?? {});
-    if (!parsed.success) {
-      console.error(`Invalid trigger settings for ${row.twitchLogin}; channel skipped`);
-      return [];
-    }
-    const triggers = parsed.data;
-    return [{ ...row, triggers, specs: subscriptionSpecs({ ...row, triggers }, row.scopes) }];
-  });
-}
-
-const specsKey = (channel: Channel) => JSON.stringify(channel.specs);
-
-const chat = new tmi.Client({ connection: { reconnect: true, secure: true } });
+// tmi rejoins every joined channel after a reconnect at this pace; our own joins share the budget.
+const chat = new tmi.Client({
+  options: { joinInterval: JOIN_INTERVAL_MS },
+  connection: { reconnect: true, secure: true }
+});
+const joins = new JoinQueue({
+  join: (login) => chat.join(login),
+  joined: (login) => chat.getChannels().includes(`#${login}`),
+  log: (message, error) => console.error(message, error)
+});
 const eventSubs = new Map<string, EventSubConnection>();
 const donationFeeds = new Map<string, DonationAlertsConnection>();
 const timers: { reconciliation?: NodeJS.Timeout } = {};
@@ -135,6 +52,7 @@ const timers: { reconciliation?: NodeJS.Timeout } = {};
 // Registered before connecting to IRC so a stop during startup still shuts down cleanly.
 async function shutdown() {
   clearInterval(timers.reconciliation);
+  joins.stop();
   for (const connection of eventSubs.values()) connection.stop();
   for (const feed of donationFeeds.values()) feed.stop();
   await chat.disconnect().catch(() => undefined);
@@ -207,226 +125,33 @@ chat.on("message", (channelName, tags, message, self) => {
     });
   })().catch(console.error);
 });
+// After a reconnect tmi rejoins everything that was joined; ours wait until it is done.
+chat.on("connected", () => joins.pause(channelByLogin.size * JOIN_INTERVAL_MS));
 await chat.connect();
 
-// The channel's category, for the prompt. One Helix call per channel per 10 minutes at most, and
-// a failure only costs the context: the roast goes out without a game.
-const GAME_TTL_MS = 10 * 60_000;
-const gameCache = new Map<string, { game: string | undefined; at: number }>();
-async function channelGame(channel: Channel): Promise<string | undefined> {
-  const cached = gameCache.get(channel.id);
-  if (cached && Date.now() - cached.at < GAME_TTL_MS) return cached.game;
-  let game: string | undefined;
-  try {
-    const response = await fetch(
-      `https://api.twitch.tv/helix/channels?broadcaster_id=${encodeURIComponent(channel.twitchId)}`,
-      {
-        headers: {
-          Authorization: `Bearer ${await accessToken(channel)}`,
-          "Client-Id": config.TWITCH_CLIENT_ID
-        },
-        signal: AbortSignal.timeout(2_000)
-      }
-    );
-    if (response.ok) {
-      const body = (await response.json()) as { data?: { game_name?: unknown }[] };
-      const name = body.data?.[0]?.game_name;
-      game = gameContext(typeof name === "string" ? name : undefined);
-    }
-  } catch (error) {
-    console.warn(`Twitch category for ${channel.twitchLogin}:`, error);
-  }
-  gameCache.set(channel.id, { game, at: Date.now() });
-  return game;
-}
-const withGame = async (channel: Channel) => {
-  const game = await channelGame(channel);
-  return game ? { game } : {};
-};
-
-async function accessToken(channel: Channel): Promise<string> {
-  if (channel.expiresAt.getTime() > Date.now() + 120_000) {
-    return decryptToken(
-      {
-        ciphertext: channel.accessCiphertext,
-        iv: channel.accessIv,
-        tag: channel.accessTag
-      },
-      config.TOKEN_ENCRYPTION_KEY
-    );
-  }
-  const refresh = decryptToken(
-    {
-      ciphertext: channel.refreshCiphertext,
-      iv: channel.refreshIv,
-      tag: channel.refreshTag
-    },
-    config.TOKEN_ENCRYPTION_KEY
-  );
-  const response = await fetch("https://id.twitch.tv/oauth2/token", {
-    method: "POST",
-    body: new URLSearchParams({
-      client_id: config.TWITCH_CLIENT_ID,
-      client_secret: config.TWITCH_CLIENT_SECRET,
-      grant_type: "refresh_token",
-      refresh_token: refresh
-    })
-  });
-  if (!response.ok) throw new Error(`token_refresh_${response.status}`);
-  const token = z
-    .object({
-      access_token: z.string(),
-      refresh_token: z.string(),
-      expires_in: z.number(),
-      scope: z.array(z.string())
-    })
-    .parse(await response.json());
-  const encryptedAccess = encryptToken(token.access_token, config.TOKEN_ENCRYPTION_KEY);
-  const encryptedRefresh = encryptToken(token.refresh_token, config.TOKEN_ENCRYPTION_KEY);
-  await sql`update twitch_tokens set access_token_ciphertext=${encryptedAccess.ciphertext},
-    access_token_iv=${encryptedAccess.iv},access_token_tag=${encryptedAccess.tag},
-    refresh_token_ciphertext=${encryptedRefresh.ciphertext},refresh_token_iv=${encryptedRefresh.iv},
-    refresh_token_tag=${encryptedRefresh.tag},expires_at=now()+${token.expires_in}*interval '1 second',
-    scopes=${token.scope},updated_at=now() where channel_id=${channel.id}`;
-  channel.accessCiphertext = encryptedAccess.ciphertext;
-  channel.accessIv = encryptedAccess.iv;
-  channel.accessTag = encryptedAccess.tag;
-  channel.refreshCiphertext = encryptedRefresh.ciphertext;
-  channel.refreshIv = encryptedRefresh.iv;
-  channel.refreshTag = encryptedRefresh.tag;
-  channel.expiresAt = new Date(Date.now() + token.expires_in * 1000);
-  return token.access_token;
-}
-
-class EventSubConnection {
-  private socket?: WebSocket;
-  private watchdog?: NodeJS.Timeout;
-  private stopped = false;
-  private keepaliveSeconds = 10;
-  private failures = 0;
-  private reconnectTimer?: NodeJS.Timeout;
-
-  constructor(private channel: Channel) {}
-
-  get key(): string {
-    return specsKey(this.channel);
-  }
-
-  start(url = config.TWITCH_EVENTSUB_WS_URL, subscribeOnWelcome = true): void {
-    if (this.stopped) return;
-    const socket = new WebSocket(url);
-    this.socket = socket;
-    socket.on(
-      "message",
-      (data) =>
-        void this.onMessage(
-          Array.isArray(data)
-            ? Buffer.concat(data).toString("utf8")
-            : Buffer.from(data instanceof ArrayBuffer ? new Uint8Array(data) : data).toString(
-                "utf8"
-              ),
-          subscribeOnWelcome
-        ).catch((error) => {
-          console.error(`EventSub ${this.channel.twitchLogin}:`, error);
-          socket.close();
-        })
-    );
-    socket.on("close", () => {
-      if (this.socket !== socket || this.stopped) return;
-      void saveEventSubState(this.channel.id, false).catch(console.error);
-      const delay = reconnectDelayMs(this.failures++);
-      this.reconnectTimer = setTimeout(() => this.start(), delay);
-    });
-    socket.on("error", (error) => console.error(`EventSub ${this.channel.twitchLogin}:`, error));
-  }
-
-  update(channel: Channel): void {
-    this.channel = channel;
-  }
-
-  stop(): void {
-    this.stopped = true;
-    if (this.watchdog) clearTimeout(this.watchdog);
-    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
-    this.socket?.close();
-  }
-
-  private armWatchdog(seconds: number): void {
-    if (this.watchdog) clearTimeout(this.watchdog);
-    this.watchdog = setTimeout(() => this.socket?.terminate(), (seconds + 10) * 1000);
-  }
-
-  private async onMessage(raw: string, subscribeOnWelcome: boolean): Promise<void> {
-    const message = z
-      .object({
-        metadata: z.object({ message_type: z.string(), message_id: z.string() }),
-        payload: z.record(z.string(), z.unknown())
-      })
-      .passthrough()
-      .parse(JSON.parse(raw));
-    const type = message.metadata.message_type;
-    if (type === "session_welcome") {
-      const session = z
-        .object({ id: z.string(), keepalive_timeout_seconds: z.number() })
-        .parse((message.payload as { session?: unknown }).session);
-      this.keepaliveSeconds = session.keepalive_timeout_seconds;
-      this.armWatchdog(this.keepaliveSeconds);
-      if (subscribeOnWelcome) {
-        const results: Record<string, string> = {};
-        for (const spec of this.channel.specs) {
-          results[spec.type] = await this.subscribe(session.id, spec);
-        }
-        await saveEventSubState(this.channel.id, true, results);
-        await notifyRejected(this.channel, results);
-      }
-      this.failures = 0;
-      return;
-    }
-    if (type === "session_keepalive") {
-      this.armWatchdog(this.keepaliveSeconds);
-      return;
-    }
-    if (type === "session_reconnect") {
-      const reconnect = z
-        .object({ reconnect_url: z.string().url() })
-        .parse((message.payload as { session?: unknown }).session);
-      const previous = this.socket;
-      this.start(reconnect.reconnect_url, false);
-      setTimeout(() => previous?.close(), 1_000);
-      return;
-    }
-    if (type === "revocation") {
-      console.error(`EventSub subscription revoked for ${this.channel.twitchLogin}`);
-      this.socket?.close();
-      return;
-    }
-    if (type !== "notification") return;
-    const subscriptionType = z
-      .object({ subscription_type: z.string() })
-      .parse(message.metadata).subscription_type;
-    const event = z
-      .record(z.string(), z.unknown())
-      .parse((message.payload as { event?: unknown }).event);
-    const roast = eventRoast(
-      subscriptionType,
-      event,
-      this.channel.triggers,
-      this.channel.twitchLogin
-    );
+const eventSubHooks: EventSubHooks = {
+  wsUrl: config.TWITCH_EVENTSUB_WS_URL,
+  subscriptionsUrl: config.TWITCH_EVENTSUB_SUBSCRIPTIONS_URL,
+  clientId: config.TWITCH_CLIENT_ID,
+  accessToken,
+  subscribed: async (channel, results) => {
+    await saveEventSubState(channel.id, true, results);
+    await notifyRejected(channel, results);
+  },
+  disconnected: (channel) => saveEventSubState(channel.id, false),
+  notification: async (channel, { subscriptionType, event, messageId, raw }) => {
+    const roast = eventRoast(subscriptionType, event, channel.triggers, channel.twitchLogin);
     if (!roast) return;
     // Every Nth reward gets a roast, the others a short "no" (REWARD_DECLINED_STUB).
     let declined = false;
-    if (roast.source === "reward" && !this.channel.unlimited) {
-      declined = !rewardGate.due(
-        this.channel.id,
-        REWARD_EVERY[this.channel.triggers.chatFrequency]
-      );
-      if (!declined) rewardGate.reset(this.channel.id);
+    if (roast.source === "reward" && !channel.unlimited) {
+      declined = !rewardGate.due(channel.id, REWARD_EVERY[channel.triggers.chatFrequency]);
+      if (!declined) rewardGate.reset(channel.id);
     }
     await enqueueEvent(sql, boss, {
-      channelId: this.channel.id,
+      channelId: channel.id,
       source: roast.source,
-      providerEventId: message.metadata.message_id,
+      providerEventId: messageId,
       ...(roast.viewerId ? { viewerId: roast.viewerId } : {}),
       viewerLogin: roast.viewerLogin,
       inputText: roast.inputText,
@@ -434,46 +159,12 @@ class EventSubConnection {
       ...(roast.eventSummary ? { eventSummary: roast.eventSummary } : {}),
       ...(declined ? { declined } : {}),
       // The streamer redeeming their own reward is the streamer's request too.
-      ...(roast.viewerId === this.channel.twitchId ? { priority: STREAMER_JOB_PRIORITY } : {}),
-      ...(await withGame(this.channel)),
+      ...(roast.viewerId === channel.twitchId ? { priority: STREAMER_JOB_PRIORITY } : {}),
+      ...(await withGame(channel)),
       raw: JSON.parse(raw) as JSONValue
     });
   }
-
-  /** "ok", or Twitch's status and message, for the panel. */
-  private async subscribe(
-    sessionId: string,
-    spec: SubscriptionSpec,
-    retryUnauthorized = true
-  ): Promise<string> {
-    const token = await accessToken(this.channel);
-    const response = await fetch(config.TWITCH_EVENTSUB_SUBSCRIPTIONS_URL, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "Client-Id": config.TWITCH_CLIENT_ID,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-        type: spec.type,
-        version: spec.version,
-        condition: spec.condition,
-        transport: { method: "websocket", session_id: sessionId }
-      })
-    });
-    if (response.status === 401 && retryUnauthorized) {
-      this.channel.expiresAt = new Date(0);
-      return this.subscribe(sessionId, spec, false);
-    }
-    if (response.ok) return "ok";
-    // One rejected event type (e.g. a scope revoked on Twitch's side) must not take down the
-    // others on this connection.
-    const body = (await response.json().catch(() => ({}))) as { message?: unknown };
-    const reason = `${String(response.status)}${typeof body.message === "string" ? ` ${body.message}` : ""}`;
-    console.error(`EventSub ${this.channel.twitchLogin}: ${spec.type} rejected (${reason})`);
-    return reason.slice(0, 200);
-  }
-}
+};
 
 /** Tells the streamer's Telegram once a day per type that Twitch refused a subscription. */
 async function notifyRejected(channel: Channel, results: Record<string, string>): Promise<void> {
@@ -508,18 +199,22 @@ async function saveEventSubState(
 }
 
 async function reconcile(): Promise<void> {
-  const channels = await activeChannels();
+  const channels = await activeChannels(sql);
   const desired = new Set(channels.map((channel) => channel.twitchLogin.toLowerCase()));
-  for (const joined of channelByLogin.keys()) {
-    if (!desired.has(joined)) {
-      await chat.part(joined);
-      channelByLogin.delete(joined);
+  for (const login of [...channelByLogin.keys()]) {
+    if (!desired.has(login)) {
+      channelByLogin.delete(login);
+      joins.forget(login);
+      // A failed PART only leaves a channel whose messages nobody reads any more.
+      chat.part(login).catch((error: unknown) => console.error(`IRC part ${login}:`, error));
     }
   }
   for (const channel of channels) {
     const login = channel.twitchLogin.toLowerCase();
-    if (!channelByLogin.has(login)) await chat.join(login);
     channelByLogin.set(login, channel);
+    // JOINs go out at Twitch's pace in the background, so a thousand channels never hold up the
+    // EventSub sessions below; one that fails is asked for again on the next reconcile.
+    joins.want(login);
     const current = eventSubs.get(channel.id);
     if (!channel.specs.length) {
       if (current) {
@@ -533,7 +228,7 @@ async function reconcile(): Promise<void> {
     else {
       // Subscriptions are created on session welcome, so a changed set needs a new session.
       current?.stop();
-      const connection = new EventSubConnection(channel);
+      const connection = new EventSubConnection(channel, eventSubHooks);
       eventSubs.set(channel.id, connection);
       connection.start();
     }
