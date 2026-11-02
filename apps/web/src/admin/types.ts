@@ -36,6 +36,8 @@ export interface ChannelOverride {
   chatModel: string | null;
   economyModel: string | null;
   economyVoice: "yandex" | null;
+  /** The first voice of premium roasts; null starts at ElevenLabs. */
+  bestVoice: "elevenlabs" | "inworld" | "yandex" | null;
   note: string | null;
 }
 
@@ -106,4 +108,37 @@ export interface Invite {
   created_at: string;
   used_at: string | null;
   used_by_login: string | null;
+}
+
+export interface SpendGroup {
+  kind: "roast" | "stub" | "failed" | "blocked";
+  tier: string | null;
+  model: string | null;
+  voice: string | null;
+  count: number;
+  usd: number;
+  chars: number;
+}
+
+export interface Spend {
+  month: string;
+  groups: SpendGroup[];
+  reasons: { status: string; reason: string | null; count: number }[];
+  days: { day: string; roasts: number; usd: number }[];
+  usd: number;
+  demoUsd: number;
+  budget: number;
+  /** The prepaid ElevenLabs plan at list price: inside `usd`, not paid on top. */
+  elevenLabsUsd: number;
+}
+
+export interface ServerHealth {
+  load: number[];
+  cpus: number;
+  memory: { total: number; free: number };
+  disk: { total: number; free: number } | null;
+  database: number;
+  tables: { name: string; bytes: number }[];
+  audio: { bytes: number; files: number } | null;
+  uptimeSec: number;
 }

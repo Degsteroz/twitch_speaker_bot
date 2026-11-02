@@ -1,4 +1,9 @@
-import type { RoastSource, RoastTarget, TriggerSettings } from "@roastbot/shared";
+import {
+  TOP_BOARD_COMMANDS,
+  type RoastSource,
+  type RoastTarget,
+  type TriggerSettings
+} from "@roastbot/shared";
 
 import { parseRoastCommand } from "./core.js";
 
@@ -39,6 +44,21 @@ export function optOutCommand(message: string): "stop" | "start" | null {
     return "start";
   }
   return null;
+}
+
+/**
+ * "!топ" (or "!top") when the channel turned the board on; known bots and ignored users never
+ * call it. The command must be the first word, like any chat command.
+ */
+export function boardCall(
+  chat: Pick<ChatMessage, "message" | "username">,
+  triggers: TriggerSettings
+) {
+  if (!triggers.topBoard) return false;
+  const login = chat.username.toLowerCase();
+  if (KNOWN_BOTS.has(login) || triggers.ignoredUsers.includes(login)) return false;
+  const command = fold(chat.message.trim()).split(/\s+/u)[0] ?? "";
+  return TOP_BOARD_COMMANDS.has(command);
 }
 
 /** `random` is in [0, 1): below the percentage means "yes". */

@@ -60,6 +60,8 @@ export async function enqueueEvent(
     declined?: boolean;
     /** A chat word that calls the character by name: the worker may answer it with a stub. */
     named?: boolean;
+    /** "!топ": the worker shows the board instead of a roast. */
+    board?: boolean;
     /** pg-boss priority; the streamer's own requests get STREAMER_JOB_PRIORITY. */
     priority?: number;
     raw: JSONValue;
@@ -85,6 +87,7 @@ export async function enqueueEvent(
       ...(input.game ? { game: input.game.slice(0, 100) } : {}),
       ...(input.declined ? { declined: true } : {}),
       ...(input.named ? { named: true } : {}),
+      ...(input.board ? { board: true } : {}),
       requestedAt: new Date().toISOString()
     },
     {

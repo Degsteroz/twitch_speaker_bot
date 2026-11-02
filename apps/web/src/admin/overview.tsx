@@ -1,12 +1,80 @@
 // Overview: what needs attention, money against the limits, today.
 import { Link, Metric, State } from "../ui.js";
 import { Section, useAdmin } from "./common.js";
-import type { Overview } from "./types.js";
+import type { Overview, ServerHealth } from "./types.js";
 
 const shortTime = (iso: string) =>
   new Date(iso).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" });
 
 const share = (used: number, limit: number) => used / Math.max(limit, 0.000_001);
+
+const size = (bytes: number) =>
+  bytes >= 1024 ** 3
+    ? `${(bytes / 1024 ** 3).toFixed(1)} ГБ`
+    : `${Math.round(bytes / 1024 ** 2).toLocaleString("ru-RU")} МБ`;
+
+/**
+ * The VPS as the API container sees it: load and memory of the host, the disk the volumes live
+ * on, the database and the audio folder. Read when the tab opens, never in the background.
+ */
+function ServerSection() {
+  const { data, error, load } = useAdmin<ServerHealth>("/admin/server");
+  if (error) return <State title="Сервер не ответил" text={error} action={load} />;
+  if (!data) return null;
+  const [load1 = 0, , load15 = 0] = data.load;
+  const memoryUsed = data.memory.total - data.memory.free;
+  const diskUsed = data.disk ? data.disk.total - data.disk.free : 0;
+  return (
+    <Section
+      title="Сервер"
+      note={`Работает ${String(Math.floor(data.uptimeSec / 86_400))} дн. Нагрузка выше числа ядер или почти полный диск — причина тормозов.`}
+    >
+      <div className="metric-grid">
+        <Metric
+          label="Нагрузка"
+          value={load1.toFixed(2)}
+          note={`за минуту · ${load15.toFixed(2)} за 15 минут · ядер ${String(data.cpus)}`}
+          used={share(load1, data.cpus)}
+          warn={load15 > data.cpus}
+        />
+        <Metric
+          label="Память"
+          value={size(memoryUsed)}
+          note={`занято из ${size(data.memory.total)}, свободно ${size(data.memory.free)}`}
+          used={share(memoryUsed, data.memory.total)}
+          warn={share(memoryUsed, data.memory.total) > 0.9}
+        />
+        {data.disk && (
+          <Metric
+            label="Диск"
+            value={size(data.disk.free)}
+            note={`свободно из ${size(data.disk.total)}`}
+            used={share(diskUsed, data.disk.total)}
+            warn={share(diskUsed, data.disk.total) > 0.85}
+          />
+        )}
+        <Metric
+          label="База данных"
+          value={size(data.database)}
+          note={data.tables
+            .slice(0, 3)
+            .map((table) => `${table.name} ${size(table.bytes)}`)
+            .join(" · ")}
+        />
+        {data.audio && (
+          <Metric
+            label="Аудио"
+            value={size(data.audio.bytes)}
+            note={`${String(data.audio.files)} файлов, старые чистятся сами`}
+          />
+        )}
+      </div>
+      <button className="button secondary" onClick={() => void load()}>
+        Обновить
+      </button>
+    </Section>
+  );
+}
 
 export function AdminOverview() {
   const { data, error, load } = useAdmin<Overview>("/admin/overview");
@@ -130,6 +198,7 @@ export function AdminOverview() {
           />
         </div>
       </Section>
+      <ServerSection />
     </>
   );
 }

@@ -15,6 +15,7 @@ import {
 import { ask, askText } from "../ask.js";
 import { Card, errorText, Field } from "../ui.js";
 import { useAdmin } from "./common.js";
+import { VoiceCompare } from "./voice-compare.js";
 
 interface AdminCharacter extends CharacterView {
   usedBy: number;
@@ -50,6 +51,7 @@ export function AdminCharacters() {
     <>
       <ShopReview />
       <Voices />
+      <VoiceCompare />
     </>
   );
 }

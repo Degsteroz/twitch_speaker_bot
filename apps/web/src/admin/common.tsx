@@ -49,9 +49,7 @@ export function Section({
   );
 }
 
-// Models with known prices (packages/prompts); an unknown one is billed at the highest rate.
-// Only Sonnet and Haiku: Opus cost 2.5 times Sonnet per roast in October 2026 for no gain worth it.
-// A model stored earlier (Opus, Fable) still shows as its own option until it is changed.
+// The models the service runs (MODEL_IDS in packages/shared); the API refuses any other.
 export const MODELS = [
   ["claude-sonnet-5-5", "Sonnet 5.5 — умный"],
   ["claude-haiku-5-5", "Haiku 5.5 — дешёвый и быстрый"]

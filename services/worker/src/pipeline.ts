@@ -37,6 +37,7 @@ import {
 } from "@roastbot/shared";
 
 import {
+  firstVoice,
   globalValue,
   loadContext,
   rejectionFor,
@@ -45,6 +46,7 @@ import {
   type Sql
 } from "./context.js";
 import { reserve, voiceReservations } from "./limits.js";
+import { playBoard } from "./board.js";
 import { modelRequest } from "./models.js";
 import { publishOverlay, storeAudio } from "./overlay.js";
 import { recordSpend, spendOf, textFrom, type Spend } from "./spend.js";
@@ -159,8 +161,10 @@ export async function processRoast(
     }
     // `!роаст` is a paid feature. The twitch service drops it on free channels already; this is
     // the authoritative check for a job queued before a downgrade.
+    // "!топ" is free on every plan: it never reaches the model or a voice.
     if (
       job.source === "chat_command" &&
+      !job.board &&
       !context.unlimited &&
       !COMMAND_PLANS.has(context.planCode ?? "")
     ) {
@@ -206,6 +210,18 @@ export async function processRoast(
     const archetype: Archetype = character?.archetype ?? context.tone;
     const stub = (reason: string) =>
       playStub(deps, { job, roastId: roastId!, context, character, archetype, reason, started });
+    if (job.board) {
+      return await playBoard(deps, {
+        job,
+        roastId,
+        streamerLogin: context.streamerLogin,
+        planCode: context.planCode,
+        character,
+        archetype,
+        stopWords,
+        started
+      });
+    }
     // A reward the frequency passed over: a short "no", no quota, no model.
     if (job.declined) return await stub("stub_declined");
 
@@ -312,7 +328,7 @@ export async function processRoast(
       deps.fetch ?? globalThis.fetch,
       await voiceReservations(deps),
       {
-        best: tier === "premium" ? "elevenlabs" : context.economyVoice,
+        best: firstVoice(context, tier),
         // A premium character speaks in her own voice; without one, the archetype's voice.
         ...(character ? { voice: character.voice } : {})
       }

@@ -93,17 +93,15 @@ describe("modelRequest", () => {
     expect(request).not.toHaveProperty("output_config");
   });
 
-  it("gives models that always think low effort and headroom", () => {
-    for (const model of ["claude-sonnet-5-5", "claude-opus-5-5", "claude-fable-5-1"]) {
-      const request = modelRequest(model, "generate", "system", "user");
-      expect(request.output_config).toEqual({ effort: "low" });
-      expect(request.max_tokens).toBe(2_000);
-      expect(request).not.toHaveProperty("thinking");
-    }
+  it("gives Sonnet, which always thinks, low effort and headroom", () => {
+    const request = modelRequest("claude-sonnet-5-5", "generate", "system", "user");
+    expect(request.output_config).toEqual({ effort: "low" });
+    expect(request.max_tokens).toBe(2_000);
+    expect(request).not.toHaveProperty("thinking");
   });
 
   it("never sends temperature", () => {
-    for (const model of ["claude-haiku-5-5", "claude-sonnet-5-5", "claude-opus-5-5"]) {
+    for (const model of ["claude-haiku-5-5", "claude-sonnet-5-5"]) {
       expect(modelRequest(model, "generate", "system", "user")).not.toHaveProperty("temperature");
     }
   });

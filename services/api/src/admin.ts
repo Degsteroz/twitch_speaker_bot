@@ -12,6 +12,7 @@ import {
   YANDEX_TTS_RUB_PER_REQUEST,
   channelOverrideSchema,
   economyVoiceSchema,
+  modelIdSchema,
   roastStatusSchema,
   yandexBillingMonth
 } from "@roastbot/shared";
@@ -28,7 +29,8 @@ import {
 } from "./context.js";
 import { roastDetail, roastIdParams } from "./dashboard.js";
 
-const modelSchema = z.string().regex(/^claude-[a-z0-9-]+$/u);
+// Only Sonnet and Haiku (MODEL_IDS): a bigger model can never be stored by mistake.
+const modelSchema = modelIdSchema;
 
 // Global settings the owner may edit, each with its own validation so a typo in /admin can never
 // store a value the worker cannot use.
@@ -197,7 +199,7 @@ export function registerAdminRoutes(app: FastifyInstance, context: RouteContext)
           'monthlyRoastLimit',o.monthly_roast_limit,
           'premiumRoasts',o.premium_roasts,'minCooldownSec',o.min_cooldown_sec,'model',o.model,
           'chatModel',o.chat_model,'economyModel',o.economy_model,'economyVoice',o.economy_voice,
-          'note',o.note) end override,
+          'bestVoice',o.best_voice,'note',o.note) end override,
         coalesce(um.premium_roasts,0)::int premium_used, p.premium_roasts plan_premium_roasts,
         p.monthly_roast_limit plan_limit
       from users u left join channels c on c.user_id=u.id
@@ -243,18 +245,19 @@ export function registerAdminRoutes(app: FastifyInstance, context: RouteContext)
       if (empty) await tx`delete from channel_overrides where channel_id=${channel.id}`;
       else {
         await tx`insert into channel_overrides(channel_id,unlimited,zero_regrets,monthly_roast_limit,
-            premium_roasts,min_cooldown_sec,model,chat_model,economy_model,economy_voice,note,
-            updated_by_user_id)
+            premium_roasts,min_cooldown_sec,model,chat_model,economy_model,economy_voice,best_voice,
+            note,updated_by_user_id)
           values(${channel.id},${body.unlimited},${body.zeroRegrets},${body.monthlyRoastLimit},
             ${body.premiumRoasts},
             ${body.minCooldownSec},${body.model},${body.chatModel},${body.economyModel},
-            ${body.economyVoice},${body.note || null},${session(request).userId})
+            ${body.economyVoice},${body.bestVoice},${body.note || null},${session(request).userId})
           on conflict(channel_id) do update set unlimited=excluded.unlimited,
             zero_regrets=excluded.zero_regrets,
             monthly_roast_limit=excluded.monthly_roast_limit, premium_roasts=excluded.premium_roasts,
             min_cooldown_sec=excluded.min_cooldown_sec, model=excluded.model,
             chat_model=excluded.chat_model, economy_model=excluded.economy_model,
-            economy_voice=excluded.economy_voice, note=excluded.note,
+            economy_voice=excluded.economy_voice, best_voice=excluded.best_voice,
+            note=excluded.note,
             updated_by_user_id=excluded.updated_by_user_id, updated_at=now()`;
       }
       await audit(tx, request, empty ? "override.delete" : "override.set", id, body);

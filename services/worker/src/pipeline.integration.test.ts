@@ -23,7 +23,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vites
 
 import { processRoast, type PipelineDependencies } from "./pipeline.js";
 import { notifyStreamer, quotaNotice, sendStreamSummaries } from "./telegram.js";
-import { recordVoiceSample, syncVoices } from "./voices.js";
+import { recordVoiceComparison, recordVoiceSample, syncVoices } from "./voices.js";
 
 interface FakeReply {
   text: string;
@@ -112,6 +112,7 @@ async function job(
     eventSummary: string;
     declined: true;
     named: true;
+    board: true;
   }> = {}
 ) {
   const source = overrides.source ?? "chat_command";
@@ -129,6 +130,7 @@ async function job(
     ...(overrides.eventSummary ? { eventSummary: overrides.eventSummary } : {}),
     ...(overrides.declined ? { declined: overrides.declined } : {}),
     ...(overrides.named ? { named: overrides.named } : {}),
+    ...(overrides.board ? { board: overrides.board } : {}),
     requestedAt: overrides.requestedAt ?? new Date().toISOString()
   };
 }
@@ -146,6 +148,12 @@ async function roast(id: string) {
     select status, output_text, error, cost_usd, tokens_in from roasts where id=${id}`;
   return row!;
 }
+
+/** A SpeechKit v3 answer: one JSON line with a base64 audio chunk. */
+const yandexAudio = () =>
+  new Response(
+    `${JSON.stringify({ result: { audioChunk: { data: Buffer.from("RIFFyandex").toString("base64") } } })}\n`
+  );
 
 async function usage() {
   const [row] = await db.sql<{ roasts: number; cost_usd: string; tts_chars: number }[]>`
@@ -169,7 +177,7 @@ describe("processRoast against PostgreSQL", () => {
     expect(outcome.status).toBe("done");
     expect(anthropic.create).toHaveBeenCalledTimes(2);
     const [generation, classifier] = anthropic.create.mock.calls.map(([request]) => request);
-    // Opus 5.5 cannot switch thinking off: low effort, and the refusal fallback on.
+    // Sonnet 5.5 cannot switch thinking off: low effort, and the refusal fallback on.
     expect(generation).toMatchObject({
       model: "claude-sonnet-5-5",
       output_config: { effort: "low" },
@@ -615,11 +623,6 @@ describe("audio files", () => {
 });
 
 describe("character voices", () => {
-  const yandexAudio = () =>
-    new Response(
-      `${JSON.stringify({ result: { audioChunk: { data: Buffer.from("RIFFyandex").toString("base64") } } })}\n`
-    );
-
   it("voices the roast with the character's Yandex voice and counts its cost", async () => {
     await db.sql`update settings set tone='yandere' where channel_id=${channel.channelId}`;
     const anthropic = fakeAnthropic({ text: "Я всё запомнила." });
@@ -749,6 +752,61 @@ describe("character voices", () => {
     } finally {
       await setLimit("elevenlabs_monthly_char_limit", 70_000);
       await setLimit("inworld_monthly_char_limit", 500_000);
+    }
+  });
+
+  it("starts a channel's premium roasts at the voice the owner picked for it", async () => {
+    await db.sql`update settings set tone='yandere' where channel_id=${channel.channelId}`;
+    await db.sql`delete from tts_usage_monthly where provider in ('elevenlabs','inworld')`;
+    await db.sql`insert into channel_overrides(channel_id,best_voice)
+      values(${channel.channelId},'inworld')`;
+    const pipeline = deps(fakeAnthropic({ text: "Я всё запомнила." }).client, (url) =>
+      Promise.resolve(
+        (url as string).includes("inworld")
+          ? new Response(JSON.stringify({ audioContent: Buffer.from("RIFF").toString("base64") }))
+          : yandexAudio()
+      )
+    );
+    pipeline.config = {
+      ...pipeline.config,
+      YANDEX_TTS_API_KEY: "test-key",
+      ELEVENLABS_API_KEY: "el-key",
+      ELEVENLABS_VOICE_YANDERE: "voice-ai",
+      INWORLD_API_KEY: "aW53b3JsZA==",
+      INWORLD_VOICE_YANDERE: "Ai_inworld"
+    };
+    const spoken = async () => {
+      pipeline.fetch.mockClear();
+      const outcome = await processRoast(await job({ source: "dashboard_test" }), pipeline);
+      const [row] = await db.sql<{ voice_provider: string }[]>`
+        select voice_provider from roasts where id=${outcome.roastId}`;
+      return {
+        provider: row!.voice_provider,
+        urls: pipeline.fetch.mock.calls.map(([called]) => String(called))
+      };
+    };
+    try {
+      // ElevenLabs is set and within its cap, but the channel starts at Inworld.
+      expect(await spoken()).toEqual({
+        provider: "inworld",
+        urls: ["https://api.inworld.ai/tts/v1/voice"]
+      });
+      expect(
+        await db.sql`select 1 from tts_usage_monthly where provider='elevenlabs' and requests>0`
+      ).toHaveLength(0);
+
+      await db.sql`update channel_overrides set best_voice='yandex'
+        where channel_id=${channel.channelId}`;
+      expect(await spoken()).toEqual({
+        provider: "yandex",
+        urls: ["https://tts.api.cloud.yandex.net/tts/v3/utteranceSynthesis"]
+      });
+
+      // Without a pick the chain starts at ElevenLabs again.
+      await db.sql`update channel_overrides set best_voice=null where channel_id=${channel.channelId}`;
+      expect((await spoken()).urls[0]).toContain("elevenlabs");
+    } finally {
+      await db.sql`delete from channel_overrides where channel_id=${channel.channelId}`;
     }
   });
 
@@ -1007,7 +1065,7 @@ describe("model and voice by plan", () => {
 describe("owner and favourites", () => {
   it("lifts every channel limit for the owner and answers on Sonnet with the best voice", async () => {
     channel = await createTestChannel(db.sql, { role: "owner", plan: "free" });
-    await db.sql`update global_settings set value='"claude-opus-5-5"'::jsonb where key='model'`;
+    await db.sql`update global_settings set value='"claude-haiku-5-5"'::jsonb where key='model'`;
     await db.sql`update plans set monthly_roast_limit=1 where code='free'`;
     await db.sql`delete from test_usage_daily`;
     try {
@@ -1062,12 +1120,12 @@ describe("owner and favourites", () => {
   it("applies a favourite's own limit, models and pause floor to that channel only", async () => {
     await db.sql`insert into channel_overrides(channel_id,monthly_roast_limit,model,chat_model,
         min_cooldown_sec)
-      values(${channel.channelId},2,'claude-opus-5-5','claude-sonnet-5-5',5)`;
+      values(${channel.channelId},2,'claude-haiku-5-5','claude-sonnet-5-5',5)`;
     await db.sql`update settings set cooldown_sec=0, user_cooldown_sec=0
       where channel_id=${channel.channelId}`;
     const anthropic = fakeAnthropic({ text: "Раз" });
     expect((await processRoast(await job(), deps(anthropic.client))).status).toBe("done");
-    expect(anthropic.create.mock.calls[0]![0].model).toBe("claude-opus-5-5");
+    expect(anthropic.create.mock.calls[0]![0].model).toBe("claude-haiku-5-5");
     const [pause] = await db.sql<{ seconds: number }[]>`
       select extract(epoch from next_allowed_at - now())::int seconds from cooldown_state
       where channel_id=${channel.channelId} and scope='channel'`;
@@ -1100,7 +1158,7 @@ describe("«ноль сожалений»", () => {
       values(${channel.channelId},true)`;
     await db.sql`update settings set toxicity=6, cooldown_sec=0, user_cooldown_sec=0
       where channel_id=${channel.channelId}`;
-    await db.sql`update global_settings set value='"claude-opus-5-5"'::jsonb where key='model'`;
+    await db.sql`update global_settings set value='"claude-haiku-5-5"'::jsonb where key='model'`;
     try {
       const anthropic = fakeAnthropic({ text: "Бля, ну и катка" });
       const runs: [Parameters<typeof job>[0], string][] = [
@@ -1110,7 +1168,7 @@ describe("«ноль сожалений»", () => {
         [{ source: "chat_keyword", named: true }, "claude-sonnet-5-5"],
         [{ source: "chat_keyword" }, "claude-haiku-5-5"],
         // Other events keep the global model.
-        [{ source: "raid" }, "claude-opus-5-5"]
+        [{ source: "raid" }, "claude-haiku-5-5"]
       ];
       for (const [index, [overrides, model]] of runs.entries()) {
         await db.sql`delete from cooldown_state where channel_id=${channel.channelId}`;
@@ -1166,6 +1224,112 @@ describe("«ноль сожалений»", () => {
     const [row] = await db.sql<{ toxicity: number }[]>`
       select toxicity from roasts where id=${outcome.roastId}`;
     expect(row!.toxicity).toBe(5);
+  });
+});
+
+describe("!топ", () => {
+  it("shows the stream's most active viewers on any plan, without a model, quota or voice", async () => {
+    channel = await createTestChannel(db.sql, { plan: "free" });
+    const done = async (login: string, source: RoastSource = "chat_command", hoursAgo = 0) =>
+      db.sql`insert into roasts(channel_id,event_id,source,viewer_login,tone,voice,toxicity,status,
+          created_at)
+        values(${channel.channelId},${await createTestEvent(db.sql, channel.channelId, "chat_command")},
+          ${source},${login},'tsundere','female',3,'done',now() - make_interval(hours => ${hoursAgo}))`;
+    for (const login of ["dave", "Alice", "alice", "alice", "bob", "bob", "carol"])
+      await done(login);
+    await done("eve", "raid");
+    await done("old", "chat_command", 9);
+    for (let index = 0; index < 4; index += 1) await done(channel.login);
+    for (let index = 0; index < 4; index += 1) await done("shy");
+    await db.sql`insert into viewer_optouts(channel_id,viewer_login) values(${channel.channelId},'shy')`;
+    const anthropic = fakeAnthropic({ text: "Раз" });
+    const pipeline = deps(anthropic.client);
+
+    const outcome = await processRoast(await job({ board: true, inputText: "!топ" }), pipeline);
+
+    expect(outcome).toMatchObject({ status: "skipped", reason: "top_board" });
+    expect(anthropic.create).not.toHaveBeenCalled();
+    expect(pipeline.fetch).not.toHaveBeenCalled();
+    const text = "Чаще всех нарывались: 1. alice — 3, 2. bob — 2, 3. carol — 1";
+    expect((await roast(outcome.roastId)).output_text).toBe(text);
+    const [event] = await db.sql<{ payload: unknown }[]>`
+      select payload from overlay_events where roast_id=${outcome.roastId}`;
+    const payload = storedOverlayRoastSchema.parse(event!.payload);
+    expect(payload).toMatchObject({ text, sound: "ping" });
+    expect(payload.audioFile).toBeUndefined();
+    expect(await usage()).toBeUndefined();
+
+    // Once per five minutes per channel.
+    expect(await processRoast(await job({ board: true }), pipeline)).toMatchObject({
+      status: "skipped",
+      reason: "top_cooldown"
+    });
+    expect(
+      await db.sql`select 1 from overlay_events oe join roasts r on r.id=oe.roast_id
+        where r.channel_id=${channel.channelId}`
+    ).toHaveLength(1);
+  });
+
+  it("has its own line for a quiet stream", async () => {
+    const outcome = await processRoast(
+      await job({ board: true }),
+      deps(fakeAnthropic({ text: "x" }).client)
+    );
+    expect((await roast(outcome.roastId)).output_text).toBe(
+      "За этот стрим ещё никто не нарвался. Пока."
+    );
+  });
+});
+
+describe("voice comparison", () => {
+  it("records each service strictly in itself and marks the ones without a voice", async () => {
+    await db.sql`delete from voice_compare`;
+    const text = "Проверка голоса.";
+    for (const tone of ["tsundere", "yandere"]) {
+      for (const provider of ["elevenlabs", "inworld", "yandex"]) {
+        await db.sql`insert into voice_compare(tone,provider,text) values(${tone},${provider},${text})`;
+      }
+    }
+    const fetcher = vi.fn((url: string) =>
+      Promise.resolve(
+        url.includes("yandex")
+          ? yandexAudio()
+          : new Response(new Uint8Array([82, 73, 70, 70]), { status: 200 })
+      )
+    );
+    const config = {
+      ...deps(fakeAnthropic({ text: "x" }).client).config,
+      YANDEX_TTS_API_KEY: "test-key",
+      ELEVENLABS_API_KEY: "el-key",
+      ELEVENLABS_VOICE_TSUNDERE: "voice-mitsuki"
+    };
+
+    const statuses = await recordVoiceComparison(
+      { text },
+      { sql: worker.client, config, fetch: fetcher as unknown as typeof globalThis.fetch }
+    );
+
+    expect(statuses).toEqual({
+      "tsundere/elevenlabs": "ready",
+      "tsundere/inworld": "no_voice",
+      "tsundere/yandex": "ready",
+      "yandere/elevenlabs": "no_voice",
+      "yandere/inworld": "no_voice",
+      "yandere/yandex": "ready"
+    });
+    // Three calls: Mitsuki in ElevenLabs, both heroines in Yandex; nothing falls through to another.
+    expect(fetcher).toHaveBeenCalledTimes(3);
+    const rows = await db.sql<
+      { tone: string; provider: string; status: string; audio: Buffer | null }[]
+    >`
+      select tone, provider, status, audio from voice_compare order by tone, provider`;
+    expect(rows.filter((row) => row.audio).map((row) => `${row.tone}/${row.provider}`)).toEqual([
+      "tsundere/elevenlabs",
+      "tsundere/yandex",
+      "yandere/yandex"
+    ]);
+    await db.sql`delete from voice_compare`;
+    await db.sql`delete from tts_usage_monthly where provider='elevenlabs'`;
   });
 });
 

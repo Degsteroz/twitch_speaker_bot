@@ -10,6 +10,7 @@ import {
   ROAST_REQUESTED_QUEUE_OPTIONS,
   TELEGRAM_NOTIFY_QUEUE,
   telegramNotifyJobSchema,
+  VOICE_COMPARE_QUEUE,
   VOICE_SAMPLE_QUEUE
 } from "@roastbot/shared";
 import { PgBoss } from "pg-boss";
@@ -19,7 +20,7 @@ import { processDemo } from "./demo.js";
 import { syncElevenLabsUsage } from "./elevenlabs.js";
 import { notifyStreamer, sendStreamSummaries } from "./telegram.js";
 import { processRoast } from "./pipeline.js";
-import { recordVoiceSample, syncVoices } from "./voices.js";
+import { recordVoiceComparison, recordVoiceSample, syncVoices } from "./voices.js";
 
 // Audio stays on disk well past the 2-minute overlay TTL plus the 60-second signed URL window.
 const AUDIO_MAX_AGE_MS = 10 * 60 * 1000;
@@ -75,6 +76,15 @@ await boss.work(VOICE_SAMPLE_QUEUE, async (jobs) => {
 });
 for (const voiceId of await syncVoices(database.client, config))
   await boss.send(VOICE_SAMPLE_QUEUE, { voiceId }, { singletonKey: voiceId });
+
+// The owner's voice comparison in /admin: one phrase in every voice service.
+await boss.createQueue(VOICE_COMPARE_QUEUE);
+await boss.work(VOICE_COMPARE_QUEUE, async (jobs) => {
+  for (const job of jobs) {
+    const statuses = await recordVoiceComparison(job.data, { sql: database.client, config });
+    console.log(JSON.stringify({ msg: "voice.compare", statuses }));
+  }
+});
 
 // The streamer's Telegram: notifications queued by other services, and the summary after a stream.
 await boss.createQueue(TELEGRAM_NOTIFY_QUEUE);

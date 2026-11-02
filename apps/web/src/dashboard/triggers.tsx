@@ -273,6 +273,20 @@ export function TriggerSettings({
             </small>
           </>
         )}
+        <label className="check">
+          <input
+            type="checkbox"
+            checked={triggers.topBoard}
+            onChange={(event) => set({ topBoard: event.target.checked })}
+          />
+          <span>
+            Команда <code>!топ</code>{" "}
+            <small>
+              — в оверлее карточка «Чаще всех нарывались»: кто за последние часы чаще всех получал
+              ответ. Без голоса, не тратит квоту, не чаще раза в 5 минут. Доступна на любом тарифе.
+            </small>
+          </span>
+        </label>
         {characterName && (
           <label className="check">
             <input

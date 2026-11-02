@@ -71,6 +71,7 @@ const AUDIT_ACTIONS: Record<string, string> = {
   "voice.add": "добавил голос",
   "voice.update": "изменил голос",
   "voice.delete": "удалил голос",
+  "voice.compare": "сравнил голоса",
   "payment.stars": "оплатил звёздами",
   "payment.refund": "вернул звёзды"
 };

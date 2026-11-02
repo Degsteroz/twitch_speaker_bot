@@ -554,6 +554,80 @@ describe("back-office", () => {
     expect(overview.json()).toMatchObject({ budget: 10, roastCap: 4000, killSwitch: false });
   });
 
+  it("shows the month's spend and the server, to the owner only", async () => {
+    await db.sql`insert into roasts(channel_id,event_id,source,viewer_login,tone,voice,toxicity,
+        status,tier,model,voice_provider,tts_chars,cost_usd)
+      values(${streamer.channelId},${await createTestEvent(db.sql, streamer.channelId, "chat_command")},
+        'chat_command','viewer','tsundere','female',3,'done','premium','claude-sonnet-5-5',
+        'elevenlabs',100,0.012),
+      (${streamer.channelId},${await createTestEvent(db.sql, streamer.channelId, "chat_command")},
+        'chat_command','viewer','tsundere','female',3,'skipped',null,null,null,0,0)`;
+    await db.sql`update roasts set error='stub_cooldown' where channel_id=${streamer.channelId}
+      and status='skipped' and error is null`;
+    for (const url of ["/admin/spend", "/admin/server", "/admin/voice-compare"]) {
+      expect((await call("GET", url, streamer)).statusCode).toBe(403);
+    }
+    expect((await call("GET", "/admin/spend?month=2026-13", owner)).statusCode).toBe(400);
+    const spendResponse = await call("GET", "/admin/spend", owner);
+    expect(spendResponse.statusCode).toBe(200);
+    const spend = spendResponse.json<{
+      groups: { kind: string; model: string; voice: string; count: number; usd: number }[];
+      reasons: { status: string; reason: string; count: number }[];
+      days: { roasts: number }[];
+      elevenLabsUsd: number;
+    }>();
+    expect(spend.groups).toContainEqual(
+      expect.objectContaining({
+        kind: "roast",
+        model: "claude-sonnet-5-5",
+        voice: "elevenlabs",
+        count: 1,
+        usd: 0.012
+      })
+    );
+    expect(spend.reasons).toContainEqual({ status: "skipped", reason: "stub_cooldown", count: 1 });
+    expect(spend.elevenLabsUsd).toBeCloseTo(0.008, 6);
+    expect(spend.days.at(-1)!.roasts).toBeGreaterThanOrEqual(1);
+
+    const server = (await call("GET", "/admin/server", owner)).json<{
+      cpus: number;
+      memory: { total: number };
+      database: number;
+      audio: unknown;
+    }>();
+    expect(server.cpus).toBeGreaterThan(0);
+    expect(server.memory.total).toBeGreaterThan(0);
+    expect(server.database).toBeGreaterThan(0);
+    expect(server.audio).toHaveProperty("files");
+  });
+
+  it("queues a voice comparison of one phrase for both heroines and every service", async () => {
+    expect(
+      (await call("POST", "/admin/voice-compare", owner, { text: "x".repeat(201) })).statusCode
+    ).toBe(400);
+    expect(
+      (await call("POST", "/admin/voice-compare", owner, { text: "Привет, чат." })).statusCode
+    ).toBe(200);
+    const listed = (await call("GET", "/admin/voice-compare", owner)).json<{
+      rows: { tone: string; provider: string; text: string; status: string }[];
+    }>();
+    expect(listed.rows).toHaveLength(6);
+    expect(new Set(listed.rows.map((row) => `${row.text}/${row.status}`))).toEqual(
+      new Set(["Привет, чат./pending"])
+    );
+    const [queued] = await db.sql<{ data: unknown }[]>`
+      select data from pgboss.job where name='voice.compare' order by created_on desc limit 1`;
+    expect(queued!.data).toEqual({ text: "Привет, чат." });
+    expect((await call("GET", "/admin/voice-compare/yandere/inworld", owner)).statusCode).toBe(404);
+    await db.sql`update voice_compare set status='ready', audio=${Buffer.from("RIFF")}
+      where tone='yandere' and provider='inworld'`;
+    const audio = await call("GET", "/admin/voice-compare/yandere/inworld", owner);
+    expect(audio.headers["content-type"]).toBe("audio/wav");
+    expect(audio.body).toBe("RIFF");
+    expect((await call("GET", "/admin/voice-compare/yandere/piper", owner)).statusCode).toBe(400);
+    await db.sql`delete from voice_compare`;
+  });
+
   it("validates global settings and writes the audit log", async () => {
     expect((await call("PUT", "/admin/settings/model", owner, "gpt-4")).statusCode).toBe(400);
     expect((await call("PUT", "/admin/settings/kill_switch", owner, "yes")).statusCode).toBe(400);
@@ -600,15 +674,20 @@ describe("back-office", () => {
       monthlyRoastLimit: 25,
       premiumRoasts: 7,
       minCooldownSec: 10,
-      model: "claude-opus-5-5",
+      model: "claude-haiku-5-5",
       chatModel: null,
       economyModel: null,
       economyVoice: "yandex",
+      bestVoice: "inworld",
       note: "друг канала"
     };
     expect((await call("PUT", path, owner, body)).statusCode).toBe(200);
     expect((await call("PUT", path, streamer, body)).statusCode).toBe(403);
-    expect((await call("PUT", path, owner, { ...body, model: "gpt-5" })).statusCode).toBe(400);
+    // Only Sonnet and Haiku; Piper is never a channel's voice.
+    for (const model of ["gpt-5", "claude-opus-5-5", "claude-fable-5-1"]) {
+      expect((await call("PUT", path, owner, { ...body, model })).statusCode).toBe(400);
+    }
+    expect((await call("PUT", path, owner, { ...body, bestVoice: "piper" })).statusCode).toBe(400);
     const [listed] = (await call("GET", `/admin/users?search=${streamer.login}`, owner)).json<
       { override: unknown; unlimited: boolean; limit: number }[]
     >();

@@ -10,7 +10,8 @@ import {
   ROAST_REQUESTED_QUEUE,
   ROAST_REQUESTED_QUEUE_OPTIONS,
   STREAMER_JOB_PRIORITY,
-  TELEGRAM_NOTIFY_QUEUE
+  TELEGRAM_NOTIFY_QUEUE,
+  TOP_BOARD_COOLDOWN_MINUTES
 } from "@roastbot/shared";
 import { PgBoss } from "pg-boss";
 import tmi from "tmi.js";
@@ -22,7 +23,14 @@ import { enqueueEvent, isOnCooldown } from "./core.js";
 import { DonationAlertsConnection, type DonationAlertsAccount } from "./donationalerts.js";
 import { EventSubConnection, type EventSubHooks } from "./eventsub.js";
 import { JOIN_INTERVAL_MS, JoinQueue } from "./join-queue.js";
-import { EveryNth, chatTrigger, donationRoast, eventRoast, optOutCommand } from "./triggers.js";
+import {
+  EveryNth,
+  boardCall,
+  chatTrigger,
+  donationRoast,
+  eventRoast,
+  optOutCommand
+} from "./triggers.js";
 
 const config = loadConfig();
 const database = createDatabase(config.DATABASE_URL, { applicationName: "roastbot-twitch" });
@@ -65,6 +73,8 @@ const channelByLogin = new Map<string, Channel>();
 // How often chat words and rewards are answered, per channel (KEYWORD_EVERY, REWARD_EVERY).
 // In memory: a restart only makes the next hit due a little early.
 const keywordGate = new EveryNth();
+// When each channel last asked for "!топ".
+const lastBoard = new Map<string, number>();
 const rewardGate = new EveryNth();
 chat.on("message", (channelName, tags, message, self) => {
   if (self) return;
@@ -83,6 +93,24 @@ chat.on("message", (channelName, tags, message, self) => {
     return;
   }
   const isBroadcaster = tags["user-id"] === channel.twitchId;
+  if (boardCall({ message, username: viewerLogin }, channel.triggers)) {
+    // A cheap filter against "!топ" spam; the worker holds the real pause under a lock.
+    const now = Date.now();
+    if (now - (lastBoard.get(channel.id) ?? 0) < TOP_BOARD_COOLDOWN_MINUTES * 60_000) return;
+    lastBoard.set(channel.id, now);
+    void enqueueEvent(sql, boss, {
+      channelId: channel.id,
+      source: "chat_command",
+      providerEventId: tags.id ?? `irc:${channel.id}:${randomUUID()}`,
+      ...(tags["user-id"] ? { viewerId: tags["user-id"] } : {}),
+      viewerLogin,
+      inputText: message.trim().slice(0, 50),
+      target: "viewer",
+      board: true,
+      raw: { tags, message }
+    }).catch(console.error);
+    return;
+  }
   const roast = chatTrigger(
     {
       message,

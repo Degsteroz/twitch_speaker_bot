@@ -1,4 +1,5 @@
 import {
+  ELEVENLABS_USD_PER_CHARACTER,
   yandexTtsRequestsFor,
   type Archetype,
   type CharacterVoiceProvider,
@@ -26,8 +27,7 @@ const YANDEX_URL = "https://tts.api.cloud.yandex.net/tts/v3/utteranceSynthesis";
 const YANDEX_TIMEOUT_MS = 3_500;
 const PIPER_TIMEOUT_MS = 15_000;
 
-// ElevenLabs bills $0.08 per 1,000 characters on v4/v3/multilingual v2 (pricing page, 2026-10).
-export const ELEVENLABS_USD_PER_CHARACTER = 0.08 / 1_000;
+export { ELEVENLABS_USD_PER_CHARACTER };
 const ELEVENLABS_URL = "https://api.elevenlabs.io/v1/text-to-speech";
 // WAV like the other voices; 44.1 kHz WAV needs the Pro plan, 24 kHz does not.
 const ELEVENLABS_FORMAT = "wav_24000";

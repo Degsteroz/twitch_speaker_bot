@@ -174,6 +174,8 @@ export interface Triggers {
   nameMention: boolean;
   /** Harem mode: now and then the other heroine argues with the reply. */
   haremMode: boolean;
+  /** "!топ" in chat: a card on the overlay with who called the character most this stream. */
+  topBoard: boolean;
   /** Chat bots and spammers whose messages never trigger a roast; lowercase logins. */
   ignoredUsers: string[];
   /** Who is roasted on every trigger: the author, the streamer, or the character decides. */
@@ -191,6 +193,7 @@ export const DEFAULT_TRIGGERS: Triggers = {
   chatFrequency: "normal",
   nameMention: false,
   haremMode: false,
+  topBoard: false,
   ignoredUsers: [],
   targetMode: "auto",
   events: {

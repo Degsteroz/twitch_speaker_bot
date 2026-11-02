@@ -5,14 +5,17 @@
 import {
   characterVoiceProviderSchema,
   elevenLabsVoiceIdSchema,
+  VOICE_COMPARE_PROVIDERS,
+  VOICE_COMPARE_TONES,
   VOICE_SAMPLE_TEXT,
+  voiceCompareJobSchema,
   voiceSampleJobSchema
 } from "@roastbot/shared";
 
 import type { WorkerConfig } from "./config.js";
 import type { Sql } from "./context.js";
 import { voiceReservations } from "./limits.js";
-import { speak } from "./tts.js";
+import { cloudVoicesFor, speak } from "./tts.js";
 
 // The first synthesis in a voice from the ElevenLabs library is slower than the live roast timeout;
 // nobody waits for a sample, so it gets much longer.
@@ -52,6 +55,42 @@ export async function recordVoiceSample(
   await deps.sql`update voices set sample_status=${status},
     sample=${status === "ready" ? Buffer.from(speech!.audio) : null} where id=${voiceId}`;
   return status;
+}
+
+/**
+ * The owner's voice comparison: the same phrase from Mitsuki and Ai in ElevenLabs, Inworld and
+ * Yandex, each strictly in that service (no fallback, never Piper) and within its monthly cap.
+ * A service without a key or a voice for the heroine is marked no_voice without a call. A newer
+ * request with another phrase wins: rows whose phrase changed meanwhile are left alone.
+ */
+export async function recordVoiceComparison(
+  rawJob: unknown,
+  deps: VoiceSampleDependencies
+): Promise<Record<string, string>> {
+  const { text } = voiceCompareJobSchema.parse(rawJob);
+  const reservations = await voiceReservations(deps);
+  const result: Record<string, string> = {};
+  for (const tone of VOICE_COMPARE_TONES) {
+    const voices = cloudVoicesFor(tone, deps.config);
+    for (const provider of VOICE_COMPARE_PROVIDERS) {
+      const configured =
+        provider === "yandex" ? Boolean(deps.config.YANDEX_TTS_API_KEY) : Boolean(voices[provider]);
+      const speech = configured
+        ? await speak(text, tone, deps.config, deps.fetch ?? globalThis.fetch, reservations, {
+            best: provider,
+            fallback: false,
+            piper: false,
+            cloudTimeoutMs: SAMPLE_TIMEOUT_MS
+          }).catch(() => null)
+        : null;
+      const status = !configured ? "no_voice" : speech?.provider === provider ? "ready" : "failed";
+      await deps.sql`update voice_compare set status=${status},
+          audio=${status === "ready" ? Buffer.from(speech!.audio) : null}, updated_at=now()
+        where tone=${tone} and provider=${provider} and text=${text}`;
+      result[`${tone}/${provider}`] = status;
+    }
+  }
+  return result;
 }
 
 // Mitsuki's and Ai's ElevenLabs voices are configured in the environment; streamers may pick them

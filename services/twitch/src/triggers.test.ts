@@ -14,6 +14,7 @@ import {
   eventRoast,
   extractDonations,
   matchKeyword,
+  boardCall,
   optOutCommand,
   subscriptionSpecs
 } from "./triggers.js";
@@ -415,5 +416,27 @@ describe("optOutCommand", () => {
     expect(optOutCommand("!роаст-старт")).toBe("start");
     expect(optOutCommand("!роаст стоп")).toBeNull();
     expect(optOutCommand("стоп")).toBeNull();
+  });
+});
+
+describe("boardCall", () => {
+  it("answers !топ only when the channel turned the board on", () => {
+    expect(boardCall({ message: "!топ", username: "viewer" }, triggers())).toBe(false);
+    const on = triggers({ topBoard: true });
+    expect(boardCall({ message: "!топ", username: "viewer" }, on)).toBe(true);
+    expect(boardCall({ message: "  !TOP please", username: "viewer" }, on)).toBe(true);
+    expect(boardCall({ message: "кто в !топ", username: "viewer" }, on)).toBe(false);
+    expect(boardCall({ message: "!топчик", username: "viewer" }, on)).toBe(false);
+  });
+
+  it("never answers known bots or ignored users", () => {
+    const on = triggers({ topBoard: true, ignoredUsers: ["spammer"] });
+    expect(boardCall({ message: "!топ", username: "Nightbot" }, on)).toBe(false);
+    expect(boardCall({ message: "!топ", username: "spammer" }, on)).toBe(false);
+  });
+
+  it("is off by default and cannot be a roast command", () => {
+    expect(DEFAULT_TRIGGERS.topBoard).toBe(false);
+    expect(triggerSettingsSchema.safeParse({ commandName: "!топ" }).success).toBe(false);
   });
 });

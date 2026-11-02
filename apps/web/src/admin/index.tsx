@@ -11,6 +11,7 @@ import { AdminOverview } from "./overview.js";
 import { Payments } from "./payments.js";
 import { AdminRoasts } from "./roasts.js";
 import { AdminSettings } from "./settings.js";
+import { AdminSpend } from "./spend.js";
 import { AdminUsers } from "./users.js";
 
 export function Admin({ session, tab }: { session: Session; tab: AdminTab }) {
@@ -31,6 +32,7 @@ export function Admin({ session, tab }: { session: Session; tab: AdminTab }) {
         ))}
       </nav>
       {tab === "overview" && <AdminOverview />}
+      {tab === "spend" && <AdminSpend />}
       {tab === "users" && <AdminUsers selfId={session.userId} />}
       {tab === "roasts" && <AdminRoasts />}
       {tab === "moderation" && <Moderation />}

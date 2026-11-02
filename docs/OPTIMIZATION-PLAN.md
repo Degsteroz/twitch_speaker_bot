@@ -168,8 +168,6 @@ const BETWEEN_TOOLS = /^claude-sonnet-5-5/u;
 
 - `claude-sonnet-5-5` + `generate` → `thinking.type === "between_tools"`,
   `max_tokens === 300`, нет `output_config`;
-- `claude-opus-5-5` → по-прежнему `output_config.effort === "low"`,
-  `max_tokens === 2000`;
 - `claude-haiku-5-5` → `thinking.type === "disabled"`.
 
 `temperature` по-прежнему не передаётся никогда (инвариант 3).

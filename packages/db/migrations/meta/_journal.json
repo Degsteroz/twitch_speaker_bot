@@ -176,6 +176,20 @@
       "when": 1794643200000,
       "tag": "0024_demo_elevenlabs",
       "breakpoints": true
+    },
+    {
+      "idx": 25,
+      "version": "25",
+      "when": 1794729600000,
+      "tag": "0025_best_voice_and_models",
+      "breakpoints": true
+    },
+    {
+      "idx": 26,
+      "version": "26",
+      "when": 1794816000000,
+      "tag": "0026_voice_compare",
+      "breakpoints": true
     }
   ]
 }

@@ -419,20 +419,18 @@ const KNOWN_PRICING: Readonly<Record<string, TokenPricing>> = Object.freeze({
     inputUsdPerMillionTokens: 2,
     outputUsdPerMillionTokens: 10,
     cacheReadUsdPerMillionTokens: 0.2
-  },
-  "claude-opus-5": { inputUsdPerMillionTokens: 5, outputUsdPerMillionTokens: 25 },
-  "claude-opus-5-5": {
-    inputUsdPerMillionTokens: 4,
-    outputUsdPerMillionTokens: 20,
-    cacheReadUsdPerMillionTokens: 0.2
-  },
-  "claude-fable-5-1": { inputUsdPerMillionTokens: 10, outputUsdPerMillionTokens: 50 }
+  }
 });
 
-// Unknown model IDs are billed at the most expensive known rate so the budget guard errs on the
-// safe side.
+// An unknown model ID is billed well above any model the service runs, so the budget guard errs
+// on the safe side.
+const UNKNOWN_MODEL_PRICING: TokenPricing = Object.freeze({
+  inputUsdPerMillionTokens: 10,
+  outputUsdPerMillionTokens: 50
+});
+
 export function pricingForModel(model: string): TokenPricing {
-  return KNOWN_PRICING[model] ?? KNOWN_PRICING["claude-fable-5-1"]!;
+  return KNOWN_PRICING[model] ?? UNKNOWN_MODEL_PRICING;
 }
 
 export function calculateHaikuCostUsd(

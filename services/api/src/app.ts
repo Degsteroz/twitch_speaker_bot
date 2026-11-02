@@ -7,6 +7,7 @@ import {
   DEMO_REQUESTED_QUEUE_OPTIONS,
   ROAST_REQUESTED_QUEUE,
   ROAST_REQUESTED_QUEUE_OPTIONS,
+  VOICE_COMPARE_QUEUE,
   VOICE_SAMPLE_QUEUE
 } from "@roastbot/shared";
 import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
@@ -14,6 +15,7 @@ import { PgBoss } from "pg-boss";
 import type { JSONValue, TransactionSql } from "postgres";
 import { ZodError } from "zod";
 
+import { registerAdminInsightRoutes } from "./admin-insights.js";
 import { registerAdminRoutes } from "./admin.js";
 import { registerAuthRoutes } from "./auth.js";
 import type { ApiConfig } from "./config.js";
@@ -33,6 +35,7 @@ import { registerMfaRoutes } from "./mfa.js";
 import { registerOverlayRoutes } from "./overlay.js";
 import { registerShowcaseRoutes } from "./showcase.js";
 import { registerTelegramRoutes } from "./telegram-bot.js";
+import { registerVoiceCompareRoutes } from "./voice-compare.js";
 
 export async function buildApp(config: ApiConfig) {
   const app = Fastify({ logger: config.NODE_ENV !== "test", trustProxy: true });
@@ -44,6 +47,7 @@ export async function buildApp(config: ApiConfig) {
   await boss.createQueue(ROAST_REQUESTED_QUEUE, { ...ROAST_REQUESTED_QUEUE_OPTIONS });
   await boss.createQueue(DEMO_REQUESTED_QUEUE, { ...DEMO_REQUESTED_QUEUE_OPTIONS });
   await boss.createQueue(VOICE_SAMPLE_QUEUE);
+  await boss.createQueue(VOICE_COMPARE_QUEUE);
 
   await app.register(cookie);
   await app.register(jwt, {
@@ -152,6 +156,8 @@ export async function buildApp(config: ApiConfig) {
   registerCharacterRoutes(app, routeContext);
   registerTelegramRoutes(app, routeContext);
   registerAdminRoutes(app, routeContext);
+  registerAdminInsightRoutes(app, routeContext);
+  registerVoiceCompareRoutes(app, routeContext);
 
   app.addHook("onClose", async () => {
     await overlays.shutdown();

@@ -249,9 +249,9 @@ function AccountRow({
         <button className="mini" onClick={onGift}>
           + квота
         </button>
-        {user.twitch_login && user.role !== "owner" && (
+        {user.twitch_login && (
           <button className="mini" onClick={onOverride}>
-            {user.override ? "★ Настроить" : "☆ Любимчик"}
+            {user.role === "owner" ? "⚙ Мой канал" : user.override ? "★ Настроить" : "☆ Любимчик"}
           </button>
         )}
         {!self && (
@@ -427,8 +427,15 @@ const EMPTY_OVERRIDE: ChannelOverride = {
   chatModel: null,
   economyModel: null,
   economyVoice: null,
+  bestVoice: null,
   note: null
 };
+// The first voice of premium roasts; the rest of the chain follows. Piper is never offered.
+const BEST_VOICES = [
+  ["elevenlabs", "ElevenLabs"],
+  ["inworld", "Inworld"],
+  ["yandex", "Яндекс"]
+] as const;
 const INHERIT = "";
 
 /** "" keeps the plan's value; anything else is a whole number. */
@@ -460,6 +467,8 @@ function OverrideDialog({
     });
   }, [user]);
   const set = (patch: Partial<ChannelOverride>) => setForm({ ...form, ...patch });
+  // The owner's own channel is always unlimited with toxicity 6: only models and voice matter.
+  const own = user?.role === "owner";
   const planPremium =
     user?.plan_premium_roasts === null || user?.plan_premium_roasts === undefined
       ? "все"
@@ -486,7 +495,11 @@ function OverrideDialog({
     </label>
   );
   return (
-    <Dialog open={Boolean(user)} title={`Любимчик @${user?.login ?? ""}`} onClose={onClose}>
+    <Dialog
+      open={Boolean(user)}
+      title={own ? "Мой канал" : `Любимчик @${user?.login ?? ""}`}
+      onClose={onClose}
+    >
       <form
         onSubmit={(event) => {
           event.preventDefault();
@@ -501,39 +514,45 @@ function OverrideDialog({
         }}
       >
         <p className="muted">
-          Только для этого канала. Пустое поле — как в тарифе {user?.plan ?? ""}. Стоп-лист,
-          классификатор, kill switch и общий бюджет действуют всегда.
+          {own
+            ? "Ваш канал всегда без ограничений. Здесь — модели и голос."
+            : `Только для этого канала. Пустое поле — как в тарифе ${user?.plan ?? ""}.`}{" "}
+          Стоп-лист, классификатор, kill switch и общий бюджет действуют всегда.
         </p>
-        <label className="check">
-          <input
-            type="checkbox"
-            checked={form.unlimited}
-            onChange={(event) => set({ unlimited: event.target.checked })}
-          />
-          <span>
-            Без ограничений
-            <small>
-              Ни квоты, ни пауз, ни частоты, ни лимита тестов; команда и своя героиня на любом
-              тарифе, всегда хороший голос и модель генерации (по умолчанию Sonnet 5.5).
-            </small>
-          </span>
-        </label>
-        <label className="check">
-          <input
-            type="checkbox"
-            checked={form.zeroRegrets}
-            onChange={(event) => set({ zeroRegrets: event.target.checked })}
-          />
-          <span>
-            Токсичность «Ноль сожалений»
-            <small>
-              В панели стримера появится шестой уровень: свободный мат и злой тон. Донаты, команда,
-              обращение по имени и награды идут к Sonnet, обычные слова в чате — к модели чата.
-              Слюры, угрозы и всё, за что банит Twitch, блокируются по-прежнему.
-            </small>
-          </span>
-        </label>
-        {!form.unlimited && (
+        {!own && (
+          <>
+            <label className="check">
+              <input
+                type="checkbox"
+                checked={form.unlimited}
+                onChange={(event) => set({ unlimited: event.target.checked })}
+              />
+              <span>
+                Без ограничений
+                <small>
+                  Ни квоты, ни пауз, ни частоты, ни лимита тестов; команда и своя героиня на любом
+                  тарифе, всегда хороший голос и модель генерации (по умолчанию Sonnet 5.5).
+                </small>
+              </span>
+            </label>
+            <label className="check">
+              <input
+                type="checkbox"
+                checked={form.zeroRegrets}
+                onChange={(event) => set({ zeroRegrets: event.target.checked })}
+              />
+              <span>
+                Токсичность «Ноль сожалений»
+                <small>
+                  В панели стримера появится шестой уровень: свободный мат и злой тон. Донаты,
+                  команда, обращение по имени и награды идут к Sonnet, обычные слова в чате — к
+                  модели чата. Слюры, угрозы и всё, за что банит Twitch, блокируются по-прежнему.
+                </small>
+              </span>
+            </label>
+          </>
+        )}
+        {!form.unlimited && !own && (
           <>
             <Field
               label={`Всего роастов в месяц (тариф: ${String(user?.plan_limit ?? 0)})`}
@@ -564,15 +583,41 @@ function OverrideDialog({
         {modelField(
           "Модель хороших роастов",
           "model",
-          form.unlimited ? "Sonnet 5.5" : "Как у всех"
+          form.unlimited || own ? "Sonnet 5.5" : "Как у всех"
         )}
         {modelField(
           "Модель слов в чате",
           "chatModel",
-          form.unlimited ? "Как хорошие роасты" : "Как у всех"
+          form.unlimited || own ? "Как хорошие роасты" : "Как у всех"
         )}
+        <label className="field-label">
+          Голос хороших роастов
+          <select
+            value={form.bestVoice ?? INHERIT}
+            onChange={(event) =>
+              set({
+                bestVoice:
+                  event.target.value === INHERIT
+                    ? null
+                    : (event.target.value as NonNullable<ChannelOverride["bestVoice"]>)
+              })
+            }
+          >
+            <option value={INHERIT}>Как у всех (ElevenLabs, потом Inworld)</option>
+            {BEST_VOICES.map(([id, name]) => (
+              <option key={id} value={id}>
+                Сразу {name}
+              </option>
+            ))}
+          </select>
+          <small>
+            С этого голоса начинаются роасты и заглушки канала. Если он недоступен или упёрся в
+            лимит, звучит следующий по цепочке.
+          </small>
+        </label>
         {/* After the good roasts the voice is always Yandex: only the model is per channel. */}
         {!form.unlimited &&
+          !own &&
           modelField("Модель после хороших роастов", "economyModel", "Как в тарифе")}
         <Field
           label="Заметка (видна только вам)"
@@ -588,7 +633,7 @@ function OverrideDialog({
               className="button secondary danger"
               onClick={() => void onSave(user, EMPTY_OVERRIDE)}
             >
-              Убрать из любимчиков
+              {own ? "Сбросить" : "Убрать из любимчиков"}
             </button>
           )}
           <button type="button" className="button secondary" onClick={onClose}>

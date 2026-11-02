@@ -39,6 +39,9 @@ export const DEFAULT_MONTHLY_BUDGET_USD = 10;
 // ElevenLabs Starter includes 75,000 characters a month; stay under it so the plan never bills
 // overage. The owner changes it in /admin.
 export const DEFAULT_ELEVENLABS_MONTHLY_CHAR_LIMIT = 70_000;
+// ElevenLabs bills $0.08 per 1,000 characters on v4/v3/multilingual v2 (pricing page, 2026-10).
+// The subscription is prepaid: the budget counts it at this price, the spend page shows it apart.
+export const ELEVENLABS_USD_PER_CHARACTER = 0.08 / 1_000;
 // The worker syncs ElevenLabs' own plan limit; reservations stop this far below it, leaving room
 // for calls in flight while the counter is corrected and for voice samples.
 export const ELEVENLABS_PLAN_MARGIN = 1_000;
@@ -104,8 +107,13 @@ export const gameContext = (name: string | null | undefined) => {
   return game && game !== JUST_CHATTING ? game : undefined;
 };
 // Unlimited channels (the owner's own, and favourites the owner marks) always get the premium
-// tier, and this model unless their override names another: Opus everywhere would eat the budget.
+// tier, and this model unless their override names another.
 export const UNLIMITED_MODEL = "claude-sonnet-5-5";
+// The only models the service runs: Sonnet writes and checks, Haiku answers chat words and the
+// economy tier. Bigger models cost 2.5 times as much per roast (October 2026) and are not offered;
+// every model setting, plan and channel override is validated against this list.
+export const MODEL_IDS = ["claude-sonnet-5-5", "claude-haiku-5-5"] as const;
+export const modelIdSchema = z.enum(MODEL_IDS);
 // pg-boss fetches by priority, then age: the streamer's own messages and rewards jump the line.
 export const STREAMER_JOB_PRIORITY = 1;
 export const ROAST_REQUESTED_QUEUE = "roast.requested";
@@ -253,6 +261,12 @@ export const VOICE_SAMPLE_QUEUE = "voice.sample";
 export const voiceSampleJobSchema = z.object({ voiceId: voiceIdSchema }).strict();
 export const VOICE_SAMPLE_TEXT =
   "Ну привет. Я буду отвечать твоему чату. Надеюсь, ты к этому готов.";
+// The owner hears one phrase from Mitsuki and Ai in every voice service, side by side in /admin,
+// to decide which voice comes first. Each call goes through speak() and its provider's cap.
+export const VOICE_COMPARE_QUEUE = "voice.compare";
+export const VOICE_COMPARE_TONES = ["tsundere", "yandere"] as const;
+export const VOICE_COMPARE_PROVIDERS = ["elevenlabs", "inworld", "yandex"] as const;
+export const voiceCompareJobSchema = z.object({ text: z.string().trim().min(1).max(200) }).strict();
 export const voiceSchema = z.enum(["male", "female"]);
 export const toxicitySchema = z.union([
   z.literal(1),
@@ -347,6 +361,11 @@ export const voiceProviderSchema = z.enum(["elevenlabs", "inworld", "yandex", "p
 /** The best voice an economy roast may use: Yandex. Piper is never a plan's voice. */
 export const economyVoiceSchema = z.enum(["yandex"]);
 /**
+ * The first voice a premium roast of one channel tries (channel_overrides.best_voice); null starts
+ * at ElevenLabs. The rest of the chain follows as usual. Piper is never chosen.
+ */
+export const bestVoiceSchema = z.enum(["elevenlabs", "inworld", "yandex"]);
+/**
  * The owner's per-channel exceptions to the plan ("favourites"). null keeps the plan's value.
  * `unlimited` lifts the quota, pauses, frequency, viewer and test limits and plan features; the
  * kill switch, the service budget and cap, the stop list and the classifier still apply.
@@ -359,22 +378,11 @@ export const channelOverrideSchema = z
     monthlyRoastLimit: z.number().int().min(0).max(100_000).nullable().default(null),
     premiumRoasts: z.number().int().min(0).max(100_000).nullable().default(null),
     minCooldownSec: z.number().int().min(0).max(3_600).nullable().default(null),
-    model: z
-      .string()
-      .regex(/^claude-[a-z0-9-]+$/u)
-      .nullable()
-      .default(null),
-    chatModel: z
-      .string()
-      .regex(/^claude-[a-z0-9-]+$/u)
-      .nullable()
-      .default(null),
-    economyModel: z
-      .string()
-      .regex(/^claude-[a-z0-9-]+$/u)
-      .nullable()
-      .default(null),
+    model: modelIdSchema.nullable().default(null),
+    chatModel: modelIdSchema.nullable().default(null),
+    economyModel: modelIdSchema.nullable().default(null),
     economyVoice: economyVoiceSchema.nullable().default(null),
+    bestVoice: bestVoiceSchema.nullable().default(null),
     note: z.string().trim().max(500).nullable().default(null)
   })
   .strict();
@@ -503,8 +511,17 @@ export const REWARD_EVERY: Readonly<Record<ChatFrequency, number>> = {
 };
 
 export const DEFAULT_COMMAND = "!роаст";
+// The board of who called the character most this stream: a card on the overlay, no model, no
+// voice, free on every plan. The bot reads chat anonymously and cannot post, so the overlay shows it.
+export const TOP_BOARD_COMMANDS: ReadonlySet<string> = new Set(["!топ", "!top"]);
+// One board per channel this often at most; the stream is "the last hours" (Twitch gives no start).
+export const TOP_BOARD_COOLDOWN_MINUTES = 5;
+export const TOP_BOARD_WINDOW_HOURS = 8;
+export const TOP_BOARD_SIZE = 3;
 // Commands of popular chat bots: a roast command must not answer them too.
 export const RESERVED_COMMANDS: ReadonlySet<string> = new Set([
+  "!топ",
+  "!top",
   "!song",
   "!sr",
   "!uptime",
@@ -551,6 +568,8 @@ const triggerSettingsObject = z
     nameMention: z.boolean().default(false),
     // Harem mode: now and then the other heroine argues with the reply (HAREM_RETORT_CHANCE).
     haremMode: z.boolean().default(false),
+    // "!топ" in chat: the character shows who called her most this stream (TOP_BOARD_COMMANDS).
+    topBoard: z.boolean().default(false),
     // The streamer's own chat bots and spammers: their messages never trigger a roast.
     ignoredUsers: z.array(twitchLoginSchema).max(MAX_IGNORED_USERS).default([]),
     targetMode: targetModeSchema.default("auto"),
@@ -596,6 +615,8 @@ export const roastRequestedJobSchema = z
     declined: z.literal(true).optional(),
     // A chat word that calls the character by name (nameMention), not an ordinary keyword.
     named: z.literal(true).optional(),
+    // "!топ": the board of the stream's most active viewers instead of a roast (topBoard).
+    board: z.literal(true).optional(),
     requestedAt: z.string().datetime()
   })
   .strict();
@@ -780,6 +801,7 @@ export type Verdict = z.infer<typeof verdictSchema>;
 export type RoastTier = z.infer<typeof roastTierSchema>;
 export type VoiceProvider = z.infer<typeof voiceProviderSchema>;
 export type EconomyVoice = z.infer<typeof economyVoiceSchema>;
+export type BestVoice = z.infer<typeof bestVoiceSchema>;
 export type ChannelOverride = z.infer<typeof channelOverrideSchema>;
 export type SimulatedEvent = z.infer<typeof simulatedEventSchema>;
 export type TargetMode = z.infer<typeof targetModeSchema>;

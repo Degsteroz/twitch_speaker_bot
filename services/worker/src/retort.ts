@@ -20,7 +20,13 @@ import {
   type RoastTier
 } from "@roastbot/shared";
 
-import type { ChannelContext, OnAirCharacter, PipelineDependencies, Sql } from "./context.js";
+import {
+  firstVoice,
+  type ChannelContext,
+  type OnAirCharacter,
+  type PipelineDependencies,
+  type Sql
+} from "./context.js";
 import { extraSpendAllowed, voiceReservations } from "./limits.js";
 import { modelRequest } from "./models.js";
 import { publishOverlay, storeAudio } from "./overlay.js";
@@ -115,7 +121,7 @@ export async function playRetort(
       deps.config,
       deps.fetch ?? globalThis.fetch,
       await voiceReservations(deps),
-      { best: input.tier === "premium" ? "elevenlabs" : context.economyVoice, piper: false }
+      { best: firstVoice(context, input.tier), piper: false }
     );
     if (!speech) return await settle("no_voice");
     if (speech.costUsd > 0) {

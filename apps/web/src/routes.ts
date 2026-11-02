@@ -3,6 +3,7 @@
 
 export const ADMIN_TABS = [
   ["overview", "Обзор"],
+  ["spend", "Расходы"],
   ["users", "Пользователи"],
   ["roasts", "Роасты"],
   ["moderation", "Модерация"],

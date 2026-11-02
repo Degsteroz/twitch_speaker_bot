@@ -1,11 +1,11 @@
 import type Anthropic from "@anthropic-ai/sdk";
 
-// Models that always think: `thinking: {type: "disabled"}` is a 400 on Opus 5.5, Sonnet 5.5 and
-// Fable 5.x, so effort "low" keeps a one-line reply quick, and max_tokens leaves room for the
-// thinking that counts against it. Haiku 5.5 can still switch thinking off.
-const ALWAYS_THINKING = /^claude-(?:opus-5|sonnet-5-5|fable-5)/u;
-// Models that accept the server-side refusal fallback ("default" routes by refusal category).
-const SERVER_FALLBACK = /^claude-(?:opus-5|sonnet-5-5|fable-5-1)/u;
+// Sonnet 5.5 always thinks: `thinking: {type: "disabled"}` is a 400, so effort "low" keeps a
+// one-line reply quick, and max_tokens leaves room for the thinking that counts against it. Haiku
+// 5.5 can still switch thinking off. The service runs only these two (MODEL_IDS).
+const ALWAYS_THINKING = /^claude-sonnet-5-5/u;
+// Sonnet 5.5 accepts the server-side refusal fallback ("default" routes by refusal category).
+const SERVER_FALLBACK = /^claude-sonnet-5-5/u;
 const FALLBACK_BETA = "server-side-fallback-2026-07-01";
 
 type Kind = "generate" | "classify";

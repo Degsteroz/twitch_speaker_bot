@@ -400,6 +400,8 @@ export const channelOverrides = pgTable(
     chatModel: text("chat_model"),
     economyModel: text("economy_model"),
     economyVoice: text("economy_voice"),
+    // The first voice of the channel's premium roasts; null starts at ElevenLabs (0025).
+    bestVoice: text("best_voice"),
     note: text("note"),
     updatedByUserId: uuid("updated_by_user_id").references(() => users.id, {
       onDelete: "set null"
@@ -412,7 +414,11 @@ export const channelOverrides = pgTable(
       sql`coalesce(${table.monthlyRoastLimit}, 0) >= 0 and coalesce(${table.premiumRoasts}, 0) >= 0
         and coalesce(${table.minCooldownSec}, 0) >= 0`
     ),
-    check("channel_overrides_voice_check", sql`${table.economyVoice} in ('yandex')`)
+    check("channel_overrides_voice_check", sql`${table.economyVoice} in ('yandex')`),
+    check(
+      "channel_overrides_best_voice_check",
+      sql`${table.bestVoice} in ('elevenlabs', 'inworld', 'yandex')`
+    )
   ]
 );
 
@@ -665,6 +671,31 @@ export const starPayments = pgTable(
 );
 
 // ElevenLabs and Inworld voices the owner offers for premium characters, with a sample for the panel.
+// One phrase from Mitsuki and Ai in every voice service, for the owner to compare (0026).
+export const voiceCompare = pgTable(
+  "voice_compare",
+  {
+    tone: text("tone").notNull(),
+    provider: text("provider").notNull(),
+    text: text("text").notNull(),
+    status: text("status").notNull().default("pending"),
+    audio: bytea("audio"),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow()
+  },
+  (table) => [
+    primaryKey({ name: "voice_compare_pk", columns: [table.tone, table.provider] }),
+    check("voice_compare_tone_check", sql`${table.tone} in ('tsundere', 'yandere')`),
+    check(
+      "voice_compare_provider_check",
+      sql`${table.provider} in ('elevenlabs', 'inworld', 'yandex')`
+    ),
+    check(
+      "voice_compare_status_check",
+      sql`${table.status} in ('pending', 'ready', 'failed', 'no_voice')`
+    )
+  ]
+);
+
 export const voices = pgTable(
   "voices",
   {

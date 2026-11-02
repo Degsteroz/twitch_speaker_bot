@@ -49,7 +49,7 @@ pnpm lint
 pnpm format:check
 ```
 
-Ожидаемый результат на момент передачи: `pnpm test` — 390 тестов проходят;
+Ожидаемый результат на момент передачи: `pnpm test` — 399 тестов проходят;
 `pnpm lint` и `pnpm format:check` — без ошибок.
 
 Python-тесты TTS:
@@ -165,9 +165,10 @@ Docker для них не нужен. Anthropic и TTS в тестах заме�
    (`packages/prompts/src/examples.ts`; `scripts/classifier-eval.mjs` прогоняет их через две модели
    классификатора перед сменой `classifier_model`).
 3. **Параметры запроса — только через `modelRequest()`** (`services/worker/src/models.ts`).
-   `temperature` не передаётся никогда (400 на всех моделях). Opus 5.5, Sonnet 5.5 и Fable не
-   отключают thinking (`disabled` — 400): им `effort: "low"` и запас `max_tokens`; Haiku 5.5 —
-   `thinking: {type: "disabled"}`.
+   `temperature` не передаётся никогда (400 на всех моделях). Модели — только Sonnet 5.5 и
+   Haiku 5.5 (`MODEL_IDS` в `packages/shared`, API отклоняет любые другие): более крупные модели
+   слишком дороги. Sonnet 5.5 не отключает thinking (`disabled` — 400): ему `effort: "low"` и
+   запас `max_tokens`; Haiku 5.5 — `thinking: {type: "disabled"}`.
 4. **Квоты и бюджет проверяются до вызова API** в транзакции под advisory lock
    (`reserve()` в `services/worker/src/limits.ts`). Стоимость записывается и при успехе,
    и при сбое после вызова Anthropic.
@@ -200,6 +201,9 @@ Docker для них не нужен. Anthropic и TTS в тестах заме�
     5 минут перезаписывает расход самого ElevenLabs (`syncElevenLabsUsage`); лимит Inworld —
     `inworld_monthly_char_limit`. Голоса героини — `cloudVoicesFor()`: своя с голосом Мицуки или Аи
     после ElevenLabs идёт к их Inworld-голосу (`INWORLD_VOICE_*`), с голосом Inworld — сразу к нему.
+    Владелец может начать цепочку хороших роастов канала с Inworld или Яндекса
+    (`channel_overrides.best_voice`, `firstVoice()` в воркере; роасты, реплики harem-mode и
+    заглушки), но не с Piper и не в обход резервов.
 14. **Новые триггеры выключены по умолчанию** (`DEFAULT_TRIGGERS` в `packages/shared`): обновление
     никогда само не начинает жарить чат. Логика чата и событий — чистые функции в
     `services/twitch/src/triggers.ts`; кулдауны только для `COOLDOWN_SOURCES`. Кого жарить решает
@@ -298,18 +302,32 @@ Docker для них не нужен. Anthropic и TTS в тестах заме�
     оверлея того же роаста (`overlay_events.part = 1`), текст — `roasts.retort_text`; все `join`
     с `overlay_events` по роасту берут `part = 0`.
 
+27. **`!топ` (`triggers.topBoard`, выключен по умолчанию).** Бот читает чат анонимно и писать в него
+    не может, поэтому табло — карточка в оверлее со звуком (`playBoard()` в
+    `services/worker/src/board.ts`): без модели, голоса и квоты, на любом тарифе. Не чаще
+    `TOP_BOARD_COOLDOWN_MINUTES` на канал — проверка и публикация в одной транзакции под lock.
+    Считаются готовые роасты по вызовам зрителей за `TOP_BOARD_WINDOW_HOURS`; стример, opt-out и
+    ники, которые сейчас ловит стоп-лист, не показываются. `!топ` и `!top` нельзя взять командой
+    роаста (`RESERVED_COMMANDS`).
+
+28. **Аналитика владельца — только по запросу.** «Расходы» (`/admin/spend`) и «Сервер»
+    (`/admin/server`) в `services/api/src/admin-insights.ts` считаются, когда владелец открывает
+    вкладку; фоновых задач нет (слабый VPS). Сравнение голосов (`voice.compare`,
+    `services/worker/src/voices.ts`) — одна фраза Мицуки и Аи в каждом сервисе строго через
+    `speak()` с резервом, без запасного голоса и без Piper.
+
 ## 8. Статус проверок
 
 | Что                                                                                         | Статус                                          |
 | ------------------------------------------------------------------------------------------- | ----------------------------------------------- |
-| Сборка, lint, format, 390 тестов                                                            | ✅                                              |
+| Сборка, lint, format, 399 тестов                                                            | ✅                                              |
 | Python-тесты TTS                                                                            | ✅                                              |
 | Синтез Piper в Linux-контейнере (arm64, оба голоса)                                         | ✅                                              |
 | Регистрация по заявке и 2FA в браузере                                                      | ⬜ покрыто API-тестами, вживую не проверялось   |
 | Сквозной путь на собранных `dist`: migrate → seed → api + worker + twitch → оверлей → аудио | ✅ (с фейками Anthropic и TTS)                  |
 | Образы Docker и compose в edge-режиме (сборка, маршруты, WebSocket, голоса)                 | ✅ репетиция на Mac, на сервере не запускались  |
 | Вход через Twitch, EventSub, IRC                                                            | ⬜ нужен реальный аккаунт                       |
-| Настоящий Opus 5.5 / Sonnet 5.5                                                             | ⬜ не вызывался с живым ключом в этом окружении |
+| Настоящий Sonnet 5.5                                                                        | ⬜ не вызывался с живым ключом в этом окружении |
 | Тур в браузере                                                                              | ⬜ скриншоты сделаны, визуально не проверены    |
 | Бэкап и восстановление                                                                      | ✅ репетиция в edge-режиме, restore дважды      |
 

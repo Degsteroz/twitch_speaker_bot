@@ -22,6 +22,7 @@ import {
 } from "@roastbot/shared";
 
 import {
+  firstVoice,
   globalValue,
   type ChannelContext,
   type OnAirCharacter,
@@ -187,7 +188,7 @@ export async function playStub(
   deps: PipelineDependencies,
   input: StubInput
 ): Promise<RoastOutcome> {
-  const { job, roastId, character, archetype, reason } = input;
+  const { job, roastId, context, character, archetype, reason } = input;
   const outcome: RoastOutcome = { roastId, status: "skipped", reason };
   if (await stubWaiting(deps.sql, job)) {
     await deps.sql`update roasts set status='skipped', error=${reason},
@@ -204,8 +205,13 @@ export async function playStub(
     job.source === "reward"
       ? REWARD_DECLINED_STUB
       : phrases[Math.floor(Math.random() * phrases.length)]!;
+  // Stubs speak like the channel's premium roasts: from the owner's first voice down.
+  const best = firstVoice(context, "premium");
+  const cloud = (["elevenlabs", "inworld"] as const).slice(
+    best === "elevenlabs" ? 0 : best === "inworld" ? 1 : 2
+  );
   const voices = cloudVoicesFor(archetype, deps.config, character && character.voice);
-  const keys = (["elevenlabs", "inworld"] as const).flatMap((provider) =>
+  const keys = cloud.flatMap((provider) =>
     voices[provider] ? [{ provider, key: `${provider}:${voices[provider]}` }] : []
   );
   const kept = keys.length
@@ -227,7 +233,7 @@ export async function playStub(
       deps.config,
       deps.fetch ?? globalThis.fetch,
       await voiceReservations(deps),
-      character ? { voice: character.voice } : {}
+      { best, ...(character ? { voice: character.voice } : {}) }
     );
     if ((speech.provider === "elevenlabs" || speech.provider === "inworld") && speech.voiceId) {
       await deps.sql`insert into stub_audio(voice_key,text,audio)

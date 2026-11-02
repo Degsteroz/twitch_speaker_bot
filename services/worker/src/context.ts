@@ -5,9 +5,11 @@ import {
   MAX_REGULAR_TOXICITY,
   ZERO_REGRETS_TOXICITY,
   type Archetype,
+  type BestVoice,
   type CharacterVoiceProvider,
   type EconomyVoice,
   type RoastStatus,
+  type RoastTier,
   type Tone,
   type Toxicity,
   type Voice
@@ -51,6 +53,8 @@ export interface ChannelContext {
   premiumRoasts: number | null;
   economyModel: string;
   economyVoice: EconomyVoice;
+  /** The owner's choice of the first voice of premium roasts; null starts at ElevenLabs. */
+  bestVoice: BestVoice | null;
   /**
    * The owner's own channel or a favourite marked unlimited: no quota, pauses or viewer limit,
    * every plan feature, always the premium tier. Global guards and moderation still apply.
@@ -81,6 +85,15 @@ export interface OnAirCharacter {
   imagePath: string;
 }
 
+/**
+ * The first voice a roast tries: on the premium tier the owner's pick for the channel (ElevenLabs
+ * when none), on the economy tier the plan's. speak() falls through the rest of the chain.
+ */
+export const firstVoice = (
+  context: Pick<ChannelContext, "bestVoice" | "economyVoice">,
+  tier: RoastTier
+): BestVoice => (tier === "premium" ? (context.bestVoice ?? "elevenlabs") : context.economyVoice);
+
 export async function globalValue<T>(sql: Sql, key: string, fallback: T): Promise<T> {
   const [row] = await sql<{ value: T }[]>`select value from global_settings where key=${key}`;
   return row?.value ?? fallback;
@@ -102,6 +115,7 @@ export async function loadContext(
         "premiumRoasts",
       coalesce(o.economy_model, p.economy_model) "economyModel",
       coalesce(o.economy_voice, p.economy_voice::text) "economyVoice",
+      o.best_voice "bestVoice",
       (u.role='owner' or coalesce(o.unlimited, false)) unlimited,
       (u.role='owner' or coalesce(o.zero_regrets, false)) "zeroRegrets",
       o.model "overrideModel", o.chat_model "overrideChatModel",
