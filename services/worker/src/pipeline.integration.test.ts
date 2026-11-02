@@ -1,4 +1,4 @@
-import { mkdtemp, readdir, rm, stat } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -93,6 +93,7 @@ function deps(
       ANTHROPIC_API_KEY: "test",
       TTS_URL: "http://tts.test",
       ELEVENLABS_MODEL: "eleven_v4",
+      INWORLD_MODEL: "inworld-tts-2-flash",
       AUDIO_DIR: audioDir
     },
     fetch: vi.fn(fetchImpl),
@@ -686,6 +687,71 @@ describe("character voices", () => {
       where key='elevenlabs_monthly_char_limit'`;
   });
 
+  it("goes from ElevenLabs to Inworld to Yandex, each within its monthly cap", async () => {
+    await db.sql`update settings set tone='yandere' where channel_id=${channel.channelId}`;
+    await db.sql`delete from tts_usage_monthly where provider in ('elevenlabs','inworld')`;
+    const setLimit = (key: string, value: number) => db.sql`
+      insert into global_settings(key,value) values(${key},${db.sql.json(value)})
+      on conflict(key) do update set value=excluded.value`;
+    const text = "Я всё запомнила.";
+    const pipeline = deps(fakeAnthropic({ text }).client, (url) =>
+      Promise.resolve(
+        (url as string).includes("inworld")
+          ? new Response(JSON.stringify({ audioContent: Buffer.from("RIFF").toString("base64") }))
+          : yandexAudio()
+      )
+    );
+    pipeline.config = {
+      ...pipeline.config,
+      YANDEX_TTS_API_KEY: "test-key",
+      ELEVENLABS_API_KEY: "el-key",
+      ELEVENLABS_VOICE_YANDERE: "voice-ai",
+      INWORLD_API_KEY: "aW53b3JsZA==",
+      INWORLD_VOICE_YANDERE: "Ai_inworld"
+    };
+    await setLimit("elevenlabs_monthly_char_limit", 1);
+    try {
+      const outcome = await processRoast(await job({ source: "dashboard_test" }), pipeline);
+
+      expect(outcome.status).toBe("done");
+      // ElevenLabs is over its cap: not called at all.
+      expect(pipeline.fetch).toHaveBeenCalledOnce();
+      const [url, init] = pipeline.fetch.mock.calls[0]! as [string, RequestInit];
+      expect(url).toBe("https://api.inworld.ai/tts/v1/voice");
+      expect(init.headers).toMatchObject({ Authorization: "Basic aW53b3JsZA==" });
+      expect(JSON.parse(init.body as string)).toEqual({
+        text,
+        voiceId: "Ai_inworld",
+        modelId: "inworld-tts-2-flash",
+        audioConfig: { audioEncoding: "LINEAR16", sampleRateHertz: 24_000 }
+      });
+      const [row] = await db.sql<{ voice_provider: string; cost_usd: string }[]>`
+        select voice_provider, cost_usd from roasts where id=${outcome.roastId}`;
+      expect(row!.voice_provider).toBe("inworld");
+      expect(Number(row!.cost_usd)).toBeCloseTo(MODEL_COST_USD + (text.length * 15) / 1e6, 6);
+      const [event] = await db.sql<{ payload: { audioFile?: string } }[]>`
+        select payload from overlay_events where roast_id=${outcome.roastId}`;
+      expect((await readFile(join(audioDir, event!.payload.audioFile!))).toString()).toBe("RIFF");
+      const [reserved] = await db.sql<{ requests: number }[]>`
+        select requests from tts_usage_monthly where provider='inworld'`;
+      expect(reserved!.requests).toBe(text.length);
+
+      // Inworld over its cap too: Yandex speaks.
+      await setLimit("inworld_monthly_char_limit", 1);
+      pipeline.fetch.mockClear();
+      const yandex = await processRoast(await job({ source: "dashboard_test" }), pipeline);
+      expect(pipeline.fetch.mock.calls.map(([called]) => String(called))).toEqual([
+        "https://tts.api.cloud.yandex.net/tts/v3/utteranceSynthesis"
+      ]);
+      const [spoken] = await db.sql<{ voice_provider: string }[]>`
+        select voice_provider from roasts where id=${yandex.roastId}`;
+      expect(spoken!.voice_provider).toBe("yandex");
+    } finally {
+      await setLimit("elevenlabs_monthly_char_limit", 70_000);
+      await setLimit("inworld_monthly_char_limit", 500_000);
+    }
+  });
+
   it("falls back to Piper when Yandex fails, without charging for the cloud voice", async () => {
     const anthropic = fakeAnthropic({ text: "Хм, сыграл. Не то чтобы мне было интересно." });
     const pipeline = deps(anthropic.client, (url) =>
@@ -868,9 +934,11 @@ describe("memory and context", () => {
 });
 
 describe("model and voice by plan", () => {
-  it("gives the free plan two premium roasts, then the economy pair, with the overlay address", async () => {
+  it("gives the free plan its good roasts, then the economy pair, with the overlay address", async () => {
     await db.sql`update subscriptions set plan_id=(select id from plans where code='free')
       where user_id=${channel.userId}`;
+    // Two good roasts here instead of the default 15, so the third one is economy.
+    await db.sql`update plans set premium_roasts=2 where code='free'`;
     await db.sql`update settings set tone='yandere' where channel_id=${channel.channelId}`;
     await db.sql`delete from tts_usage_monthly`;
     const anthropic = fakeAnthropic({ text: "Я всё запомнила." });
@@ -921,6 +989,7 @@ describe("model and voice by plan", () => {
     // Economy changes the writer and the voice, never the safety classifier.
     expect(tiers.map((tier) => tier.classifier)).toEqual(Array(3).fill("claude-sonnet-5-5"));
     expect(tiers[2]!.voiceUrl).toContain("tts.api.cloud.yandex.net");
+    await db.sql`update plans set premium_roasts=15 where code='free'`;
     expect(await usage()).toMatchObject({ roasts: 2 });
   });
 
@@ -1330,5 +1399,220 @@ describe("premium characters", () => {
     ).toBe("failed");
     expect(failing).toHaveBeenCalledOnce();
     expect(failing.mock.calls[0]![0]).toEqual(expect.stringContaining("elevenlabs"));
+  });
+
+  it("records an Inworld voice sample with the Inworld key, never another voice", async () => {
+    await db.sql`insert into voices(id,provider,label) values('Ashley','inworld','Эшли')
+      on conflict do nothing`;
+    const config = {
+      ...deps(fakeAnthropic({ text: "" }).client).config,
+      ELEVENLABS_API_KEY: "k",
+      INWORLD_API_KEY: "iw"
+    };
+    const fetchSample = vi.fn<typeof globalThis.fetch>(() =>
+      Promise.resolve(
+        new Response(JSON.stringify({ audioContent: Buffer.from("RIFF!").toString("base64") }))
+      )
+    );
+    expect(
+      await recordVoiceSample(
+        { voiceId: "Ashley" },
+        { sql: worker.client, config, fetch: fetchSample }
+      )
+    ).toBe("ready");
+    expect(fetchSample).toHaveBeenCalledOnce();
+    expect(JSON.parse(fetchSample.mock.calls[0]![1]!.body as string)).toMatchObject({
+      voiceId: "Ashley"
+    });
+    const [voice] = await db.sql<{ sample: Buffer }[]>`select sample from voices where id='Ashley'`;
+    expect(voice!.sample.toString()).toBe("RIFF!");
+    await db.sql`delete from voices where id='Ashley'`;
+  });
+
+  it("moves own characters to Ai's voice once and takes the other ElevenLabs voices off", async () => {
+    const ai = "AiVoice0123456789";
+    const id = await character(channel);
+    const config = {
+      ...deps(fakeAnthropic({ text: "" }).client).config,
+      ELEVENLABS_VOICE_YANDERE: ai
+    };
+    try {
+      await syncVoices(db.sql, config);
+      const [moved] = await db.sql`select voice_id from characters where id=${id}`;
+      expect(moved).toEqual({ voice_id: ai });
+      const voices = await db.sql<{ id: string; enabled: boolean }[]>`
+        select id, enabled from voices where provider='elevenlabs'`;
+      expect(voices.filter((voice) => voice.enabled).map((voice) => voice.id)).toEqual([ai]);
+
+      // Once only: a voice the owner turns back on stays chosen after a restart.
+      await db.sql`update voices set enabled=true`;
+      await db.sql`update characters set voice_id=${VOICE_ID} where id=${id}`;
+      await syncVoices(db.sql, config);
+      const [kept] = await db.sql`select voice_id from characters where id=${id}`;
+      expect(kept).toEqual({ voice_id: VOICE_ID });
+    } finally {
+      await db.sql`update voices set enabled=true`;
+      await db.sql`delete from characters where id=${id}`;
+      await db.sql`delete from voices where id=${ai}`;
+    }
+  });
+});
+
+describe("harem mode", () => {
+  const SAID = "Ну и катка, зритель. Не то чтобы мне было интересно.";
+  const RETORT = "Мицуки, ты опять ворчишь, а он ведь старался. Почти.";
+
+  /** The roast first, then the retort: each generation gets its own line. */
+  function twoVoices(retort: FakeReply, retortVerdict: FakeReply = { text: "ALLOW" }) {
+    let generations = 0;
+    let classifications = 0;
+    const create = vi.fn((request: Anthropic.MessageCreateParamsNonStreaming) => {
+      const content = request.messages[0]?.content;
+      const isClassifier = typeof content === "string" && content.startsWith("<reply>");
+      const reply = isClassifier
+        ? classifications++ === 0
+          ? { text: "ALLOW" }
+          : retortVerdict
+        : generations++ === 0
+          ? { text: SAID }
+          : retort;
+      return Promise.resolve({
+        content: [{ type: "text", text: reply.text }],
+        stop_reason: reply.stop_reason ?? "end_turn",
+        usage: { input_tokens: 400, output_tokens: 60 }
+      });
+    });
+    return { client: { beta: { messages: { create } } } as unknown as Anthropic, create };
+  }
+
+  async function haremOn() {
+    await db.sql`update settings set triggers=triggers || '{"haremMode":true}'::jsonb
+      where channel_id=${channel.channelId}`;
+  }
+
+  async function overlayParts(roastId: string) {
+    const rows = await db.sql<{ part: number; payload: unknown }[]>`
+      select part, payload from overlay_events where roast_id=${roastId} order by part`;
+    return rows.map((row) => ({ part: row.part, ...storedOverlayRoastSchema.parse(row.payload) }));
+  }
+
+  it("lets the other heroine argue back, checked, voiced and queued after the roast", async () => {
+    await haremOn();
+    const anthropic = twoVoices({ text: RETORT });
+    // Her line never falls back to the local Piper: a cloud voice must be there.
+    const yandex = () =>
+      Promise.resolve(
+        new Response(
+          `${JSON.stringify({ result: { audioChunk: { data: Buffer.from("RIFFyandex").toString("base64") } } })}\n`
+        )
+      );
+    const pipeline = { ...deps(anthropic.client, yandex), random: () => 0.1 };
+    pipeline.config = { ...pipeline.config, YANDEX_TTS_API_KEY: "test-key" };
+
+    const outcome = await processRoast(await job(), pipeline);
+
+    expect(outcome.status).toBe("done");
+    // Roast and classifier, then her line and its own classifier check.
+    expect(anthropic.create).toHaveBeenCalledTimes(4);
+    const retortRequest = anthropic.create.mock.calls[2]![0];
+    expect(systemText(retortRequest)).toMatch(/^\[БЛОК БЕЗОПАСНОСТИ/u);
+    expect(systemText(retortRequest)).toContain("Аи");
+    expect(retortRequest.messages[0]!.content).toContain(`<said>${SAID}</said>`);
+    expect(retortRequest).not.toHaveProperty("temperature");
+    expect(anthropic.create.mock.calls[3]![0].messages[0]!.content).toBe(
+      `<reply>${RETORT}</reply>`
+    );
+    expect(pipeline.fetch).toHaveBeenCalledTimes(2);
+
+    const parts = await overlayParts(outcome.roastId);
+    expect(parts).toHaveLength(2);
+    expect(parts[0]).toMatchObject({ part: 0, text: SAID, tone: "tsundere" });
+    expect(parts[1]).toMatchObject({ part: 1, text: RETORT, tone: "yandere" });
+    expect(parts[1]!.audioFile).toBeTruthy();
+
+    const [row] = await db.sql<{ retort_text: string; retort_tone: string; cost_usd: string }[]>`
+      select retort_text, retort_tone, cost_usd from roasts where id=${outcome.roastId}`;
+    expect(row).toMatchObject({ retort_text: RETORT, retort_tone: "yandere" });
+    // Two model calls and one Yandex request per line.
+    expect(Number(row!.cost_usd)).toBeCloseTo(MODEL_COST_USD * 2 + 0.003, 6);
+    // One roast against the quota; both lines in the money and the voice characters.
+    expect(await usage()).toMatchObject({ roasts: 1, tts_chars: SAID.length + RETORT.length });
+  });
+
+  it("stays silent on most replies and whenever the mode is off", async () => {
+    await haremOn();
+    const rolledHigh = twoVoices({ text: RETORT });
+    const high = await processRoast(await job(), deps(rolledHigh.client));
+    expect(rolledHigh.create).toHaveBeenCalledTimes(2);
+    expect(await overlayParts(high.roastId)).toHaveLength(1);
+
+    await db.sql`update settings set triggers=triggers || '{"haremMode":false}'::jsonb
+      where channel_id=${channel.channelId}`;
+    const off = twoVoices({ text: RETORT });
+    const quiet = await processRoast(await job({ source: "raid", viewerLogin: "other" }), {
+      ...deps(off.client),
+      random: () => 0
+    });
+    expect(off.create).toHaveBeenCalledTimes(2);
+    expect(await overlayParts(quiet.roastId)).toHaveLength(1);
+  });
+
+  it("drops a retort the classifier blocks or that repeats her rival, and still books its cost", async () => {
+    await haremOn();
+    const blocked = twoVoices({ text: RETORT }, { text: "BLOCK" });
+    const first = await processRoast(await job(), { ...deps(blocked.client), random: () => 0.1 });
+    expect(first.status).toBe("done");
+    expect(blocked.create).toHaveBeenCalledTimes(4);
+    expect(await overlayParts(first.roastId)).toHaveLength(1);
+    expect((await roast(first.roastId)).cost_usd).not.toBe("0");
+    const [firstRow] = await db.sql<{ retort_text: string | null; cost_usd: string }[]>`
+      select retort_text, cost_usd from roasts where id=${first.roastId}`;
+    expect(firstRow!.retort_text).toBeNull();
+    expect(Number(firstRow!.cost_usd)).toBeCloseTo(MODEL_COST_USD * 2, 9);
+
+    const echo = twoVoices({ text: SAID });
+    const second = await processRoast(await job({ source: "raid", viewerLogin: "other" }), {
+      ...deps(echo.client),
+      random: () => 0.1
+    });
+    // The repeat is caught before the classifier: three calls, one line on air.
+    expect(echo.create).toHaveBeenCalledTimes(3);
+    expect(await overlayParts(second.roastId)).toHaveLength(1);
+  });
+
+  it("never argues after the blocked fallback or about a viewer who opted out", async () => {
+    await haremOn();
+    const fallback = twoVoices({ text: RETORT }, { text: "ALLOW" });
+    // The roast's own classifier blocks: the first verdict is BLOCK.
+    fallback.create.mockImplementationOnce(() =>
+      Promise.resolve({
+        content: [{ type: "text", text: SAID }],
+        stop_reason: "end_turn",
+        usage: { input_tokens: 400, output_tokens: 60 }
+      })
+    );
+    fallback.create.mockImplementationOnce(() =>
+      Promise.resolve({
+        content: [{ type: "text", text: "BLOCK" }],
+        stop_reason: "end_turn",
+        usage: { input_tokens: 400, output_tokens: 60 }
+      })
+    );
+    const blockedRoast = await processRoast(await job(), {
+      ...deps(fallback.client),
+      random: () => 0
+    });
+    expect(blockedRoast.status).toBe("blocked_output");
+    expect(fallback.create).toHaveBeenCalledTimes(2);
+    expect(await overlayParts(blockedRoast.roastId)).toHaveLength(1);
+
+    await db.sql`insert into viewer_optouts(channel_id,viewer_login) values(${channel.channelId},'shy')`;
+    const optedOut = twoVoices({ text: RETORT });
+    const paid = await processRoast(await job({ source: "raid", viewerLogin: "shy" }), {
+      ...deps(optedOut.client),
+      random: () => 0
+    });
+    expect(paid.status).toBe("done");
+    expect(optedOut.create).toHaveBeenCalledTimes(2);
   });
 });

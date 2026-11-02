@@ -1,5 +1,6 @@
 // Premium characters: what streamers offer to the shop (their pictures would appear on other
-// people's streams, so nothing reaches the shop unchecked) and the ElevenLabs voices on offer.
+// people's streams, so nothing reaches the shop unchecked) and the ElevenLabs and Inworld voices on
+// offer.
 import { useState } from "react";
 
 import {
@@ -18,8 +19,10 @@ import { useAdmin } from "./common.js";
 interface AdminCharacter extends CharacterView {
   usedBy: number;
 }
+type VoiceProvider = "elevenlabs" | "inworld";
 interface AdminVoice {
   id: string;
+  provider: VoiceProvider;
   label: string;
   description: string;
   enabled: boolean;
@@ -27,6 +30,15 @@ interface AdminVoice {
   sampleStatus: "pending" | "ready" | "failed";
   usedBy: number;
 }
+const PROVIDER_TEXT: Record<VoiceProvider, string> = {
+  elevenlabs: "ElevenLabs",
+  inworld: "Inworld"
+};
+// The voice ID formats the API and the voices table accept.
+const ID_PATTERN: Record<VoiceProvider, string> = {
+  elevenlabs: "[A-Za-z0-9]{10,40}",
+  inworld: "[A-Za-z0-9_\\-]{2,80}"
+};
 const SAMPLE_TEXT = {
   pending: "сэмпл записывается…",
   ready: "сэмпл готов",
@@ -124,7 +136,8 @@ function ShopReview() {
 function Voices() {
   const { data, error, load } = useAdmin<AdminVoice[]>("/admin/voices");
   const [notice, setNotice] = useState("");
-  const [form, setForm] = useState({ id: "", label: "", description: "" });
+  const empty = { provider: "inworld" as VoiceProvider, id: "", label: "", description: "" };
+  const [form, setForm] = useState(empty);
   const run = async (action: () => Promise<unknown>) => {
     setNotice("");
     try {
@@ -137,11 +150,12 @@ function Voices() {
   return (
     <Card>
       <p className="label">ГОЛОСА</p>
-      <h2>Голоса ElevenLabs для героинь</h2>
+      <h2>Голоса для героинь</h2>
       <p>
-        Добавьте voice ID из библиотеки ElevenLabs. Воркер сам запишет короткий сэмпл, чтобы
-        стримеры послушали голос перед выбором; сэмпл тратит около 70 символов месячного лимита
-        ElevenLabs. Выключенный или удалённый голос героини заменяет стандартный голос её характера.
+        Новые голоса — из Inworld. Голоса ElevenLabs, кроме «Как у Мицуки» и «Как у Аи», выключены:
+        их героини говорят как Аи. Воркер сам запишет короткий сэмпл, чтобы стримеры послушали голос
+        перед выбором; сэмпл тратит около 70 символов месячного лимита своего сервиса. Выключенный
+        или удалённый голос героини заменяет стандартный голос её характера.
       </p>
       {notice && <p className="feedback">{notice}</p>}
       {error && <p className="feedback">{error}</p>}
@@ -152,8 +166,8 @@ function Voices() {
             {voice.description && <span className="muted">— {voice.description}</span>}
             <small>
               {" "}
-              <code>{voice.id}</code> · {SAMPLE_TEXT[voice.sampleStatus]} · героинь с ним:{" "}
-              {voice.usedBy}
+              {PROVIDER_TEXT[voice.provider]} · <code>{voice.id}</code> ·{" "}
+              {SAMPLE_TEXT[voice.sampleStatus]} · героинь с ним: {voice.usedBy}
               {voice.enabled ? "" : " · выключен"}
             </small>
           </div>
@@ -213,15 +227,27 @@ function Voices() {
           event.preventDefault();
           void run(async () => {
             await api("/admin/voices", post(form));
-            setForm({ id: "", label: "", description: "" });
+            setForm(empty);
           });
         }}
       >
+        <label className="field-label">
+          Сервис
+          <select
+            value={form.provider}
+            onChange={(event) =>
+              setForm({ ...form, provider: event.target.value as VoiceProvider })
+            }
+          >
+            <option value="inworld">Inworld</option>
+            <option value="elevenlabs">ElevenLabs</option>
+          </select>
+        </label>
         <div className="two-fields">
           <Field
             label="Voice ID"
             required
-            pattern="[A-Za-z0-9]{10,40}"
+            pattern={ID_PATTERN[form.provider]}
             value={form.id}
             onChange={(id) => setForm({ ...form, id: id.trim() })}
           />

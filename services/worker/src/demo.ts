@@ -11,21 +11,20 @@ import {
 import {
   BLOCKED_OUTPUT_FALLBACK,
   DEFAULT_DEMO_DAILY_LIMIT,
-  DEFAULT_ECONOMY_MODEL,
+  DEFAULT_ANTHROPIC_MODEL,
   DEFAULT_MONTHLY_BUDGET_USD,
-  DEFAULT_YANDEX_TTS_MONTHLY_LIMIT_RUB,
   demoJobSchema,
   type DemoStatus
 } from "@roastbot/shared";
 
 import { modelRequest } from "./models.js";
 import { globalValue, type PipelineDependencies } from "./context.js";
-import { demoSpendSql, reserveYandexRequests } from "./limits.js";
+import { demoSpendSql, demoVoiceReservations } from "./limits.js";
 import { storeAudio } from "./overlay.js";
 import { costOf, textFrom } from "./spend.js";
 import { speak } from "./tts.js";
 
-// Ai on the landing page: a mild yandere at toxicity 2, voiced by Yandex only.
+// Ai on the landing page: a mild yandere at toxicity 2, in the best voice.
 const DEMO_TOXICITY = 2;
 // A visitor waits on the page; an older request is not worth the money.
 const DEMO_STALE_MS = 60_000;
@@ -38,8 +37,8 @@ export interface DemoOutcome {
 
 /**
  * One landing demo answer through the same moderation as a roast: stop list and injection check
- * before the model, output checks and the classifier after. The cheap model of the free plan
- * writes it, Yandex voices it within its cap, Piper is never used. The cost joins the monthly
+ * before the model, output checks and the classifier after. The premium model
+ * writes it, the best voice within its cap speaks it, Piper is never used. The cost joins the monthly
  * budget; a redelivered job does nothing.
  */
 export async function processDemo(
@@ -91,9 +90,8 @@ export async function processDemo(
     const verdict = inspectInput("зритель", text, stopWords);
     if (!verdict.allowed) return await settle("blocked", verdict.reason);
 
-    const [plan] = await deps.sql<{ model: string }[]>`
-      select economy_model "model" from plans where code='free'`;
-    const model = plan?.model ?? DEFAULT_ECONOMY_MODEL;
+    // The model premium roasts get: a visitor judges the service by this one answer.
+    const model = await globalValue(deps.sql, "model", DEFAULT_ANTHROPIC_MODEL);
     const classifierModel = await globalValue(deps.sql, "classifier_model", model);
     const prompt = composeRoastPrompt({
       viewer: "зритель",
@@ -141,22 +139,15 @@ export async function processDemo(
     }
     if (blockReason) output = BLOCKED_OUTPUT_FALLBACK;
 
-    const yandexLimitRub = await globalValue<number>(
-      deps.sql,
-      "yandex_tts_monthly_limit_rub",
-      DEFAULT_YANDEX_TTS_MONTHLY_LIMIT_RUB
-    );
+    // The demo sells the service: Ai speaks in the best voice. ElevenLabs within the demo's own
+    // share of its cap, then Inworld, then Yandex. Never the local Piper.
     const speech = await speak(
       spokenText(output),
       "yandere",
       deps.config,
       deps.fetch ?? globalThis.fetch,
-      {
-        yandex: (requests) => reserveYandexRequests(deps.sql, clock(), requests, yandexLimitRub),
-        // The demo never uses ElevenLabs: best is Yandex.
-        elevenlabs: () => Promise.resolve(false)
-      },
-      { best: "yandex", piper: false }
+      await demoVoiceReservations(deps),
+      { best: "elevenlabs", piper: false }
     );
     if (speech?.costUsd) {
       spends.push({

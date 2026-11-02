@@ -35,6 +35,7 @@ describe("channelSettingsSchema", () => {
       rewardId: null,
       keywords: [],
       nameMention: false,
+      haremMode: false,
       targetMode: "auto",
       events: { cheer: { enabled: false }, raid: { enabled: false }, follow: { enabled: false } }
     });

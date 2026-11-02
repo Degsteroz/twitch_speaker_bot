@@ -33,7 +33,7 @@ import { voiceReservations } from "./limits.js";
 import { modelRequest } from "./models.js";
 import { publishOverlay, storeAudio } from "./overlay.js";
 import { recordSpend, spendOf, textFrom, type Spend } from "./spend.js";
-import { elevenLabsVoiceFor, speak, type Speech } from "./tts.js";
+import { cloudVoicesFor, speak, type Speech } from "./tts.js";
 
 // Rejections that a direct call answers with a stub instead of silence.
 export const STUB_REJECTIONS: Readonly<Record<string, string>> = {
@@ -178,8 +178,9 @@ async function playVisualStub(
 
 /**
  * A prerecorded answer instead of a roast: no quota, no model, no classifier (the phrases are
- * ours). The audio is synthesized once per ElevenLabs voice and phrase and kept in stub_audio;
- * without ElevenLabs the next voice speaks and nothing is kept. One stub waits in the overlay
+ * ours). The audio is synthesized once per ElevenLabs or Inworld voice and phrase and kept in
+ * stub_audio (a kept ElevenLabs one plays even past its cap: it costs nothing); without them the
+ * next voice speaks and nothing is kept. One stub waits in the overlay
  * queue per viewer at most, so a spammer cannot fill it.
  */
 export async function playStub(
@@ -203,26 +204,35 @@ export async function playStub(
     job.source === "reward"
       ? REWARD_DECLINED_STUB
       : phrases[Math.floor(Math.random() * phrases.length)]!;
-  const voiceId = elevenLabsVoiceFor(archetype, deps.config, character && character.voiceId);
-  const voiceKey = voiceId ? `elevenlabs:${voiceId}` : null;
-  const [cached] = voiceKey
-    ? await deps.sql<{ audio: Buffer }[]>`
-        select audio from stub_audio where voice_key=${voiceKey} and text=${text}`
+  const voices = cloudVoicesFor(archetype, deps.config, character && character.voice);
+  const keys = (["elevenlabs", "inworld"] as const).flatMap((provider) =>
+    voices[provider] ? [{ provider, key: `${provider}:${voices[provider]}` }] : []
+  );
+  const kept = keys.length
+    ? await deps.sql<{ voice_key: string; audio: Buffer }[]>`
+        select voice_key, audio from stub_audio
+        where voice_key in ${deps.sql(keys.map(({ key }) => key))} and text=${text}`
     : [];
+  // The best voice first, as speak() would pick it.
+  const cached = keys
+    .map(({ provider, key }) => ({ provider, row: kept.find((row) => row.voice_key === key) }))
+    .find(({ row }) => row);
   let speech: Speech;
-  if (cached) speech = { audio: new Uint8Array(cached.audio), provider: "elevenlabs", costUsd: 0 };
-  else {
+  if (cached?.row) {
+    speech = { audio: new Uint8Array(cached.row.audio), provider: cached.provider, costUsd: 0 };
+  } else {
     speech = await speak(
       text,
       archetype,
       deps.config,
       deps.fetch ?? globalThis.fetch,
       await voiceReservations(deps),
-      character ? { voiceId: character.voiceId } : {}
+      character ? { voice: character.voice } : {}
     );
-    if (voiceKey && speech.provider === "elevenlabs") {
+    if ((speech.provider === "elevenlabs" || speech.provider === "inworld") && speech.voiceId) {
       await deps.sql`insert into stub_audio(voice_key,text,audio)
-        values(${voiceKey},${text},${Buffer.from(speech.audio)}) on conflict do nothing`;
+        values(${`${speech.provider}:${speech.voiceId}`},${text},${Buffer.from(speech.audio)})
+        on conflict do nothing`;
     }
   }
   const audioFile = await storeAudio(speech.audio, deps.config.AUDIO_DIR);

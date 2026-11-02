@@ -17,7 +17,7 @@ import {
   type Status
 } from "../api.js";
 import { ActivityLog } from "./activity.js";
-import { BillingCard } from "./billing.js";
+import { BillingCard, PLAN_NAMES } from "./billing.js";
 import { CustomCharacters } from "./characters.js";
 import { Choice, ScaleChoice, targetSteps, TOXICITY_STEPS, ZERO_REGRETS_STEP } from "./controls.js";
 import { OptOuts } from "./optouts.js";
@@ -328,10 +328,11 @@ export function Dashboard({
               </small>
             </>
           )}
-          {status.premium && (
+          {status.planText && (
             <small className="hint below">
-              Лучшая модель и голос: осталось {status.premium.remaining} из {status.premium.total} в
-              этом месяце, дальше героиня отвечает попроще.
+              {PLAN_NAMES[status.plan ?? ""] ?? "Тариф"}: {status.planText}.
+              {status.premium &&
+                ` Сейчас ${String(status.premium.total - status.premium.remaining)} из ${String(status.premium.total)}.`}
             </small>
           )}
           {!status.unlimited && minutes !== null && status.remaining > 0 && (
@@ -389,6 +390,25 @@ export function Dashboard({
               steps={status.zeroRegrets ? [...TOXICITY_STEPS, ZERO_REGRETS_STEP] : TOXICITY_STEPS}
               onChange={(value) => patch("toxicity", value as Settings["toxicity"])}
             />
+            <label className="check">
+              <input
+                type="checkbox"
+                checked={settings.triggers.haremMode}
+                onChange={(event) =>
+                  patch("triggers", { ...settings.triggers, haremMode: event.target.checked })
+                }
+              />
+              <span>
+                Harem-mode{" "}
+                <small>
+                  — примерно на каждый пятый ответ{" "}
+                  {characterName
+                    ? `${characterName} в спор вступает ${CHARACTER_NAMES.tsundere} или ${CHARACTER_NAMES.yandere}`
+                    : `${CHARACTER_NAMES[settings.tone]} в спор вступает ${CHARACTER_NAMES[settings.tone === "tsundere" ? "yandere" : "tsundere"]}`}
+                  . Её реплика не тратит квоту роастов.
+                </small>
+              </span>
+            </label>
           </Card>
           <CustomCharacters onActiveName={setCharacterName} />
           <TriggerSettings

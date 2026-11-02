@@ -15,6 +15,7 @@ const config: WorkerConfig = {
   ANTHROPIC_API_KEY: "test",
   TTS_URL: "http://tts.test",
   ELEVENLABS_MODEL: "eleven_v4",
+  INWORLD_MODEL: "inworld-tts-2-flash",
   AUDIO_DIR: "/tmp/unused",
   ELEVENLABS_API_KEY: "el-key",
   ELEVENLABS_VOICE_TSUNDERE: "voice-mitsuki"
@@ -101,12 +102,13 @@ describe("ElevenLabs usage sync", () => {
       yandex: () => Promise.resolve(false),
       elevenlabs: (characters: number) =>
         reserveElevenLabsCharacters(worker.client, now, characters, 70_000),
-      releaseElevenlabs: async (characters: number) => {
+      inworld: () => Promise.resolve(false),
+      release: async (_provider: string, characters: number) => {
         await worker.client`update tts_usage_monthly set requests=requests-${characters}
           where provider='elevenlabs' and month='2026-10'`;
       }
     };
-    const options = { piper: false as const, yandex: false, log: () => undefined };
+    const options = { piper: false as const, fallback: false, log: () => undefined };
     const refused = vi.fn(() => Promise.resolve(new Response("quota", { status: 401 })));
     expect(await speak("Привет", "tsundere", config, refused, reservations, options)).toBeNull();
     expect(await used()).toBe(0);

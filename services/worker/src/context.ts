@@ -5,6 +5,7 @@ import {
   MAX_REGULAR_TOXICITY,
   ZERO_REGRETS_TOXICITY,
   type Archetype,
+  type CharacterVoiceProvider,
   type EconomyVoice,
   type RoastStatus,
   type Tone,
@@ -13,6 +14,7 @@ import {
 } from "@roastbot/shared";
 
 import type { WorkerConfig } from "./config.js";
+import type { CharacterVoice } from "./tts.js";
 
 export type Sql = ReturnType<typeof createDatabase>["client"];
 
@@ -22,7 +24,7 @@ export interface PipelineDependencies {
   config: WorkerConfig;
   now?: () => Date;
   fetch?: typeof globalThis.fetch;
-  /** Picks between a spoken and a free stub; tests pin it. */
+  /** Picks between a spoken and a free stub and rolls the harem-mode retort; tests pin it. */
   random?: () => number;
 }
 
@@ -64,8 +66,9 @@ export interface ChannelContext {
   characterId: string | null;
   characterName: string | null;
   archetype: Archetype | null;
-  /** Her ElevenLabs voice, when the owner still offers it. */
+  /** Her voice from the list, when the owner still offers it. */
   characterVoiceId: string | null;
+  characterVoiceProvider: CharacterVoiceProvider | null;
   imageHash: string | null;
 }
 
@@ -74,7 +77,7 @@ export interface OnAirCharacter {
   id: string;
   name: string;
   archetype: Archetype;
-  voiceId: string | null;
+  voice: CharacterVoice | null;
   imagePath: string;
 }
 
@@ -104,7 +107,7 @@ export async function loadContext(
       o.model "overrideModel", o.chat_model "overrideChatModel",
       o.min_cooldown_sec "minCooldownSec", ch.id "characterId",
       coalesce(s.character_name, ch.name) "characterName", ch.archetype,
-      v.id "characterVoiceId", ch.image_hash "imageHash"
+      v.id "characterVoiceId", v.provider "characterVoiceProvider", ch.image_hash "imageHash"
     from channels c join users u on u.id=c.user_id join settings s on s.channel_id=c.id
     left join lateral (
       select sub.plan_id from subscriptions sub

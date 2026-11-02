@@ -3,6 +3,7 @@ import { useCallback, useEffect, useState } from "react";
 
 import {
   activityOutcome,
+  CHARACTER_NAMES,
   api,
   SIMULATED_KINDS,
   SOURCE_TEXT,
@@ -78,6 +79,11 @@ export function ActivityLog({ reload }: { reload: number }) {
                 <p className="activity-reply">
                   «{roast.outputText}»
                   <FavoriteButton id={roast.id} favorite={roast.favorite} onChange={load} />
+                </p>
+              )}
+              {roast.status === "done" && roast.retortText && roast.retortTone && (
+                <p className="activity-reply">
+                  {CHARACTER_NAMES[roast.retortTone]}: «{roast.retortText}»
                 </p>
               )}
               <small className={outcome.ok ? "good" : "bad"}>

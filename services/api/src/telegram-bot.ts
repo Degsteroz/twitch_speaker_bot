@@ -10,6 +10,7 @@ import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import {
   STARS_SUBSCRIPTION_SECONDS,
   parseStarsPayload,
+  planVoiceText,
   starsPayload,
   telegramCall
 } from "@roastbot/shared";
@@ -23,13 +24,9 @@ const hash = (value: string) => createHash("sha256").update(value).digest("hex")
 
 const PLAN_TITLES: Record<string, string> = { basic: "Basic", premium: "Premium" };
 
-/** "1000 роастов на 30 дней, из них 200 — лучшая модель и голос". */
+/** "500 роастов хорошим голосом, потом ещё 200 голосом попроще. На 30 дней, …". */
 export function planDescription(limit: number, premium: number | null): string {
-  const best =
-    premium === null || premium >= limit
-      ? "все на лучшей модели и голосе"
-      : `из них ${String(premium)} на лучшей модели и голосе`;
-  return `${String(limit)} роастов на 30 дней, ${best}. Продлевается автоматически, отменить можно в Telegram.`;
+  return `${planVoiceText(limit, premium)}. На 30 дней, продлевается автоматически, отменить можно в Telegram.`;
 }
 
 const updateSchema = z
@@ -137,10 +134,14 @@ export function registerTelegramRoutes(app: FastifyInstance, context: RouteConte
   // ---- billing -------------------------------------------------------------------------------
   app.get("/billing", { preHandler: requireUser }, async (request) => {
     const { channelId } = session(request);
-    const plans = await sql`
+    const plans = await sql<{ monthlyRoastLimit: number; premiumRoasts: number | null }[]>`
       select code, stars_price "starsPrice", monthly_roast_limit "monthlyRoastLimit",
         premium_roasts "premiumRoasts"
       from plans where stars_price is not null order by stars_price`;
+    // What Free gives, for the line above the paid plans.
+    const [free] = await sql<{ monthlyRoastLimit: number; premiumRoasts: number | null }[]>`
+      select monthly_roast_limit "monthlyRoastLimit", premium_roasts "premiumRoasts"
+      from plans where code='free'`;
     const [current] = await sql`
       select p.code plan, sub.valid_until "validUntil", sub.source
       from channels c join subscriptions sub on sub.user_id=c.user_id
@@ -151,7 +152,15 @@ export function registerTelegramRoutes(app: FastifyInstance, context: RouteConte
       select plan, stars, valid_until "validUntil", recurring, refunded_at "refundedAt",
         created_at "createdAt"
       from star_payments where channel_id=${channelId} order by created_at desc limit 10`;
-    return { available: configured, plans, current: current ?? null, payments };
+    const text = (plan: { monthlyRoastLimit: number; premiumRoasts: number | null }) =>
+      planVoiceText(plan.monthlyRoastLimit, plan.premiumRoasts);
+    return {
+      available: configured,
+      plans: plans.map((plan) => ({ ...plan, text: text(plan) })),
+      freeText: free ? text(free) : null,
+      current: current ?? null,
+      payments
+    };
   });
 
   app.post("/billing/checkout", { preHandler: requireUser }, async (request, reply) => {

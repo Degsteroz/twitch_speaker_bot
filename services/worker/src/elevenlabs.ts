@@ -87,9 +87,3 @@ export async function elevenLabsCharLimit(sql: Sql): Promise<number> {
   const plan = value("elevenlabs_subscription") as ElevenLabsSubscription | undefined;
   return plan ? Math.min(owner, Math.max(0, plan.limit - ELEVENLABS_PLAN_MARGIN)) : owner;
 }
-
-/** Gives back characters of a call ElevenLabs refused: an error answer is not billed. */
-export async function releaseElevenLabsCharacters(sql: Sql, now: Date, characters: number) {
-  await sql`update tts_usage_monthly set requests=greatest(0, requests-${characters}), updated_at=now()
-    where provider='elevenlabs' and month=${month(now)}`;
-}

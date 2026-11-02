@@ -275,8 +275,8 @@ describe("auth and settings", () => {
       state: "working",
       plan: "free",
       commandAvailable: false,
-      limit: 10,
-      remaining: 10
+      limit: 100,
+      remaining: 100
     });
     await call("POST", "/settings/enabled", streamer, { enabled: false });
     expect((await call("GET", "/status", streamer)).json()).toMatchObject({
@@ -291,7 +291,7 @@ describe("auth and settings", () => {
     });
     await db.sql`update global_settings set value='false'::jsonb where key='kill_switch'`;
     await db.sql`insert into usage_monthly(channel_id,month,roasts)
-      values(${streamer.channelId},${new Date().toISOString().slice(0, 7)},10)`;
+      values(${streamer.channelId},${new Date().toISOString().slice(0, 7)},100)`;
     expect((await call("GET", "/status", streamer)).json()).toMatchObject({
       state: "limit",
       remaining: 0
@@ -416,7 +416,7 @@ describe("test roast", () => {
 
     expect((await call("GET", "/status", streamer)).json()).toMatchObject({
       tests: { limit: 5, remaining: 5 },
-      premium: { total: 2, remaining: 2 },
+      premium: { total: 15, remaining: 15 },
       branding: true
     });
     await db.sql`insert into test_usage_daily(channel_id,day,roasts)
@@ -428,46 +428,51 @@ describe("test roast", () => {
 });
 
 describe("plan tiers in /admin", () => {
-  it("lets the owner change the premium allowance, model and voice, but not the limit", async () => {
+  it("lets the owner change the good roasts, the total, the price and the model", async () => {
     const plans = (await call("GET", "/admin/plans", owner)).json<{ code: string }[]>();
     expect(plans).toContainEqual({
       code: "free",
-      monthlyRoastLimit: 10,
-      premiumRoasts: 2,
+      monthlyRoastLimit: 100,
+      premiumRoasts: 15,
       economyModel: "claude-haiku-5-5",
       economyVoice: "yandex",
       starsPrice: null
     });
+    expect(plans).toContainEqual(
+      expect.objectContaining({ code: "basic", monthlyRoastLimit: 700, premiumRoasts: 500 })
+    );
     const body = {
-      premiumRoasts: 3,
+      monthlyRoastLimit: 120,
+      premiumRoasts: 20,
       economyModel: "claude-sonnet-5-5",
-      economyVoice: "piper",
+      economyVoice: "yandex",
       starsPrice: 570
     };
     expect((await call("PUT", "/admin/plans/free", owner, body)).statusCode).toBe(200);
-    expect(
-      (await call("PUT", "/admin/plans/free", owner, { ...body, monthlyRoastLimit: 99 })).statusCode
-    ).toBe(400);
-    expect(
-      (await call("PUT", "/admin/plans/free", owner, { ...body, economyVoice: "elevenlabs" }))
-        .statusCode
-    ).toBe(400);
+    // Piper is only the emergency voice and ElevenLabs only the good one: neither comes after.
+    for (const economyVoice of ["piper", "elevenlabs", "inworld"]) {
+      expect(
+        (await call("PUT", "/admin/plans/free", owner, { ...body, economyVoice })).statusCode
+      ).toBe(400);
+    }
     for (const starsPrice of [0, 10_001, 5.5]) {
       expect(
         (await call("PUT", "/admin/plans/free", owner, { ...body, starsPrice })).statusCode
       ).toBe(400);
     }
     expect((await call("PUT", "/admin/plans/free", streamer, body)).statusCode).toBe(403);
-    const [free] = await db.sql`select premium_roasts, economy_model, economy_voice, stars_price
-      from plans where code='free'`;
+    const [free] = await db.sql`select monthly_roast_limit, premium_roasts, economy_model,
+      economy_voice, stars_price from plans where code='free'`;
     expect(free).toEqual({
-      premium_roasts: 3,
+      monthly_roast_limit: 120,
+      premium_roasts: 20,
       economy_model: "claude-sonnet-5-5",
-      economy_voice: "piper",
+      economy_voice: "yandex",
       stars_price: 570
     });
     await call("PUT", "/admin/plans/free", owner, {
-      premiumRoasts: 2,
+      monthlyRoastLimit: 100,
+      premiumRoasts: 15,
       economyModel: "claude-haiku-5-5",
       economyVoice: "yandex",
       starsPrice: null
@@ -564,7 +569,7 @@ describe("back-office", () => {
   it("lists users with plan and usage, and applies manual actions", async () => {
     const users = await call("GET", `/admin/users?search=${streamer.login}`, owner);
     expect(users.json()).toEqual([
-      expect.objectContaining({ id: streamer.userId, plan: "free", used: 0, limit: 10 })
+      expect.objectContaining({ id: streamer.userId, plan: "free", used: 0, limit: 100 })
     ]);
     await call("POST", `/admin/users/${streamer.userId}/gift`, owner, { amount: 5 });
     await call("POST", `/admin/users/${streamer.userId}/subscription`, owner, {
@@ -572,7 +577,7 @@ describe("back-office", () => {
       validUntil: null
     });
     expect((await call("GET", "/status", streamer)).json()).toMatchObject({
-      limit: 300,
+      limit: 700,
       gifted: 5,
       commandAvailable: true
     });
@@ -598,7 +603,7 @@ describe("back-office", () => {
       model: "claude-opus-5-5",
       chatModel: null,
       economyModel: null,
-      economyVoice: "piper",
+      economyVoice: "yandex",
       note: "друг канала"
     };
     expect((await call("PUT", path, owner, body)).statusCode).toBe(200);
@@ -1242,9 +1247,12 @@ describe("Telegram bot and Stars", () => {
     const checkout = await call("POST", "/billing/checkout", streamer, { plan: "basic" });
     expect(checkout.json()).toEqual({ url: "https://t.me/$invoice" });
     const invoice = calls[0]!.body;
+    expect(invoice.description).toContain(
+      "500 роастов хорошим голосом, потом ещё 200 голосом попроще"
+    );
     expect(invoice).toMatchObject({
       currency: "XTR",
-      prices: [{ amount: 170 }],
+      prices: [{ amount: 300 }],
       subscription_period: 2_592_000,
       payload: `rb1:${streamer.channelId}:basic`
     });
@@ -1260,7 +1268,7 @@ describe("Telegram bot and Stars", () => {
           invoice_payload: invoice.payload
         }
       });
-    await precheck(170);
+    await precheck(300);
     expect(calls[0]).toMatchObject({ method: "answerPreCheckoutQuery", body: { ok: true } });
     await precheck(1);
     expect(calls[1]).toMatchObject({ method: "answerPreCheckoutQuery", body: { ok: false } });
@@ -1272,7 +1280,7 @@ describe("Telegram bot and Stars", () => {
         from: { id: 777 },
         successful_payment: {
           currency: "XTR",
-          total_amount: 170,
+          total_amount: 300,
           invoice_payload: invoice.payload,
           telegram_payment_charge_id: `charge-${streamer.channelId}`,
           subscription_expiration_date: expires,
@@ -1284,7 +1292,7 @@ describe("Telegram bot and Stars", () => {
     await webhook(paid);
     const payments = await db.sql`select plan, stars from star_payments
       where channel_id=${streamer.channelId}`;
-    expect(payments).toEqual([{ plan: "basic", stars: 170 }]);
+    expect(payments).toEqual([{ plan: "basic", stars: 300 }]);
     expect((await call("GET", "/status", streamer)).json()).toMatchObject({
       plan: "basic",
       commandAvailable: true
@@ -1293,11 +1301,11 @@ describe("Telegram bot and Stars", () => {
     // The owner raises the price: the paying channel still renews at its own, others pay the new.
     await db.sql`update plans set stars_price=570 where code='basic'`;
     telegram();
-    await precheck(170);
-    await precheck(570);
     await precheck(300);
+    await precheck(570);
+    await precheck(400);
     expect(calls.map((item) => item.body.ok)).toEqual([true, true, false]);
-    await db.sql`update plans set stars_price=170 where code='basic'`;
+    await db.sql`update plans set stars_price=300 where code='basic'`;
 
     telegram();
     const refund = await call(

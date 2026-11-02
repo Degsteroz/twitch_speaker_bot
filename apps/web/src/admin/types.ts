@@ -35,7 +35,7 @@ export interface ChannelOverride {
   model: string | null;
   chatModel: string | null;
   economyModel: string | null;
-  economyVoice: "yandex" | "piper" | null;
+  economyVoice: "yandex" | null;
   note: string | null;
 }
 
@@ -84,6 +84,11 @@ export interface Overview {
   elevenLabsResetAt: string | null;
   /** The last time the worker read ElevenLabs' own count; null when it never could. */
   elevenLabsSyncedAt: string | null;
+  inworldChars: number;
+  inworldLimit: number;
+  /** The landing demo's share of the ElevenLabs cap, already inside elevenLabsChars. */
+  demoElevenLabsChars: number;
+  demoElevenLabsLimit: number;
 }
 
 export interface PlanRow {
@@ -91,7 +96,7 @@ export interface PlanRow {
   monthlyRoastLimit: number;
   premiumRoasts: number | null;
   economyModel: string;
-  economyVoice: "yandex" | "piper";
+  economyVoice: "yandex";
   /** Telegram Stars for 30 days; null means not for sale. */
   starsPrice: number | null;
 }

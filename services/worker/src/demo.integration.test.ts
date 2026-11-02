@@ -59,6 +59,7 @@ function deps(
       ANTHROPIC_API_KEY: "test",
       TTS_URL: "http://tts.test",
       ELEVENLABS_MODEL: "eleven_v4",
+      INWORLD_MODEL: "inworld-tts-2-flash",
       AUDIO_DIR: audioDir,
       ...(yandex ? { YANDEX_TTS_API_KEY: "test-key" } : {})
     },
@@ -86,13 +87,14 @@ const row = async (id: string) => {
 };
 
 describe("landing demo", () => {
-  it("answers with the cheap model, Yandex voice, and books the cost", async () => {
+  it("answers with the premium model, Yandex without ElevenLabs, and books the cost", async () => {
     const anthropic = fakeAnthropic("Ой, какой смелый зритель.");
     const pipeline = deps(anthropic.client, true);
     const id = await demo("стример опять слил");
     expect(await processDemo({ demoId: id }, pipeline)).toMatchObject({ status: "done" });
     const [generation, classifier] = anthropic.create.mock.calls.map(([request]) => request);
-    expect(generation!.model).toBe("claude-haiku-5-5");
+    // The model premium roasts get: the demo shows the service at its best.
+    expect(generation!.model).toBe("claude-sonnet-5-5");
     expect(classifier!.model).toBe("claude-sonnet-5-5");
     expect(String(pipeline.fetch.mock.calls[0]![0])).toContain("tts.api.cloud.yandex.net");
     const saved = await row(id);
@@ -104,7 +106,62 @@ describe("landing demo", () => {
     expect(anthropic.create).toHaveBeenCalledTimes(2);
   });
 
-  it("stays silent instead of loading Piper when there is no Yandex key", async () => {
+  it("speaks in ElevenLabs within the demo's own share of the monthly cap", async () => {
+    await db.sql`delete from tts_usage_monthly where provider in ('elevenlabs','elevenlabs_demo')`;
+    const text = "Ой, какой смелый зритель.";
+    const pipeline = deps(fakeAnthropic(text).client, true);
+    pipeline.fetch.mockImplementation((url: string) =>
+      Promise.resolve(
+        url.includes("elevenlabs")
+          ? new Response(new Uint8Array([82, 73, 70, 70, 1]))
+          : new Response(
+              `${JSON.stringify({ result: { audioChunk: { data: Buffer.from("RIFF").toString("base64") } } })}\n`
+            )
+      )
+    );
+    pipeline.config = {
+      ...pipeline.config,
+      ELEVENLABS_API_KEY: "el-key",
+      ELEVENLABS_VOICE_YANDERE: "voice-ai"
+    };
+    const id = await demo("стример опять слил");
+    expect(await processDemo({ demoId: id }, pipeline)).toMatchObject({ status: "done" });
+    expect(String(pipeline.fetch.mock.calls[0]![0])).toContain("api.elevenlabs.io");
+    expect(pipeline.fetch).toHaveBeenCalledOnce();
+    const usage = async () =>
+      Object.fromEntries(
+        (
+          await db.sql<{ provider: string; requests: number }[]>`
+            select provider, requests from tts_usage_monthly
+            where provider in ('elevenlabs','elevenlabs_demo')`
+        ).map((row) => [row.provider, row.requests])
+      );
+    expect(await usage()).toEqual({ elevenlabs: text.length, elevenlabs_demo: text.length });
+
+    // Past the demo's share Yandex takes over, though the streamers' cap has room.
+    await db.sql`insert into global_settings(key,value) values('demo_elevenlabs_char_limit','30'::jsonb)
+      on conflict(key) do update set value=excluded.value`;
+    pipeline.fetch.mockClear();
+    await processDemo({ demoId: await demo("ещё раз") }, pipeline);
+    expect(String(pipeline.fetch.mock.calls[0]![0])).toContain("tts.api.cloud.yandex.net");
+    expect(await usage()).toEqual({ elevenlabs: text.length, elevenlabs_demo: text.length });
+
+    // With the shared cap full the demo's own booking is rolled back too.
+    await db.sql`update global_settings set value='100000'::jsonb
+      where key='demo_elevenlabs_char_limit'`;
+    await db.sql`update global_settings set value='1'::jsonb
+      where key='elevenlabs_monthly_char_limit'`;
+    pipeline.fetch.mockClear();
+    await processDemo({ demoId: await demo("и ещё") }, pipeline);
+    expect(String(pipeline.fetch.mock.calls[0]![0])).toContain("tts.api.cloud.yandex.net");
+    expect(await usage()).toEqual({ elevenlabs: text.length, elevenlabs_demo: text.length });
+    await db.sql`update global_settings set value='70000'::jsonb
+      where key='elevenlabs_monthly_char_limit'`;
+    await db.sql`update global_settings set value='10000'::jsonb
+      where key='demo_elevenlabs_char_limit'`;
+  });
+
+  it("stays silent instead of loading Piper when there is no cloud voice", async () => {
     const pipeline = deps(fakeAnthropic("Привет.").client);
     const id = await demo("привет");
     await processDemo({ demoId: id }, pipeline);

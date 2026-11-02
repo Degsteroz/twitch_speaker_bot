@@ -13,12 +13,19 @@ interface Billing {
     starsPrice: number;
     monthlyRoastLimit: number;
     premiumRoasts: number | null;
+    /** "500 роастов хорошим голосом, потом ещё 200 голосом попроще". */
+    text: string;
   }[];
+  freeText: string | null;
   current: { plan: string; validUntil: string | null; source: string } | null;
   payments: { plan: string; stars: number; validUntil: string; refundedAt: string | null }[];
 }
 
-const PLAN_NAMES: Record<string, string> = { free: "Free", basic: "Basic", premium: "Premium" };
+export const PLAN_NAMES: Record<string, string> = {
+  free: "Free",
+  basic: "Basic",
+  premium: "Premium"
+};
 
 export function BillingCard({ onPaid }: { onPaid: () => void }) {
   const [billing, setBilling] = useState<Billing>();
@@ -80,7 +87,7 @@ export function BillingCard({ onPaid }: { onPaid: () => void }) {
         <>
           <p className="muted">
             {free
-              ? "На Free доступно 10 роастов в месяц без команды !роаст. Платные тарифы:"
+              ? `Free: ${billing.freeText ?? "несколько роастов"} в месяц, без команды !роаст. Платные тарифы:`
               : "Платные тарифы:"}
           </p>
           <ul className="plans">
@@ -88,13 +95,7 @@ export function BillingCard({ onPaid }: { onPaid: () => void }) {
               <li key={plan.code} className={current?.plan === plan.code ? "current" : ""}>
                 <span>
                   <strong>{PLAN_NAMES[plan.code] ?? plan.code}</strong>
-                  <small>
-                    {plan.monthlyRoastLimit} роастов в месяц
-                    {plan.premiumRoasts !== null && plan.premiumRoasts < plan.monthlyRoastLimit
-                      ? `, из них ${String(plan.premiumRoasts)} на лучшей модели и голосе, остальные попроще`
-                      : ", все на лучшей модели и голосе"}
-                    ; команда !роаст
-                  </small>
+                  <small>{plan.text} в месяц; команда !роаст</small>
                 </span>
                 <button
                   className="button secondary"

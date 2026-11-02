@@ -14,6 +14,7 @@ import {
   channelSettingsSchema,
   effectiveCooldown,
   minCooldownSeconds,
+  planVoiceText,
   testRoastRequestSchema,
   updateSettingsRequestSchema,
   type UpdateSettingsRequest
@@ -39,13 +40,14 @@ import { TwitchApiError, getChannelGame, getRewards } from "./twitch.js";
 // through /admin/roasts/:id.
 export const roastDetail = (sql: Sql, id: string, channelId: string | null) => sql`
     select r.id, r.status, r.source, r.viewer_login "viewerLogin", r.input_text "inputText",
-      r.output_text "outputText", r.error, r.latency_ms "latencyMs", r.created_at "createdAt",
+      r.output_text "outputText", r.retort_text "retortText", r.retort_tone "retortTone",
+      r.error, r.latency_ms "latencyMs", r.created_at "createdAt",
       r.tier, r.model, r.voice_provider "voiceProvider", r.cost_usd::float8 "costUsd",
       c.twitch_login "channelLogin", o.status "overlayStatus",
       r.favorite_at is not null favorite, r.showcase_approved_at is not null "onShowcase",
       case when r.source='dashboard_test' then e.raw->>'kind' end "testKind"
     from roasts r join channels c on c.id=r.channel_id
-    left join overlay_events o on o.roast_id=r.id
+    left join overlay_events o on o.roast_id=r.id and o.part=0
     left join events e on e.id=r.event_id
     where r.id=${id} and (${channelId}::uuid is null or r.channel_id=${channelId})`;
 export const roastIdParams = z.object({ id: z.string().uuid() });
@@ -282,7 +284,9 @@ export function registerDashboardRoutes(
       // The shortest pause the plan (or the owner's override) allows; the fields start there.
       minCooldownSec: row.unlimited ? 0 : minCooldownSeconds(row.plan, row.minCooldownSec),
       branding: BRANDED_PLANS.has(row.plan ?? ""),
-      // Best model and voice left this month; null when every roast gets them.
+      // The plan in one line: good roasts, then the simpler voice. null: no limit.
+      planText: row.unlimited ? null : planVoiceText(row.limit, row.premiumRoasts),
+      // Good roasts left this month; null when every roast is a good one.
       premium:
         row.premiumRoasts === null || row.unlimited
           ? null
@@ -373,10 +377,11 @@ export function registerDashboardRoutes(
     const { channelId } = session(request);
     const roasts = await sql`
       select r.id, r.created_at "createdAt", r.source, r.viewer_login "viewerLogin",
-        left(r.input_text, 120) "inputText", r.output_text "outputText", r.status, r.error,
+        left(r.input_text, 120) "inputText", r.output_text "outputText",
+        r.retort_text "retortText", r.retort_tone "retortTone", r.status, r.error,
         o.status "overlayStatus", r.favorite_at is not null favorite,
         case when r.source='dashboard_test' then e.raw->>'kind' end "testKind"
-      from roasts r left join overlay_events o on o.roast_id=r.id
+      from roasts r left join overlay_events o on o.roast_id=r.id and o.part=0
       left join events e on e.id=r.event_id
       where r.channel_id=${channelId} order by r.created_at desc limit 15`;
     const [eventsub] = await sql`

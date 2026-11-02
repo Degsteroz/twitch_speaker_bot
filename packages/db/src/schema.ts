@@ -14,6 +14,7 @@ import {
   pgEnum,
   pgTable,
   primaryKey,
+  smallint,
   text,
   timestamp,
   uniqueIndex,
@@ -168,7 +169,7 @@ export const plans = pgTable(
       "plans_premium_roasts_check",
       sql`${table.premiumRoasts} is null or ${table.premiumRoasts} >= 0`
     ),
-    check("plans_economy_voice_check", sql`${table.economyVoice} in ('yandex', 'piper')`),
+    check("plans_economy_voice_check", sql`${table.economyVoice} in ('yandex')`),
     check(
       "plans_stars_price_check",
       sql`${table.starsPrice} is null or ${table.starsPrice} between 1 and 10000`
@@ -296,6 +297,9 @@ export const roasts = pgTable(
     showcaseApprovedAt: timestamp("showcase_approved_at", { withTimezone: true }),
     moderationReviewedAt: timestamp("moderation_reviewed_at", { withTimezone: true }),
     characterId: uuid("character_id").references(() => characters.id, { onDelete: "set null" }),
+    // Harem mode: the other heroine's answer to this roast, when she spoke, and who she was.
+    retortText: text("retort_text"),
+    retortTone: toneEnum("retort_tone"),
     createdAt: createdAt()
   },
   (table) => [
@@ -408,7 +412,7 @@ export const channelOverrides = pgTable(
       sql`coalesce(${table.monthlyRoastLimit}, 0) >= 0 and coalesce(${table.premiumRoasts}, 0) >= 0
         and coalesce(${table.minCooldownSec}, 0) >= 0`
     ),
-    check("channel_overrides_voice_check", sql`${table.economyVoice} in ('yandex', 'piper')`)
+    check("channel_overrides_voice_check", sql`${table.economyVoice} in ('yandex')`)
   ]
 );
 
@@ -470,6 +474,8 @@ export const overlayEvents = pgTable(
       .notNull()
       .references(() => roasts.id, { onDelete: "cascade" }),
     payload: jsonb("payload").$type<StoredOverlayRoast>().notNull(),
+    // 0 is the roast itself; 1 is the other heroine's retort in harem mode.
+    part: smallint("part").notNull().default(0),
     status: overlayEventStatusEnum("status").notNull().default("pending"),
     attempts: integer("attempts").notNull().default(0),
     availableAt: timestamp("available_at", { withTimezone: true }).notNull().defaultNow(),
@@ -478,10 +484,11 @@ export const overlayEvents = pgTable(
     createdAt: createdAt()
   },
   (table) => [
-    uniqueIndex("overlay_events_roast_id_uidx").on(table.roastId),
+    uniqueIndex("overlay_events_roast_part_uidx").on(table.roastId, table.part),
     index("overlay_events_dispatch_idx").on(table.channelId, table.status, table.availableAt),
     index("overlay_events_expires_idx").on(table.expiresAt),
     check("overlay_events_attempts_check", sql`${table.attempts} >= 0`),
+    check("overlay_events_part_check", sql`${table.part} in (0, 1)`),
     check("overlay_events_expiry_check", sql`${table.expiresAt} > ${table.createdAt}`)
   ]
 );
@@ -657,11 +664,12 @@ export const starPayments = pgTable(
   ]
 );
 
-// ElevenLabs voices the owner offers for premium characters, with a sample for the panel.
+// ElevenLabs and Inworld voices the owner offers for premium characters, with a sample for the panel.
 export const voices = pgTable(
   "voices",
   {
     id: text("id").primaryKey(),
+    provider: text("provider").notNull().default("elevenlabs"),
     label: text("label").notNull(),
     description: text("description").notNull().default(""),
     enabled: boolean("enabled").notNull().default(true),
@@ -671,7 +679,11 @@ export const voices = pgTable(
     createdAt: createdAt()
   },
   (table) => [
-    check("voices_id_check", sql`${table.id} ~ '^[A-Za-z0-9]{10,40}$'`),
+    check(
+      "voices_id_check",
+      sql`(${table.provider} = 'elevenlabs' and ${table.id} ~ '^[A-Za-z0-9]{10,40}$')
+        or (${table.provider} = 'inworld' and ${table.id} ~ '^[A-Za-z0-9_-]{2,80}$')`
+    ),
     check(
       "voices_sample_status_check",
       sql`${table.sampleStatus} in ('pending', 'ready', 'failed')`
@@ -765,8 +777,8 @@ export const eventsRelations = relations(events, ({ one }) => ({
   roast: one(roasts)
 }));
 
-export const roastsRelations = relations(roasts, ({ one }) => ({
+export const roastsRelations = relations(roasts, ({ one, many }) => ({
   channel: one(channels, { fields: [roasts.channelId], references: [channels.id] }),
   event: one(events, { fields: [roasts.eventId], references: [events.id] }),
-  overlayEvent: one(overlayEvents)
+  overlayEvents: many(overlayEvents)
 }));

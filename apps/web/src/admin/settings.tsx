@@ -1,11 +1,13 @@
-// Settings: kill switch, limits and budget, models, voices; plans in their own file.
+// Settings: on top what the owner touches (kill switch, budget, the Yandex cap, plans); models,
+// character caps, registration and the rest under "Дополнительно". Plans in their own file.
 import { useState } from "react";
 
 import { ask } from "../ask.js";
 import { api, put } from "../api.js";
 import { Card, Field, Link, State, errorText } from "../ui.js";
 import { ModelSelect, useAdmin } from "./common.js";
-import { PlanSettings } from "./plans.js";
+import { PlanModelSettings, PlanSettings } from "./plans.js";
+import type { PlanRow } from "./types.js";
 
 interface SettingField {
   key: string;
@@ -16,14 +18,25 @@ interface SettingField {
   hint?: string;
 }
 
-const LIMIT_FIELDS: SettingField[] = [
+const MONEY_FIELDS: SettingField[] = [
   {
     key: "monthly_budget_usd",
-    label: "Бюджет Anthropic в месяц, $",
+    label: "Бюджет в месяц, $",
     kind: "number",
     fallback: 10,
-    step: "0.5"
+    step: "0.5",
+    hint: "Модели и голоса вместе. Когда кончится, бот молчит до следующего месяца."
   },
+  {
+    key: "yandex_tts_monthly_limit_rub",
+    label: "Яндекс SpeechKit, ₽ в месяц",
+    kind: "number",
+    fallback: 300,
+    step: "10",
+    hint: "Голос после хороших роастов. После лимита звучит аварийный Piper."
+  }
+];
+const LIMIT_FIELDS: SettingField[] = [
   {
     key: "global_monthly_limit",
     label: "Роастов в месяц на весь сервис",
@@ -77,16 +90,26 @@ const VOICE_FIELDS: SettingField[] = [
     hint: "Не выше тарифа ElevenLabs: воркер каждые 5 минут сверяет расход и лимит с ElevenLabs и держит запас 1000 символов."
   },
   {
-    key: "yandex_tts_monthly_limit_rub",
-    label: "Яндекс SpeechKit, ₽ в месяц",
+    key: "inworld_monthly_char_limit",
+    label: "Inworld, символов в месяц",
     kind: "number",
-    fallback: 300,
-    step: "10"
+    fallback: 500000,
+    step: "10000",
+    hint: "$15 за миллион символов: 500 000 — около $7,50."
+  },
+  {
+    key: "demo_elevenlabs_char_limit",
+    label: "Демо на лендинге: ElevenLabs, символов в месяц",
+    kind: "number",
+    fallback: 10000,
+    step: "1000",
+    hint: "Доля демо внутри лимита ElevenLabs, остальное — стримерам. Дальше демо говорит голосом Inworld, затем Яндекса. 0 — демо без ElevenLabs."
   }
 ];
 
 export function AdminSettings() {
   const { data, error, load } = useAdmin<{ key: string; value: unknown }[]>("/admin/settings");
+  const plans = useAdmin<PlanRow[]>("/admin/plans");
   if (error) return <State title="Настройки недоступны" text={error} action={load} />;
   if (!data) return <State title="Загружаем настройки…" busy />;
   const values = Object.fromEntries(data.map((item) => [item.key, item.value]));
@@ -95,41 +118,59 @@ export function AdminSettings() {
   return (
     <>
       <KillSwitch on={values.kill_switch === true} reload={load} />
-      <div className="settings-grid">
-        <SettingsGroup
-          key={`limits${key}`}
-          title="Лимиты и бюджет"
-          note="Проверяются до вызова модели. Лимит в консоли Anthropic остаётся последней защитой."
-          fields={LIMIT_FIELDS}
-          values={values}
-          reload={load}
-        />
-        <SettingsGroup
-          key={`signup${key}`}
-          title="Регистрация"
-          note="Вход открыт всем: новый стример сразу получает бесплатный тариф. Подозрительные входы ждут вашего решения."
-          fields={SIGNUP_FIELDS}
-          values={values}
-          reload={load}
-        />
-        <SettingsGroup
-          key={`models${key}`}
-          title="Модели"
-          note="Генерация — для лучших роастов: события, команда и награды. Слова в чате — фоновая болтовня, её отвечает модель подешевле. Модель после лимита лучших роастов задают тарифы ниже. Классификатор проверяет каждый ответ на всех тарифах."
-          fields={MODEL_FIELDS}
-          values={values}
-          reload={load}
-        />
-        <SettingsGroup
-          key={`voices${key}`}
-          title="Голоса"
-          note="Жёсткие месячные лимиты: после них звучит следующий голос, последним — бесплатный Piper."
-          fields={VOICE_FIELDS}
-          values={values}
-          reload={load}
-        />
-      </div>
-      <PlanSettings />
+      <SettingsGroup
+        key={`money${key}`}
+        title="Деньги"
+        note="Проверяются до вызова модели и голоса. Лимит в консоли Anthropic остаётся последней защитой."
+        fields={MONEY_FIELDS}
+        values={values}
+        reload={load}
+      />
+      <PlanSettings plans={plans} />
+      <details className="card fine-tuning admin-advanced">
+        <summary>
+          <span>
+            <span className="label">ДОПОЛНИТЕЛЬНО</span>
+            <strong>Модели, голоса и лимиты сервиса</strong>
+          </span>
+          <small>по умолчанию всё уже настроено</small>
+        </summary>
+        <div className="settings-grid">
+          <SettingsGroup
+            key={`limits${key}`}
+            title="Лимиты сервиса"
+            note="Общие для всех каналов, проверяются до вызова модели."
+            fields={LIMIT_FIELDS}
+            values={values}
+            reload={load}
+          />
+          <SettingsGroup
+            key={`signup${key}`}
+            title="Регистрация"
+            note="Вход открыт всем: новый стример сразу получает бесплатный тариф. Подозрительные входы ждут вашего решения."
+            fields={SIGNUP_FIELDS}
+            values={values}
+            reload={load}
+          />
+          <SettingsGroup
+            key={`models${key}`}
+            title="Модели"
+            note="Генерация — для хороших роастов: события, команда и награды. Слова в чате — фоновая болтовня, её отвечает модель подешевле. Модель после хороших роастов задают тарифы ниже. Классификатор проверяет каждый ответ на всех тарифах."
+            fields={MODEL_FIELDS}
+            values={values}
+            reload={load}
+          />
+          <SettingsGroup
+            key={`voices${key}`}
+            title="Хорошие голоса"
+            note="Жёсткие месячные лимиты: после ElevenLabs звучит Inworld, после Inworld — Яндекс."
+            fields={VOICE_FIELDS}
+            values={values}
+            reload={load}
+          />
+        </div>
+        <PlanModelSettings plans={plans} />
+      </details>
       <p className="fine-print">
         Общие стоп-слова — во вкладке <Link href="/admin/moderation">«Модерация»</Link>.
       </p>

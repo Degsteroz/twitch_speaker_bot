@@ -514,7 +514,7 @@ function OverrideDialog({
             Без ограничений
             <small>
               Ни квоты, ни пауз, ни частоты, ни лимита тестов; команда и своя героиня на любом
-              тарифе, всегда лучшая модель и голос (по умолчанию Sonnet 5.5).
+              тарифе, всегда хороший голос и модель генерации (по умолчанию Sonnet 5.5).
             </small>
           </span>
         </label>
@@ -536,7 +536,7 @@ function OverrideDialog({
         {!form.unlimited && (
           <>
             <Field
-              label={`Роастов в месяц (тариф: ${String(user?.plan_limit ?? 0)})`}
+              label={`Всего роастов в месяц (тариф: ${String(user?.plan_limit ?? 0)})`}
               type="number"
               min={0}
               max={100000}
@@ -544,7 +544,7 @@ function OverrideDialog({
               onChange={(value) => setNumbers({ ...numbers, limit: value })}
             />
             <Field
-              label={`Лучших роастов в месяц (тариф: ${planPremium})`}
+              label={`Из них хорошим голосом (тариф: ${planPremium})`}
               type="number"
               min={0}
               max={100000}
@@ -561,35 +561,19 @@ function OverrideDialog({
             />
           </>
         )}
-        {modelField("Модель лучших роастов", "model", form.unlimited ? "Sonnet 5.5" : "Как у всех")}
+        {modelField(
+          "Модель хороших роастов",
+          "model",
+          form.unlimited ? "Sonnet 5.5" : "Как у всех"
+        )}
         {modelField(
           "Модель слов в чате",
           "chatModel",
-          form.unlimited ? "Как лучшие роасты" : "Как у всех"
+          form.unlimited ? "Как хорошие роасты" : "Как у всех"
         )}
-        {!form.unlimited && (
-          <>
-            {modelField("Модель после лимита лучших", "economyModel", "Как в тарифе")}
-            <label className="field-label">
-              Голос после лимита лучших
-              <select
-                value={form.economyVoice ?? INHERIT}
-                onChange={(event) =>
-                  set({
-                    economyVoice:
-                      event.target.value === INHERIT
-                        ? null
-                        : (event.target.value as "yandex" | "piper")
-                  })
-                }
-              >
-                <option value={INHERIT}>Как в тарифе</option>
-                <option value="yandex">Яндекс</option>
-                <option value="piper">Piper (бесплатный)</option>
-              </select>
-            </label>
-          </>
-        )}
+        {/* After the good roasts the voice is always Yandex: only the model is per channel. */}
+        {!form.unlimited &&
+          modelField("Модель после хороших роастов", "economyModel", "Как в тарифе")}
         <Field
           label="Заметка (видна только вам)"
           value={form.note ?? ""}

@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 
 import {
   activityOutcome,
+  CHARACTER_NAMES,
   api,
   ApiError,
   ROAST_STATUS_TEXT,
@@ -15,8 +16,13 @@ import {
 import { Card, date, errorText, Link, Shell, State } from "./ui.js";
 import { FavoriteButton } from "./dashboard/favorite.js";
 
-export const TIER_TEXT = { premium: "лучшая модель и голос", economy: "попроще" } as const;
-export const VOICE_TEXT = { elevenlabs: "ElevenLabs", yandex: "Яндекс", piper: "Piper" } as const;
+export const TIER_TEXT = { premium: "хороший голос", economy: "голос попроще" } as const;
+export const VOICE_TEXT = {
+  elevenlabs: "ElevenLabs",
+  inworld: "Inworld",
+  yandex: "Яндекс",
+  piper: "Piper (аварийный)"
+} as const;
 
 /** /roasts/<id>: one roast with its input, reply and why it ended so; a link to share. */
 export function RoastPage({ session, id }: { session: Session; id: string }) {
@@ -84,6 +90,12 @@ export function RoastPage({ session, id }: { session: Session; id: string }) {
               )}
               {roast.onShowcase && <small> · на витрине сайта</small>}
             </dd>
+            {roast.retortText && roast.retortTone && (
+              <>
+                <dt>{CHARACTER_NAMES[roast.retortTone]} влезла</dt>
+                <dd>{roast.retortText}</dd>
+              </>
+            )}
             <dt>Итог</dt>
             <dd className={outcome.ok ? "good" : "bad"}>
               {ROAST_STATUS_TEXT[roast.status]} — {outcome.text}

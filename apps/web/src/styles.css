@@ -1435,6 +1435,14 @@ td small {
   }
 }
 
+/* /admin settings: the fine ones fold away under "Дополнительно". */
+.admin-advanced[open] > summary {
+  margin-bottom: 16px;
+}
+.admin-advanced > .settings-grid {
+  margin-bottom: 16px;
+}
+
 /* "The quota lasts about N minutes of stream" under the quota counter. */
 .quota-estimate {
   margin: 12px 0 0;

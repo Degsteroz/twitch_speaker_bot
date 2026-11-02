@@ -1,5 +1,5 @@
 // Premium characters and their shop. A premium channel builds up to MAX_OWN_CHARACTERS heroines
-// (name, archetype, ElevenLabs voice, picture) and uses its own right away on its own stream. To
+// (name, archetype, voice from the list, picture) and uses its own right away on its own stream. To
 // reach other channels the author offers one to the shop; the owner approves it, since the picture
 // would appear on someone else's stream. A published character is locked: the author may take it
 // back or delete it, not swap the picture under the channels that chose it.
@@ -16,7 +16,9 @@ import {
   MAX_OWN_CHARACTERS,
   VOICE_SAMPLE_QUEUE,
   characterInputSchema,
+  voiceIdSchema,
   elevenLabsVoiceIdSchema,
+  inworldVoiceIdSchema,
   selectCharacterSchema
 } from "@roastbot/shared";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
@@ -27,7 +29,7 @@ import { z } from "zod";
 import { denied, session, type RouteContext, type Sql } from "./context.js";
 
 const idParams = z.object({ id: z.string().uuid() });
-const voiceParams = z.object({ id: elevenLabsVoiceIdSchema });
+const voiceParams = z.object({ id: voiceIdSchema });
 const IMAGE_TYPES = ["image/png", "image/jpeg", "image/webp"];
 // The overlay shows the picture up to 640 px high next to the card; built-in ones are 464×1150.
 const IMAGE_BOX = { width: 520, height: 1280 };
@@ -358,7 +360,8 @@ export function registerCharacterRoutes(app: FastifyInstance, context: RouteCont
     "/admin/voices",
     { preHandler: requireOwner },
     async () =>
-      sql`select v.id, v.label, v.description, v.enabled, v.sort, v.sample_status "sampleStatus",
+      sql`select v.id, v.provider, v.label, v.description, v.enabled, v.sort,
+        v.sample_status "sampleStatus",
         (select count(*)::int from characters ch where ch.voice_id=v.id) "usedBy"
       from voices v order by v.sort, v.label`
   );
@@ -376,12 +379,18 @@ export function registerCharacterRoutes(app: FastifyInstance, context: RouteCont
     .strict();
 
   app.post("/admin/voices", { preHandler: requireOwner }, async (request, reply) => {
-    const { id, ...input } = voiceInput.extend({ id: elevenLabsVoiceIdSchema }).parse(request.body);
+    // Each provider has its own ID format; the voices table checks it too.
+    const { id, provider, ...input } = z
+      .discriminatedUnion("provider", [
+        voiceInput.extend({ provider: z.literal("elevenlabs"), id: elevenLabsVoiceIdSchema }),
+        voiceInput.extend({ provider: z.literal("inworld"), id: inworldVoiceIdSchema })
+      ])
+      .parse({ provider: "elevenlabs", ...(request.body as object) });
     const added = await sql.begin(async (tx) => {
-      const rows = await tx`insert into voices(id,label,description,sort,enabled)
-        values(${id},${input.label},${input.description},${input.sort},${input.enabled})
+      const rows = await tx`insert into voices(id,provider,label,description,sort,enabled)
+        values(${id},${provider},${input.label},${input.description},${input.sort},${input.enabled})
         on conflict(id) do nothing returning id`;
-      if (rows.length) await audit(tx, request, "voice.add", id, { label: input.label });
+      if (rows.length) await audit(tx, request, "voice.add", id, { label: input.label, provider });
       return rows.length > 0;
     });
     if (!added) return denied(reply, 409, "voice_exists", "Такой голос уже добавлен");

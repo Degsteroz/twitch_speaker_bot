@@ -36,6 +36,8 @@ export async function publishOverlay(
     /** A spoken reply; a free stub has none and plays `sound` instead. */
     audioFile?: string;
     sound?: StubSound;
+    /** 1 for the other heroine's retort in harem mode; the roast itself is 0. */
+    part?: 0 | 1;
     now: Date;
     expiresAt: Date;
   }
@@ -57,7 +59,8 @@ export async function publishOverlay(
     expiresAt: input.expiresAt.toISOString(),
     sentAt: input.now.toISOString()
   };
-  await tx`insert into overlay_events(id,channel_id,roast_id,payload,expires_at)
-    values(${overlayId},${job.channelId},${input.roastId},${tx.json(payload)},${input.expiresAt.toISOString()})`;
+  await tx`insert into overlay_events(id,channel_id,roast_id,part,payload,expires_at)
+    values(${overlayId},${job.channelId},${input.roastId},${input.part ?? 0},${tx.json(payload)},
+      ${input.expiresAt.toISOString()})`;
   await tx`select pg_notify('overlay_events',${job.channelId})`;
 }

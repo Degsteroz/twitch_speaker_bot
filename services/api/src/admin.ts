@@ -1,7 +1,10 @@
 // Back-office (/admin): the owner's overview, accounts, plans, moderation and global settings.
 import {
   DEFAULT_DEMO_DAILY_LIMIT,
+  DEFAULT_DEMO_ELEVENLABS_MONTHLY_CHAR_LIMIT,
+  DEMO_ELEVENLABS_USAGE,
   DEFAULT_ELEVENLABS_MONTHLY_CHAR_LIMIT,
+  DEFAULT_INWORLD_MONTHLY_CHAR_LIMIT,
   DEFAULT_GLOBAL_MONTHLY_ROAST_CAP,
   DEFAULT_MONTHLY_BUDGET_USD,
   DEFAULT_YANDEX_TTS_MONTHLY_LIMIT_RUB,
@@ -40,8 +43,11 @@ const globalSettingSchemas = {
   input_retention_days: z.number().int().min(1).max(30),
   yandex_tts_monthly_limit_rub: z.number().min(0).max(100_000),
   elevenlabs_monthly_char_limit: z.number().int().min(0).max(10_000_000),
+  inworld_monthly_char_limit: z.number().int().min(0).max(100_000_000),
   // Landing demo answers a day for the whole service; 0 hides the demo.
   demo_daily_limit: z.number().int().min(0).max(1_000),
+  // The demo's share of the ElevenLabs cap a month; 0 keeps it on Inworld and Yandex.
+  demo_elevenlabs_char_limit: z.number().int().min(0).max(10_000_000),
   // Open registration's brakes: new accounts a day (0 sends everyone to review) and the youngest
   // Twitch account that skips review.
   signup_daily_limit: z.number().int().min(0).max(10_000),
@@ -119,6 +125,10 @@ export function registerAdminRoutes(app: FastifyInstance, context: RouteContext)
         elevenLabsChars: number;
         elevenLabsLimit: number;
         elevenLabsPlan: { limit: number; resetAt: string | null; syncedAt: string } | null;
+        inworldChars: number;
+        inworldLimit: number;
+        demoElevenLabsChars: number;
+        demoElevenLabsLimit: number;
       }[]
     >`
       select coalesce((select requests from tts_usage_monthly
@@ -131,7 +141,19 @@ export function registerAdminRoutes(app: FastifyInstance, context: RouteContext)
         coalesce((select (value #>> '{}')::int from global_settings
           where key='elevenlabs_monthly_char_limit'), ${DEFAULT_ELEVENLABS_MONTHLY_CHAR_LIMIT})::int
           "elevenLabsLimit",
-        (select value from global_settings where key='elevenlabs_subscription') "elevenLabsPlan"`;
+        (select value from global_settings where key='elevenlabs_subscription') "elevenLabsPlan",
+        coalesce((select requests from tts_usage_monthly
+          where provider='inworld' and month=${new Date().toISOString().slice(0, 7)}),0)::int
+          "inworldChars",
+        coalesce((select (value #>> '{}')::int from global_settings
+          where key='inworld_monthly_char_limit'), ${DEFAULT_INWORLD_MONTHLY_CHAR_LIMIT})::int
+          "inworldLimit",
+        coalesce((select requests from tts_usage_monthly
+          where provider=${DEMO_ELEVENLABS_USAGE} and month=${new Date().toISOString().slice(0, 7)}),0)::int
+          "demoElevenLabsChars",
+        coalesce((select (value #>> '{}')::int from global_settings
+          where key='demo_elevenlabs_char_limit'), ${DEFAULT_DEMO_ELEVENLABS_MONTHLY_CHAR_LIMIT})::int
+          "demoElevenLabsLimit"`;
     // The worker syncs ElevenLabs' own count and plan; the cap is never above the plan.
     const plan = tts?.elevenLabsPlan ?? null;
     const ownerLimit = tts?.elevenLabsLimit ?? DEFAULT_ELEVENLABS_MONTHLY_CHAR_LIMIT;
@@ -144,7 +166,11 @@ export function registerAdminRoutes(app: FastifyInstance, context: RouteContext)
         ? Math.min(ownerLimit, Math.max(0, plan.limit - ELEVENLABS_PLAN_MARGIN))
         : ownerLimit,
       elevenLabsResetAt: plan?.resetAt ?? null,
-      elevenLabsSyncedAt: plan?.syncedAt ?? null
+      elevenLabsSyncedAt: plan?.syncedAt ?? null,
+      inworldChars: tts?.inworldChars ?? 0,
+      inworldLimit: tts?.inworldLimit ?? DEFAULT_INWORLD_MONTHLY_CHAR_LIMIT,
+      demoElevenLabsChars: tts?.demoElevenLabsChars ?? 0,
+      demoElevenLabsLimit: tts?.demoElevenLabsLimit ?? DEFAULT_DEMO_ELEVENLABS_MONTHLY_CHAR_LIMIT
     };
   });
 
@@ -358,7 +384,8 @@ export function registerAdminRoutes(app: FastifyInstance, context: RouteContext)
     return row;
   });
 
-  // Plans: limits and the model and voice tiers (the free plan's first roasts sound the best).
+  // Plans: roasts in the good voice, the total with the Yandex ones after them, the price and the
+  // economy model.
   app.get(
     "/admin/plans",
     { preHandler: requireOwner },
@@ -369,9 +396,10 @@ export function registerAdminRoutes(app: FastifyInstance, context: RouteContext)
   );
   app.put("/admin/plans/:code", { preHandler: requireOwner }, async (request, reply) => {
     const { code } = z.object({ code: z.enum(["free", "basic", "premium"]) }).parse(request.params);
-    // The monthly limit stays in code: the seed refreshes it on every deploy.
     const body = z
       .object({
+        // Every roast of the month: the good ones plus the Yandex ones after them.
+        monthlyRoastLimit: z.number().int().min(0).max(1_000_000),
         premiumRoasts: z.number().int().min(0).max(1_000_000).nullable(),
         economyModel: modelSchema,
         economyVoice: economyVoiceSchema,
@@ -382,8 +410,8 @@ export function registerAdminRoutes(app: FastifyInstance, context: RouteContext)
       .strict()
       .parse(request.body);
     const updated = await sql.begin(async (tx) => {
-      const rows =
-        await tx`update plans set premium_roasts=${body.premiumRoasts}, economy_model=${body.economyModel},
+      const rows = await tx`update plans set monthly_roast_limit=${body.monthlyRoastLimit},
+          premium_roasts=${body.premiumRoasts}, economy_model=${body.economyModel},
           economy_voice=${body.economyVoice}, stars_price=${body.starsPrice}
         where code=${code} returning code`;
       if (rows.length) await audit(tx, request, "plan.update", code, body);

@@ -4,7 +4,7 @@ const schema = z.object({
   DATABASE_URL: z.string().min(1),
   ANTHROPIC_API_KEY: z.string().min(1),
   TTS_URL: z.string().url().default("http://tts:8000"),
-  // Optional: without it every roast is voiced by the local Piper service.
+  // Optional: without it and without the voices below, every roast falls to the local Piper.
   YANDEX_TTS_API_KEY: z.string().optional(),
   // Optional, tried before Yandex: an API key plus a voice ID per character (from the ElevenLabs
   // voice library). A character without a voice ID is voiced by the next provider.
@@ -12,6 +12,12 @@ const schema = z.object({
   ELEVENLABS_MODEL: z.string().default("eleven_v4"),
   ELEVENLABS_VOICE_TSUNDERE: z.string().optional(),
   ELEVENLABS_VOICE_YANDERE: z.string().optional(),
+  // Optional, tried after ElevenLabs: the main voice once the ElevenLabs plan runs out. The key
+  // comes Base64-encoded from platform.inworld.ai and goes into the header as is.
+  INWORLD_API_KEY: z.string().optional(),
+  INWORLD_MODEL: z.string().default("inworld-tts-2-flash"),
+  INWORLD_VOICE_TSUNDERE: z.string().optional(),
+  INWORLD_VOICE_YANDERE: z.string().optional(),
   AUDIO_DIR: z.string().default("/data/audio"),
   // Roasts this process writes at once (4 when unset).
   WORKER_CONCURRENCY: z.coerce.number().int().min(1).max(32).optional(),

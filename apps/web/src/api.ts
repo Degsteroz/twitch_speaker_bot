@@ -172,6 +172,8 @@ export interface Triggers {
   chatFrequency: ChatFrequency;
   /** Premium character: her name in chat works like a keyword. */
   nameMention: boolean;
+  /** Harem mode: now and then the other heroine argues with the reply. */
+  haremMode: boolean;
   /** Chat bots and spammers whose messages never trigger a roast; lowercase logins. */
   ignoredUsers: string[];
   /** Who is roasted on every trigger: the author, the streamer, or the character decides. */
@@ -188,6 +190,7 @@ export const DEFAULT_TRIGGERS: Triggers = {
   keywords: [],
   chatFrequency: "normal",
   nameMention: false,
+  haremMode: false,
   ignoredUsers: [],
   targetMode: "auto",
   events: {
@@ -258,6 +261,8 @@ export interface Status {
   /** Free plan: the overlay shows the service address under the card. */
   branding: boolean;
   /** Roasts left this month on the best model and voice; null when all of them are. */
+  /** "500 роастов хорошим голосом, потом ещё 200 голосом попроще"; null: no limit. */
+  planText: string | null;
   premium: { total: number; remaining: number } | null;
   /** Dashboard tests today; they never spend the monthly quota. null: no limit. */
   tests: { limit: number; remaining: number } | null;
@@ -293,12 +298,15 @@ export interface RoastResult {
   viewerLogin: string | null;
   inputText: string | null;
   outputText: string | null;
+  /** Harem mode: what the other heroine answered, and which one she was. */
+  retortText: string | null;
+  retortTone: "tsundere" | "yandere" | null;
   error: string | null;
   latencyMs: number | null;
   createdAt: string;
   tier: "premium" | "economy" | null;
   model: string | null;
-  voiceProvider: "elevenlabs" | "yandex" | "piper" | null;
+  voiceProvider: "elevenlabs" | "inworld" | "yandex" | "piper" | null;
   costUsd: number;
   channelLogin: string;
   overlayStatus: "pending" | "delivered" | "expired" | null;
@@ -316,6 +324,8 @@ export interface ActivityRoast {
   viewerLogin: string | null;
   inputText: string | null;
   outputText: string | null;
+  retortText: string | null;
+  retortTone: RoastResult["retortTone"];
   status: RoastResult["status"];
   error: string | null;
   overlayStatus: RoastResult["overlayStatus"];

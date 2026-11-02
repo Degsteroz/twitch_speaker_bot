@@ -68,7 +68,7 @@ export function AdminOverview() {
           <Metric
             label="ElevenLabs"
             value={data.elevenLabsChars.toLocaleString("ru-RU")}
-            note={`символов из ${data.elevenLabsLimit.toLocaleString("ru-RU")}, дальше Яндекс. ${
+            note={`символов из ${data.elevenLabsLimit.toLocaleString("ru-RU")}, дальше Inworld. ${
               data.elevenLabsSyncedAt
                 ? `Сверено с ElevenLabs в ${shortTime(data.elevenLabsSyncedAt)}${
                     data.elevenLabsResetAt
@@ -81,9 +81,16 @@ export function AdminOverview() {
             warn={share(data.elevenLabsChars, data.elevenLabsLimit) > 0.8}
           />
           <Metric
+            label="Inworld"
+            value={data.inworldChars.toLocaleString("ru-RU")}
+            note={`символов из ${data.inworldLimit.toLocaleString("ru-RU")}, дальше Яндекс`}
+            used={share(data.inworldChars, data.inworldLimit)}
+            warn={share(data.inworldChars, data.inworldLimit) > 0.8}
+          />
+          <Metric
             label="Яндекс SpeechKit"
             value={`${data.yandexTtsSpentRub.toFixed(0)} ₽`}
-            note={`из ${String(data.yandexTtsLimitRub)} ₽, дальше Piper`}
+            note={`из ${String(data.yandexTtsLimitRub)} ₽, дальше аварийный Piper`}
             used={share(data.yandexTtsSpentRub, data.yandexTtsLimitRub)}
             warn={share(data.yandexTtsSpentRub, data.yandexTtsLimitRub) > 0.8}
           />
@@ -112,7 +119,7 @@ export function AdminOverview() {
           <Metric
             label="Демо на лендинге"
             value={data.demoToday}
-            note={`из ${String(data.demoLimit)} в день · $${data.demoSpentMonth.toFixed(2)} за месяц`}
+            note={`из ${String(data.demoLimit)} в день · $${data.demoSpentMonth.toFixed(2)} за месяц · ElevenLabs ${data.demoElevenLabsChars.toLocaleString("ru-RU")} из ${data.demoElevenLabsLimit.toLocaleString("ru-RU")} символов`}
             used={share(data.demoToday, data.demoLimit)}
           />
           <Metric

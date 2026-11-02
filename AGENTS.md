@@ -49,7 +49,7 @@ pnpm lint
 pnpm format:check
 ```
 
-Ожидаемый результат на момент передачи: `pnpm test` — 377 тестов проходят;
+Ожидаемый результат на момент передачи: `pnpm test` — 390 тестов проходят;
 `pnpm lint` и `pnpm format:check` — без ошибок.
 
 Python-тесты TTS:
@@ -190,20 +190,27 @@ Docker для них не нужен. Anthropic и TTS в тестах заме�
     никогда не несёт `mfaAt`. Проверка кода — под `for update`, 5 ошибок блокируют на
     15 минут, принятый шаг не принимается повторно, резервные коды — только SHA-256.
     Свою 2FA владелец не отключает и не сбрасывает из UI.
-13. **Платные голоса только через резерв лимита.** Любой вызов ElevenLabs и SpeechKit идёт через
-    `speak()` в `services/worker/src/tts.ts` после `reserveElevenLabsCharacters` /
+13. **Платные голоса только через резерв лимита.** Любой вызов ElevenLabs, Inworld и SpeechKit идёт
+    через `speak()` в `services/worker/src/tts.ts` после `reserveCharacters` (ElevenLabs и Inworld) /
     `reserveYandexRequests` (атомарный upsert в `tts_usage_monthly`). Нет резерва — нет запроса,
-    звучит следующий голос, последним Piper. Лимит ElevenLabs — `elevenLabsCharLimit()` (не выше
-    тарифа), счётчик раз в 5 минут перезаписывает расход самого ElevenLabs (`syncElevenLabsUsage`).
+    звучит следующий голос. Цепочка: ElevenLabs → Inworld → Яндекс → Piper. **Piper только
+    аварийный**: звучит, лишь когда все облачные голоса роаста отказали; `economyVoiceSchema` —
+    только `yandex`, ни тариф, ни исключение канала не выбирают Piper (CHECK в `plans` и
+    `channel_overrides`). Лимит ElevenLabs — `elevenLabsCharLimit()` (не выше тарифа), счётчик раз в
+    5 минут перезаписывает расход самого ElevenLabs (`syncElevenLabsUsage`); лимит Inworld —
+    `inworld_monthly_char_limit`. Голоса героини — `cloudVoicesFor()`: своя с голосом Мицуки или Аи
+    после ElevenLabs идёт к их Inworld-голосу (`INWORLD_VOICE_*`), с голосом Inworld — сразу к нему.
 14. **Новые триггеры выключены по умолчанию** (`DEFAULT_TRIGGERS` в `packages/shared`): обновление
     никогда само не начинает жарить чат. Логика чата и событий — чистые функции в
     `services/twitch/src/triggers.ts`; кулдауны только для `COOLDOWN_SOURCES`. Кого жарить решает
     `targetMode` канала в воркере; `!роаст` — только для `COMMAND_PLANS`, проверка и в сервисе
     чата, и в воркере.
 15. **Тир роаста решает `reserve()`.** `bookTier()` под тем же lock бронирует
-    `usage_monthly.premium_roasts` до `plans.premium_roasts`; дальше — `economy_model` и
-    `economy_voice` тарифа, `speak()` начинает с разрешённого голоса. Классификатор на всех
-    тирах один и тот же.
+    `usage_monthly.premium_roasts` до `plans.premium_roasts` («хорошим голосом»); дальше —
+    `economy_model` и Яндекс до `monthly_roast_limit` («потом Яндексом»), затем стоп до следующего
+    месяца. Все числа тарифа задаёт владелец в `/admin`, seed их только вставляет (Free 15 + 85,
+    Basic 500 + 200 за 300 ⭐, Premium 1000 + 500 за 600 ⭐, миграция 0022). Стример видит тариф одной
+    строкой `planVoiceText()` (`packages/shared`). Классификатор на всех тирах один и тот же.
 16. **Тесты из панели (`dashboard_test`) не тратят квоту канала** и не проверяют кулдауны, но
     проходят kill switch, глобальный лимит и бюджет и бронируют `test_usage_daily` атомарным
     upsert до `DASHBOARD_TEST_DAILY_LIMIT`. Симулятор формирует событие в API
@@ -220,8 +227,11 @@ Docker для них не нужен. Anthropic и TTS в тестах заме�
 20. **Отказ зрителя** (`viewer_optouts`): `OPTOUT_SKIPPED_SOURCES` пропускаются, остальное — на
     стримера, без истории. Витрина: звезду ставит стример (согласие), показывает владелец.
 21. **Демо на лендинге — те же проверки и общий бюджет.** `processDemo()` в
-    `services/worker/src/demo.ts`: стоп-лист и инъекции до модели, классификатор после, голос
-    только через `speak()` с `piper: false`. Лимиты на IP и в день — в API под advisory lock;
+    `services/worker/src/demo.ts`: стоп-лист и инъекции до модели, классификатор после, модель —
+    основная (`model`, как у Premium), голос только через `speak()` с `piper: false` и
+    `best: "elevenlabs"`. ElevenLabs — через `demoVoiceReservations()`: своя доля
+    `demo_elevenlabs_char_limit` (счётчик `elevenlabs_demo`) и общий лимит бронируются вместе в одной
+    транзакции, иначе ни один; дальше Inworld и Яндекс. Лимиты на IP и в день — в API под advisory lock;
     расход демо входит в бюджет в `reserve()` (`demoSpendSql`). IP хранится только как HMAC.
 22. **Своя героиня — только Premium и только через проверку для чужих каналов.** `characters`
     (`services/api/src/characters.ts`): автор пользуется своей сразу, в магазин (`published`) её
@@ -276,11 +286,23 @@ Docker для них не нужен. Anthropic и TTS в тестах заме�
     в `publishStub()`. Проверка до lock — только дешёвый фильтр. Тесты на это —
     `Promise.all` в `pipeline.integration.test.ts`.
 
+26. **Harem-mode (`triggers.haremMode`, выключен по умолчанию).** После готового роаста с шансом
+    `HAREM_RETORT_CHANCE` (20 %) в спор вступает встроенная героиня другой темы (`rivalTone()`:
+    Мицуки ↔ Аи, своей героине — по `ARCHETYPE_THEME`). `playRetort()` в
+    `services/worker/src/retort.ts`: квоту не тратит, но перед вызовом проверяет kill switch и
+    бюджет (`extraSpendAllowed()` под тем же lock), промпт `composeRetortPrompt()` — блок
+    безопасности первый, реплика первой героини — данные в `<said>`. Выход проходит стоп-лист,
+    проверку на повтор и `<msg>`, и `<said>`, и классификатор; голос — только `speak()` с
+    `piper: false`. Любой отказ — тишина, роаст не падает, расход записывается. Не бывает после
+    заглушки, заблокированного ответа (fallback) и для зрителя с opt-out. Реплика — второе событие
+    оверлея того же роаста (`overlay_events.part = 1`), текст — `roasts.retort_text`; все `join`
+    с `overlay_events` по роасту берут `part = 0`.
+
 ## 8. Статус проверок
 
 | Что                                                                                         | Статус                                          |
 | ------------------------------------------------------------------------------------------- | ----------------------------------------------- |
-| Сборка, lint, format, 377 тестов                                                            | ✅                                              |
+| Сборка, lint, format, 390 тестов                                                            | ✅                                              |
 | Python-тесты TTS                                                                            | ✅                                              |
 | Синтез Piper в Linux-контейнере (arm64, оба голоса)                                         | ✅                                              |
 | Регистрация по заявке и 2FA в браузере                                                      | ⬜ покрыто API-тестами, вживую не проверялось   |
@@ -309,10 +331,14 @@ Docker для них не нужен. Anthropic и TTS в тестах заме�
    (desktop и телефон).
 5. **Лимит $5 в консоли Anthropic** владелец задаёт сам. Приложение дополняет его,
    но не заменяет.
-6. **Голоса своих героинь.** Список — таблица `voices`: пять голосов из миграции `0017` (названия
-   «Голос 1…5» — заглушки, владелец переименовывает в `/admin/characters` после прослушивания) и
-   голоса Мицуки и Аи, которые воркер добавляет из `ELEVENLABS_VOICE_*` при старте (`syncVoices`) и
-   там же ставит в очередь недостающие сэмплы. Когда голоса есть, без голоса героиню не создать.
+6. **Голоса своих героинь.** Список — таблица `voices` (колонка `provider`: `elevenlabs` или
+   `inworld`): голоса Мицуки и Аи, которые воркер добавляет из `ELEVENLABS_VOICE_*` при старте
+   (`syncVoices`) и там же ставит в очередь недостающие сэмплы. При первом старте с
+   `ELEVENLABS_VOICE_YANDERE` воркер один раз переводит своих героинь с остальных голосов ElevenLabs
+   (пять из `0017`) на голос Аи и выключает их (`custom_voices_moved_to_ai`). **Список голосов
+   Inworld пуст:** ключа и ID ещё нет, владелец добавит их в `/admin/characters` (сервис «Inworld»)
+   и `INWORLD_*` в `deploy/.env`. Inworld вживую не вызывался: русский язык и поле `language`
+   проверить на живом ключе. Когда голоса есть, без голоса героиню не создать.
    После лимита ElevenLabs, на экономичном тире и при выключенном голосе героиня говорит
    Yandex-голосом своего архетипа; голоса Yandex для `kuudere`, `dandere`, `himedere`
    (`CHARACTER_VOICES`) выбраны по документации, на слух не проверены.

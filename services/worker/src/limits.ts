@@ -3,7 +3,10 @@
 import {
   COOLDOWN_SOURCES,
   DASHBOARD_TEST_DAILY_LIMIT,
+  DEMO_ELEVENLABS_USAGE,
+  DEFAULT_DEMO_ELEVENLABS_MONTHLY_CHAR_LIMIT,
   DEFAULT_GLOBAL_MONTHLY_ROAST_CAP,
+  DEFAULT_INWORLD_MONTHLY_CHAR_LIMIT,
   DEFAULT_MONTHLY_BUDGET_USD,
   DEFAULT_YANDEX_TTS_MONTHLY_LIMIT_RUB,
   VIEWER_LIMITED_SOURCES,
@@ -12,6 +15,7 @@ import {
   effectiveCooldown,
   yandexBillingMonth,
   yandexTtsRequestLimit,
+  type CharacterVoiceProvider,
   type RoastRequestedJob,
   type RoastTier
 } from "@roastbot/shared";
@@ -22,7 +26,7 @@ import {
   type PipelineDependencies,
   type Sql
 } from "./context.js";
-import { elevenLabsCharLimit, releaseElevenLabsCharacters } from "./elevenlabs.js";
+import { elevenLabsCharLimit } from "./elevenlabs.js";
 import type { VoiceReservations } from "./tts.js";
 
 /** Landing demo money of this month, part of the same budget. */
@@ -31,6 +35,27 @@ export const demoSpendSql = (sql: Sql, month: string) => sql`(select coalesce(su
   from demo_requests
   where created_at >= (${month}::text || '-01')::timestamp at time zone 'UTC'
     and created_at < ((${month}::text || '-01')::timestamp + interval '1 month') at time zone 'UTC')`;
+
+/**
+ * Whether the service may still spend on an extra call of an already booked roast (the harem-mode
+ * retort): the kill switch is off and the month's budget, demo included, is not used up. Checked
+ * under the same lock as reserve(), so it sees every booking committed before it.
+ */
+export async function extraSpendAllowed(deps: PipelineDependencies): Promise<boolean> {
+  const month = (deps.now?.() ?? new Date()).toISOString().slice(0, 7);
+  return deps.sql.begin(async (tx) => {
+    await tx`select pg_advisory_xact_lock(hashtext('roastbot-global-quota'))`;
+    const [row] = await tx<{ killed: boolean; budget: number; spent: number }[]>`
+      select
+        coalesce((select value = 'true'::jsonb from global_settings where key='kill_switch'), false)
+          killed,
+        coalesce((select (value #>> '{}')::float8 from global_settings where key='monthly_budget_usd'),
+          ${DEFAULT_MONTHLY_BUDGET_USD})::float8 budget,
+        (coalesce((select sum(cost_usd) from usage_monthly where month=${month}),0)
+          + ${demoSpendSql(tx as unknown as Sql, month)})::float8 spent`;
+    return !row?.killed && (row?.spent ?? 0) < (row?.budget ?? DEFAULT_MONTHLY_BUDGET_USD);
+  });
+}
 
 /** A booked roast's tier; `quota` is the channel's count after booking (absent for tests). */
 export type Reservation =
@@ -200,10 +225,11 @@ export async function reserveYandexRequests(
   return reserved.length > 0;
 }
 
-// ElevenLabs counts characters per calendar month; same atomic upsert as Yandex, the row
-// stores characters in `requests`.
-export async function reserveElevenLabsCharacters(
+// ElevenLabs and Inworld count characters per calendar month; same atomic upsert as Yandex, the
+// row stores characters in `requests`.
+export async function reserveCharacters(
   sql: Sql,
+  provider: CharacterVoiceProvider,
   now: Date,
   characters: number,
   limit: number
@@ -211,7 +237,7 @@ export async function reserveElevenLabsCharacters(
   if (characters > limit) return false;
   const reserved = await sql`
     insert into tts_usage_monthly(provider,month,requests)
-    values('elevenlabs',${now.toISOString().slice(0, 7)},${characters})
+    values(${provider},${now.toISOString().slice(0, 7)},${characters})
     on conflict(provider,month) do update
       set requests=tts_usage_monthly.requests+excluded.requests, updated_at=now()
       where tts_usage_monthly.requests+excluded.requests <= ${limit}
@@ -219,8 +245,95 @@ export async function reserveElevenLabsCharacters(
   return reserved.length > 0;
 }
 
+export const reserveElevenLabsCharacters = (
+  sql: Sql,
+  now: Date,
+  characters: number,
+  limit: number
+) => reserveCharacters(sql, "elevenlabs", now, characters, limit);
+
+/** Gives back characters of a call the provider refused: an error answer is not billed. */
+export async function releaseCharacters(
+  sql: Sql,
+  provider: CharacterVoiceProvider,
+  now: Date,
+  characters: number
+) {
+  await sql`update tts_usage_monthly set requests=greatest(0, requests-${characters}), updated_at=now()
+    where provider=${provider} and month=${now.toISOString().slice(0, 7)}`;
+}
+
+/**
+ * The landing demo's ElevenLabs: its own monthly allowance and the shared cap, both or neither.
+ * The demo counter is booked first; if the shared cap is full the transaction rolls it back.
+ */
+export async function reserveDemoElevenLabs(
+  sql: Sql,
+  now: Date,
+  characters: number,
+  demoLimit: number,
+  sharedLimit: number
+): Promise<boolean> {
+  if (characters > demoLimit) return false;
+  const month = now.toISOString().slice(0, 7);
+  const full = new Error("demo_elevenlabs_full");
+  try {
+    return await sql.begin(async (tx) => {
+      const demo = await tx`
+        insert into tts_usage_monthly(provider,month,requests)
+        values(${DEMO_ELEVENLABS_USAGE},${month},${characters})
+        on conflict(provider,month) do update
+          set requests=tts_usage_monthly.requests+excluded.requests, updated_at=now()
+          where tts_usage_monthly.requests+excluded.requests <= ${demoLimit}
+        returning requests`;
+      if (!demo.length) return false;
+      if (
+        !(await reserveCharacters(tx as unknown as Sql, "elevenlabs", now, characters, sharedLimit))
+      ) {
+        throw full;
+      }
+      return true;
+    });
+  } catch (error) {
+    if (error === full) return false;
+    throw error;
+  }
+}
+
+/**
+ * The landing demo's voices: the best ones like a roast, but ElevenLabs only within the demo's
+ * own monthly allowance (demo_elevenlabs_char_limit), so visitors never eat the streamers' cap.
+ */
+export async function demoVoiceReservations(
+  deps: Pick<PipelineDependencies, "sql" | "now">
+): Promise<VoiceReservations> {
+  const clock = () => deps.now?.() ?? new Date();
+  const shared = await voiceReservations(deps);
+  const sharedLimit = await elevenLabsCharLimit(deps.sql);
+  const demoLimit = await globalValue<number>(
+    deps.sql,
+    "demo_elevenlabs_char_limit",
+    DEFAULT_DEMO_ELEVENLABS_MONTHLY_CHAR_LIMIT
+  );
+  return {
+    ...shared,
+    elevenlabs: (characters) =>
+      reserveDemoElevenLabs(deps.sql, clock(), characters, demoLimit, sharedLimit),
+    release: async (provider, characters) => {
+      await shared.release?.(provider, characters);
+      if (provider === "elevenlabs") {
+        await deps.sql`update tts_usage_monthly
+          set requests=greatest(0, requests-${characters}), updated_at=now()
+          where provider=${DEMO_ELEVENLABS_USAGE} and month=${clock().toISOString().slice(0, 7)}`;
+      }
+    }
+  };
+}
+
 /** Reservations against the owner's monthly caps for the paid voices. */
-export async function voiceReservations(deps: PipelineDependencies): Promise<VoiceReservations> {
+export async function voiceReservations(
+  deps: Pick<PipelineDependencies, "sql" | "now">
+): Promise<VoiceReservations> {
   const clock = () => deps.now?.() ?? new Date();
   const yandexLimitRub = await globalValue<number>(
     deps.sql,
@@ -228,10 +341,17 @@ export async function voiceReservations(deps: PipelineDependencies): Promise<Voi
     DEFAULT_YANDEX_TTS_MONTHLY_LIMIT_RUB
   );
   const elevenLabsLimit = await elevenLabsCharLimit(deps.sql);
+  const inworldLimit = await globalValue<number>(
+    deps.sql,
+    "inworld_monthly_char_limit",
+    DEFAULT_INWORLD_MONTHLY_CHAR_LIMIT
+  );
   return {
     yandex: (requests) => reserveYandexRequests(deps.sql, clock(), requests, yandexLimitRub),
     elevenlabs: (characters) =>
-      reserveElevenLabsCharacters(deps.sql, clock(), characters, elevenLabsLimit),
-    releaseElevenlabs: (characters) => releaseElevenLabsCharacters(deps.sql, clock(), characters)
+      reserveCharacters(deps.sql, "elevenlabs", clock(), characters, elevenLabsLimit),
+    inworld: (characters) =>
+      reserveCharacters(deps.sql, "inworld", clock(), characters, inworldLimit),
+    release: (provider, characters) => releaseCharacters(deps.sql, provider, clock(), characters)
   };
 }

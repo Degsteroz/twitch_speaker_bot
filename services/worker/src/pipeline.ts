@@ -23,6 +23,7 @@ import {
   roastRequestedJobSchema,
   triggerSettingsSchema,
   COMMAND_PLANS,
+  HAREM_RETORT_CHANCE,
   type Archetype,
   type RoastRequestedJob,
   type RoastSource,
@@ -47,6 +48,7 @@ import { reserve, voiceReservations } from "./limits.js";
 import { modelRequest } from "./models.js";
 import { publishOverlay, storeAudio } from "./overlay.js";
 import { recordSpend, spendOf, textFrom, type Spend } from "./spend.js";
+import { playRetort } from "./retort.js";
 import { playStub, STUB_REJECTIONS } from "./stubs.js";
 import { notifyStreamer, quotaNotice } from "./telegram.js";
 import { speak } from "./tts.js";
@@ -194,7 +196,10 @@ export async function processRoast(
             id: context.characterId,
             name: context.characterName,
             archetype: context.archetype,
-            voiceId: context.characterVoiceId,
+            voice:
+              context.characterVoiceId && context.characterVoiceProvider
+                ? { provider: context.characterVoiceProvider, id: context.characterVoiceId }
+                : null,
             imagePath: `/characters/${context.characterId}/image?v=${context.imageHash.slice(0, 16)}`
           }
         : undefined;
@@ -236,7 +241,7 @@ export async function processRoast(
     // per model live in modelRequest().
     // The channel's switch picks the target; a job without an author (anonymous gift, ad break,
     // the streamer's own message) always roasts the streamer.
-    const { targetMode } = triggerSettingsSchema.parse(context.triggers ?? {});
+    const { targetMode, haremMode } = triggerSettingsSchema.parse(context.triggers ?? {});
     const target =
       job.target === "streamer" || optedOut || targetMode === "streamer"
         ? "streamer"
@@ -309,7 +314,7 @@ export async function processRoast(
       {
         best: tier === "premium" ? "elevenlabs" : context.economyVoice,
         // A premium character speaks in her own voice; without one, the archetype's voice.
-        ...(character ? { voiceId: character.voiceId } : {})
+        ...(character ? { voice: character.voice } : {})
       }
     );
     if (speech.costUsd > 0) {
@@ -363,6 +368,29 @@ export async function processRoast(
       void notifyStreamer(deps.sql, deps.config, notice, deps.fetch ?? globalThis.fetch).catch(
         (error: unknown) => console.warn("quota notification:", error)
       );
+    }
+    // Harem mode: the other heroine sometimes argues back. Only with a real reply (not the
+    // blocked fallback) and never about a viewer who asked to be left alone. Her line is queued
+    // after this one; it never fails the roast.
+    if (
+      haremMode &&
+      !blockReason &&
+      !optedOut &&
+      (deps.random ?? Math.random)() < HAREM_RETORT_CHANCE
+    ) {
+      await playRetort(deps, {
+        job,
+        roastId: currentRoastId,
+        context,
+        character,
+        archetype,
+        said: output,
+        tier,
+        model,
+        classifierModel,
+        stopWords,
+        month
+      });
     }
     return blockReason
       ? { roastId, status: "blocked_output", reason: blockReason }

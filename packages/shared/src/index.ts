@@ -1,7 +1,7 @@
 import { z } from "zod";
 
 export const APP_NAME = "RoastBot";
-export const DEFAULT_CHANNEL_MONTHLY_ROASTS = 10;
+export const DEFAULT_CHANNEL_MONTHLY_ROASTS = 100;
 // `!роаст` is a paid feature: on the free plan the command is ignored.
 export const COMMAND_PLANS: ReadonlySet<string> = new Set(["basic", "premium"]);
 // Free channels advertise the service: the overlay shows its address under the roast card.
@@ -42,6 +42,14 @@ export const DEFAULT_ELEVENLABS_MONTHLY_CHAR_LIMIT = 70_000;
 // The worker syncs ElevenLabs' own plan limit; reservations stop this far below it, leaving room
 // for calls in flight while the counter is corrected and for voice samples.
 export const ELEVENLABS_PLAN_MARGIN = 1_000;
+// Inworld TTS-2 Flash bills $15 per million characters On-Demand (pricing page, 2026-10): 500,000
+// characters is about $7.50 a month. The owner changes it in /admin.
+export const DEFAULT_INWORLD_MONTHLY_CHAR_LIMIT = 500_000;
+// The landing demo speaks in ElevenLabs too, but only this many characters a month of the shared
+// cap: the rest stays for paying streamers. Past it the demo goes on to Inworld, then Yandex.
+export const DEFAULT_DEMO_ELEVENLABS_MONTHLY_CHAR_LIMIT = 10_000;
+// Its own counter in tts_usage_monthly, next to the shared "elevenlabs" row.
+export const DEMO_ELEVENLABS_USAGE = "elevenlabs_demo";
 export const DEFAULT_YANDEX_TTS_MONTHLY_LIMIT_RUB = 300;
 export const YANDEX_TTS_RUB_PER_REQUEST = 0.1626;
 export const YANDEX_TTS_CHARS_PER_REQUEST = 250;
@@ -62,7 +70,31 @@ export const DEFAULT_CHAT_MODEL = "claude-haiku-5-5";
 // Plans with a premium allowance (free) write the rest of the month's roasts with this model and
 // a simpler voice; the owner changes both per plan in /admin. The classifier never changes.
 export const DEFAULT_ECONOMY_MODEL = "claude-haiku-5-5";
-export const FREE_PREMIUM_ROASTS = 2;
+export const FREE_PREMIUM_ROASTS = 15;
+/** "1 роаст", "3 роаста", "500 роастов". */
+export const roastsText = (count: number) => {
+  const tens = count % 100;
+  const ones = count % 10;
+  const word =
+    tens >= 11 && tens <= 14
+      ? "роастов"
+      : ones === 1
+        ? "роаст"
+        : ones >= 2 && ones <= 4
+          ? "роаста"
+          : "роастов";
+  return `${String(count)} ${word}`;
+};
+/**
+ * The plan in one line, the same wherever a streamer sees it: "500 роастов хорошим голосом, потом
+ * ещё 200 голосом попроще". `good` null means every roast of the month is a good one.
+ */
+export const planVoiceText = (total: number, good: number | null) => {
+  const best = good === null ? total : Math.min(good, total);
+  return best < total
+    ? `${roastsText(best)} хорошим голосом, потом ещё ${String(total - best)} голосом попроще`
+    : `${roastsText(total)} хорошим голосом`;
+};
 export const BLOCKED_OUTPUT_FALLBACK = "Даже мне за такое стыдно";
 // Twitch's "talking, no game" category says nothing about the stream: it is not passed on.
 export const JUST_CHATTING = "Just Chatting";
@@ -113,7 +145,7 @@ export type DemoStatus = z.infer<typeof demoStatusSchema>;
 export const toneSchema = z.enum(["tsundere", "yandere"]);
 
 // ---- Premium characters ----------------------------------------------------------------------
-// A premium channel builds its own heroine: a name, a temperament, an ElevenLabs voice and a
+// A premium channel builds its own heroine: a name, a temperament, a voice from the list and a
 // picture. The owner approves the ones the author offers to the shop; then every premium channel
 // may pick them. Built-in Mitsuki and Ai stay for everyone else and as the fallback.
 export const archetypeSchema = z.enum(["tsundere", "yandere", "kuudere", "dandere", "himedere"]);
@@ -196,11 +228,17 @@ export const characterNameSchema = z
   .pipe(z.string().regex(/^\p{L}[\p{L} -]{1,19}$/u, "Имя: 2–20 букв, можно пробел и дефис"));
 export const characterStatusSchema = z.enum(["private", "pending", "published", "rejected"]);
 export const elevenLabsVoiceIdSchema = z.string().regex(/^[A-Za-z0-9]{10,40}$/u);
+// Inworld names its library voices ("Ashley") and its cloned ones ("default-…__name").
+export const inworldVoiceIdSchema = z.string().regex(/^[A-Za-z0-9_-]{2,80}$/u);
+/** Where a voice in the list comes from; the voices table checks the ID format per provider. */
+export const characterVoiceProviderSchema = z.enum(["elevenlabs", "inworld"]);
+// Any voice ID the list may hold; the provider is in the voices table.
+export const voiceIdSchema = inworldVoiceIdSchema;
 export const characterInputSchema = z
   .object({
     name: characterNameSchema,
     archetype: archetypeSchema,
-    voiceId: elevenLabsVoiceIdSchema.nullable().default(null)
+    voiceId: voiceIdSchema.nullable().default(null)
   })
   .strict();
 export const selectCharacterSchema = z
@@ -212,7 +250,7 @@ export const selectCharacterSchema = z
   .strict();
 // The worker records one sample per voice so streamers can hear it before choosing.
 export const VOICE_SAMPLE_QUEUE = "voice.sample";
-export const voiceSampleJobSchema = z.object({ voiceId: elevenLabsVoiceIdSchema }).strict();
+export const voiceSampleJobSchema = z.object({ voiceId: voiceIdSchema }).strict();
 export const VOICE_SAMPLE_TEXT =
   "Ну привет. Я буду отвечать твоему чату. Надеюсь, ты к этому готов.";
 export const voiceSchema = z.enum(["male", "female"]);
@@ -280,6 +318,14 @@ export const isStubCall = (source: RoastSource, named: boolean | undefined) =>
 /** Who the roast is aimed at: the viewer behind the trigger or the streamer. */
 /** The two characters by name; the tone is their temperament. */
 export const CHARACTER_NAMES = Object.freeze({ tsundere: "Мицуки", yandere: "Аи" } as const);
+// Harem mode: after a spoken reply the other heroine joins in with her own line, this often.
+export const HAREM_RETORT_CHANCE = 0.2;
+/**
+ * Who argues back in harem mode: always a built-in heroine, the one whose card theme differs from
+ * the speaker's. Mitsuki answers Ai and the "cold" archetypes, Ai answers Mitsuki and the "soft" ones.
+ */
+export const rivalTone = (archetype: z.infer<typeof archetypeSchema>): Tone =>
+  ARCHETYPE_THEME[archetype] === "tsundere" ? "yandere" : "tsundere";
 export const roastTargetSchema = z.enum(["viewer", "streamer"]);
 /** The bot's stance on a channel-points message: agree with it, half-agree, or push back. */
 export const verdictSchema = z.enum(["agree", "mixed", "refuse"]);
@@ -296,9 +342,10 @@ export const TWITCH_SCOPES = Object.freeze([
 ] as const);
 /** Premium: the global model and the best voice. Economy: the plan's cheaper model and voice. */
 export const roastTierSchema = z.enum(["premium", "economy"]);
-export const voiceProviderSchema = z.enum(["elevenlabs", "yandex", "piper"]);
-/** The best voice an economy roast may use; the next ones still take over on failure. */
-export const economyVoiceSchema = z.enum(["yandex", "piper"]);
+// Best first. Piper is the emergency voice: it speaks only when every cloud voice failed.
+export const voiceProviderSchema = z.enum(["elevenlabs", "inworld", "yandex", "piper"]);
+/** The best voice an economy roast may use: Yandex. Piper is never a plan's voice. */
+export const economyVoiceSchema = z.enum(["yandex"]);
 /**
  * The owner's per-channel exceptions to the plan ("favourites"). null keeps the plan's value.
  * `unlimited` lifts the quota, pauses, frequency, viewer and test limits and plan features; the
@@ -502,6 +549,8 @@ const triggerSettingsObject = z
     chatFrequency: chatFrequencySchema.default("normal"),
     // Premium character: a chat message with her name triggers a roast like a keyword.
     nameMention: z.boolean().default(false),
+    // Harem mode: now and then the other heroine argues with the reply (HAREM_RETORT_CHANCE).
+    haremMode: z.boolean().default(false),
     // The streamer's own chat bots and spammers: their messages never trigger a roast.
     ignoredUsers: z.array(twitchLoginSchema).max(MAX_IGNORED_USERS).default([]),
     targetMode: targetModeSchema.default("auto"),
@@ -717,6 +766,7 @@ export const overlayClientEventSchema = z.discriminatedUnion("type", [
 
 export type Tone = z.infer<typeof toneSchema>;
 export type Archetype = z.infer<typeof archetypeSchema>;
+export type CharacterVoiceProvider = z.infer<typeof characterVoiceProviderSchema>;
 export type CharacterStatus = z.infer<typeof characterStatusSchema>;
 export type CharacterInput = z.infer<typeof characterInputSchema>;
 export type Voice = z.infer<typeof voiceSchema>;
