@@ -16,6 +16,8 @@ interface OverlayConnection {
   socket: WebSocket;
   channelId: string;
   sent: Set<string>;
+  /** API base for this socket's links: PUBLIC_URL, or the mirror it came through. */
+  publicUrl: string;
 }
 
 export interface Overlays {
@@ -54,14 +56,14 @@ export async function registerOverlayRoutes(
           ? {
               character: {
                 name: character.name,
-                imageUrl: `${config.PUBLIC_URL}${character.imagePath}`
+                imageUrl: `${connection.publicUrl}${character.imagePath}`
               }
             }
           : {}),
         // A free stub has no audio file: the overlay plays its `sound` instead.
         ...(audioFile
           ? {
-              audioUrl: `${config.PUBLIC_URL}${signAudioPath(audioFile, config.AUDIO_SIGNING_SECRET)}`
+              audioUrl: `${connection.publicUrl}${signAudioPath(audioFile, config.AUDIO_SIGNING_SECRET)}`
             }
           : {})
       });
@@ -118,6 +120,11 @@ export async function registerOverlayRoutes(
 
   app.get("/overlay/:token", { websocket: true }, (socket, request) => {
     const token = (request.params as { token: string }).token;
+    // Only a configured mirror counts: a forged header can at most point links at our own relay.
+    const mirror = request.headers["x-roastbot-mirror"];
+    const publicUrl =
+      (typeof mirror === "string" && config.overlayMirrors.get(mirror.trim().toLowerCase())) ||
+      config.PUBLIC_URL;
     let connection: OverlayConnection | undefined;
     let heartbeat: NodeJS.Timeout | undefined;
 
@@ -153,7 +160,7 @@ export async function registerOverlayRoutes(
       >`select id from channels where overlay_token=${token}`;
       if (!channel) return socket.close(1008, "invalid token");
       if (socket.readyState !== socket.OPEN) return;
-      connection = { socket, channelId: channel.id, sent: new Set() };
+      connection = { socket, channelId: channel.id, sent: new Set(), publicUrl };
       add(connection);
       sendJson(socket, {
         version: 1,

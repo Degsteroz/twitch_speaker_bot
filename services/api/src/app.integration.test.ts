@@ -16,7 +16,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vites
 import type { WebSocket } from "@fastify/websocket";
 
 import { buildApp } from "./app.js";
-import type { ApiConfig } from "./config.js";
+import { parseOverlayMirrors, type ApiConfig } from "./config.js";
 import { encryptValue } from "./security.js";
 import { currentStep, generateTotpSecret, totpCode } from "./totp.js";
 
@@ -38,6 +38,7 @@ beforeAll(async () => {
     PORT: 0,
     DATABASE_URL: db.url,
     PUBLIC_URL: "https://app.test/api",
+    OVERLAY_MIRROR_URLS: "https://ru.app.test/api",
     DASHBOARD_URL: "https://app.test",
     TWITCH_CLIENT_ID: "client",
     TWITCH_CLIENT_SECRET: "secret",
@@ -52,7 +53,8 @@ beforeAll(async () => {
     TELEGRAM_BOT_TOKEN: "123:test-token",
     TELEGRAM_BOT_USERNAME: "roastbot_test_bot",
     TELEGRAM_WEBHOOK_SECRET: "w".repeat(24),
-    ownerIds: new Set([OWNER_TWITCH_ID])
+    ownerIds: new Set([OWNER_TWITCH_ID]),
+    overlayMirrors: parseOverlayMirrors("https://ru.app.test/api")
   };
   app = await buildApp(config);
   await app.ready();
@@ -531,6 +533,24 @@ describe("overlay websocket", () => {
       expect(row!.status).toBe("delivered");
     });
     socket.terminate();
+  });
+
+  it("links audio to the mirror the socket came through, and only to a configured one", async () => {
+    const viaMirror = await app.injectWS(`/overlay/${encodeURIComponent(streamer.overlayToken)}`, {
+      headers: { "x-roastbot-mirror": "RU.app.test" }
+    });
+    await nextMessage(viaMirror, "overlay.ready");
+    const mirrored = nextMessage(viaMirror, "roast.play");
+    await publishOverlayEvent(streamer);
+    expect(String((await mirrored).audioUrl)).toMatch(/^https:\/\/ru\.app\.test\/api\/audio\//u);
+    viaMirror.terminate();
+
+    const forged = await app.injectWS(`/overlay/${encodeURIComponent(streamer.overlayToken)}`, {
+      headers: { "x-roastbot-mirror": "evil.example" }
+    });
+    const direct = nextMessage(forged, "roast.play");
+    expect(String((await direct).audioUrl)).toMatch(/^https:\/\/app\.test\/api\/audio\//u);
+    forged.terminate();
   });
 
   it("replays undelivered events on reconnect and closes sockets when the token rotates", async () => {

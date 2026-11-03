@@ -1,0 +1,36 @@
+# Overlay relay in Russia: OBS opens the overlay on ru.recursia.online, this Caddy forwards it to
+# the main server. Some Russian providers stall connections to foreign hosting after the first
+# ~16 KB, so the overlay's text arrives but its audio and pictures never do. A Russian IP is not
+# cut off, and the hop from this server to the main one goes datacenter to datacenter.
+#
+# Only the overlay passes: its page and assets, its WebSocket, roast audio and custom character
+# pictures. The dashboard, login and payments stay on roast.recursia.online.
+#
+# The relay names itself in X-RoastBot-Mirror; the API gives that socket audio and picture links
+# on the mirror when its base is in OVERLAY_MIRROR_URLS (deploy/.env). Nothing is cached or stored
+# here.
+#
+# Setup on a fresh Ubuntu VM: install Caddy from its apt repository, copy this file to
+# /etc/caddy/Caddyfile, point ru.recursia.online at the VM, open ports 80 and 443, then
+# `sudo systemctl reload caddy`. Caddy gets the certificate itself.
+
+ru.recursia.online {
+	@overlay path /overlay /overlay/* /api/audio/* /api/characters/*/image
+	handle @overlay {
+		reverse_proxy https://roast.recursia.online {
+			# The main server's proxy routes by host name, so the request goes there as roast.
+			header_up Host roast.recursia.online
+			# Overwrites whatever a client sent.
+			header_up X-RoastBot-Mirror {host}
+			transport http {
+				tls_server_name roast.recursia.online
+			}
+		}
+	}
+
+	handle {
+		respond "Not found" 404
+	}
+
+	header -Server
+}
