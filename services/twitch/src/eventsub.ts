@@ -27,6 +27,30 @@ export interface EventSubHooks {
   ) => Promise<void>;
 }
 
+const eventSubMessageSchema = z.object({
+  // subscription_type is listed so that parsing keeps it: zod drops keys a schema does not name.
+  metadata: z.object({
+    message_type: z.string(),
+    message_id: z.string(),
+    subscription_type: z.string().optional()
+  }),
+  payload: z.record(z.string(), z.unknown())
+});
+export type EventSubMessage = z.infer<typeof eventSubMessageSchema>;
+
+export const parseEventSubMessage = (raw: string): EventSubMessage =>
+  eventSubMessageSchema.parse(JSON.parse(raw));
+
+/** The type, event and id of a `notification` message, as the notification hook receives them. */
+export function notificationOf(message: EventSubMessage, raw: string) {
+  const subscriptionType = message.metadata.subscription_type;
+  if (!subscriptionType) throw new Error("EventSub notification without subscription_type");
+  const event = z
+    .record(z.string(), z.unknown())
+    .parse((message.payload as { event?: unknown }).event);
+  return { subscriptionType, event, messageId: message.metadata.message_id, raw };
+}
+
 export class EventSubConnection {
   private socket?: WebSocket;
   private watchdog?: NodeJS.Timeout;
@@ -89,14 +113,10 @@ export class EventSubConnection {
   }
 
   private async onMessage(raw: string, subscribeOnWelcome: boolean): Promise<void> {
-    const message = z
-      .object({
-        metadata: z.object({ message_type: z.string(), message_id: z.string() }),
-        payload: z.record(z.string(), z.unknown())
-      })
-      .passthrough()
-      .parse(JSON.parse(raw));
+    const message = parseEventSubMessage(raw);
     const type = message.metadata.message_type;
+    // Twitch skips the keepalive while notifications flow: any message proves the session alive.
+    if (type !== "session_welcome") this.armWatchdog(this.keepaliveSeconds);
     if (type === "session_welcome") {
       const session = z
         .object({ id: z.string(), keepalive_timeout_seconds: z.number() })
@@ -113,10 +133,7 @@ export class EventSubConnection {
       this.failures = 0;
       return;
     }
-    if (type === "session_keepalive") {
-      this.armWatchdog(this.keepaliveSeconds);
-      return;
-    }
+    if (type === "session_keepalive") return;
     if (type === "session_reconnect") {
       const reconnect = z
         .object({ reconnect_url: z.string().url() })
@@ -132,17 +149,14 @@ export class EventSubConnection {
       return;
     }
     if (type !== "notification") return;
-    const subscriptionType = z
-      .object({ subscription_type: z.string() })
-      .parse(message.metadata).subscription_type;
-    const event = z
-      .record(z.string(), z.unknown())
-      .parse((message.payload as { event?: unknown }).event);
-    await this.hooks.notification(this.channel, {
-      subscriptionType,
-      event,
-      messageId: message.metadata.message_id,
-      raw
+    const notification = notificationOf(message, raw);
+    // One event that fails to queue (a database or Helix hiccup) is logged and lost alone; closing
+    // the socket would lose every event that arrives while the session reconnects.
+    await this.hooks.notification(this.channel, notification).catch((error: unknown) => {
+      console.error(
+        `EventSub ${this.channel.twitchLogin}: ${notification.subscriptionType} not queued:`,
+        error
+      );
     });
   }
 
