@@ -31,17 +31,17 @@ export const CHAT_FREQUENCY_STEPS: ScaleStep<ChatFrequency>[] = [
   {
     value: "rare",
     label: "Изредка",
-    note: "Каждое 12-е сообщение со словом-триггером, каждая 3-я награда."
+    note: "Каждое 12-е сообщение со словом-триггером."
   },
   {
     value: "normal",
     label: "Нормально",
-    note: "Каждое 9-е сообщение со словом-триггером, каждая 2-я награда."
+    note: "Каждое 9-е сообщение со словом-триггером."
   },
   {
     value: "often",
     label: "Часто",
-    note: "Каждое 6-е сообщение со словом-триггером, каждая награда."
+    note: "Каждое 6-е сообщение со словом-триггером."
   }
 ];
 export function targetSteps(tone: Settings["tone"]): ScaleStep<Triggers["targetMode"]>[] {

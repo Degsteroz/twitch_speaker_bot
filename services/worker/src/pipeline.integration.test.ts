@@ -7,8 +7,10 @@ import { createDatabase } from "@roastbot/db";
 import {
   BLOCKED_OUTPUT_FALLBACK,
   DASHBOARD_TEST_DAILY_LIMIT,
+  EVENT_OVERLAY_TTL_SECONDS,
   REWARD_DECLINED_STUB,
   STUB_PHRASES,
+  VIEWER_ROAST_LIMIT,
   storedOverlayRoastSchema,
   type RoastSource
 } from "@roastbot/shared";
@@ -424,7 +426,34 @@ describe("processRoast against PostgreSQL", () => {
     ).toBe("done");
   });
 
-  it("answers a reward the frequency passed over with a short no", async () => {
+  it("answers every reward: no channel pause, no viewer pause, no viewer limit", async () => {
+    const anthropic = fakeAnthropic({ text: "Раз" });
+    await db.sql`delete from roasts where channel_id=${channel.channelId}`;
+    await db.sql`delete from cooldown_state where channel_id=${channel.channelId}`;
+    // A command starts the channel and viewer pauses.
+    expect(
+      (await processRoast(await job({ viewerLogin: "fan" }), deps(anthropic.client))).status
+    ).toBe("done");
+    // Rewards from the same viewer, back to back, beyond VIEWER_ROAST_LIMIT: all answered.
+    for (let index = 0; index < VIEWER_ROAST_LIMIT + 2; index += 1) {
+      expect(
+        await processRoast(
+          await job({ source: "reward", viewerLogin: "fan" }),
+          deps(anthropic.client)
+        )
+      ).toMatchObject({ status: "done" });
+    }
+    // Rewards do not eat the viewer's command allowance either: the pause still holds the command.
+    expect(
+      await processRoast(await job({ viewerLogin: "fan" }), deps(anthropic.client))
+    ).toMatchObject({ status: "skipped", reason: "stub_cooldown" });
+    await db.sql`delete from cooldown_state where channel_id=${channel.channelId}`;
+    expect(
+      (await processRoast(await job({ viewerLogin: "fan" }), deps(anthropic.client))).status
+    ).toBe("done");
+  });
+
+  it("answers a legacy declined reward job with a short no", async () => {
     const anthropic = fakeAnthropic({ text: "Раз" });
     const outcome = await processRoast(
       await job({ source: "reward", declined: true }),
@@ -569,6 +598,35 @@ describe("processRoast against PostgreSQL", () => {
       reason: "global_budget_exceeded"
     });
     expect(anthropic.create).not.toHaveBeenCalled();
+  });
+
+  it("lets paid events wait their turn in a burst, while chat replies go stale", async () => {
+    const anthropic = fakeAnthropic({ text: "Раз" });
+    await db.sql`delete from cooldown_state where channel_id=${channel.channelId}`;
+    const requested = Date.now() - 5 * 60_000;
+    const requestedAt = new Date(requested).toISOString();
+    expect(await processRoast(await job({ requestedAt }), deps(anthropic.client))).toMatchObject({
+      status: "skipped",
+      reason: "stale_job"
+    });
+    for (const source of ["reward", "donation"] as const) {
+      const outcome = await processRoast(
+        await job({ source, requestedAt, viewerLogin: `late_${source}` }),
+        deps(anthropic.client)
+      );
+      expect(outcome.status).toBe("done");
+      const [event] = await db.sql<{ expires_at: Date }[]>`
+        select expires_at from overlay_events where roast_id=${outcome.roastId} and part=0`;
+      // Counted from the request: ten minutes in all, five of them still ahead.
+      expect(event!.expires_at.getTime()).toBe(requested + EVENT_OVERLAY_TTL_SECONDS * 1000);
+    }
+    const tooLate = new Date(Date.now() - (EVENT_OVERLAY_TTL_SECONDS + 1) * 1000).toISOString();
+    expect(
+      await processRoast(
+        await job({ source: "reward", requestedAt: tooLate }),
+        deps(anthropic.client)
+      )
+    ).toMatchObject({ status: "skipped", reason: "stale_job" });
   });
 
   it("skips disabled channels and stale jobs", async () => {

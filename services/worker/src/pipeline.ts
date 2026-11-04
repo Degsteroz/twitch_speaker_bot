@@ -18,8 +18,8 @@ import {
   OPTOUT_SKIPPED_SOURCES,
   DEFAULT_ANTHROPIC_MODEL,
   DEFAULT_CHAT_MODEL,
-  OVERLAY_EVENT_TTL_SECONDS,
   isStubCall,
+  overlayTtlSeconds,
   roastRequestedJobSchema,
   triggerSettingsSchema,
   COMMAND_PLANS,
@@ -48,7 +48,7 @@ import {
 import { reserve, voiceReservations } from "./limits.js";
 import { playBoard } from "./board.js";
 import { modelRequest } from "./models.js";
-import { publishOverlay, storeAudio } from "./overlay.js";
+import { overlayExpiry, publishOverlay, storeAudio } from "./overlay.js";
 import { recordSpend, spendOf, textFrom, type Spend } from "./spend.js";
 import { playRetort } from "./retort.js";
 import { playStub, STUB_REJECTIONS } from "./stubs.js";
@@ -150,7 +150,7 @@ export async function processRoast(
       if (existing.status !== "queued") return { roastId, status: existing.status };
     }
 
-    if (clock().getTime() - Date.parse(job.requestedAt) > OVERLAY_EVENT_TTL_SECONDS * 1000) {
+    if (clock().getTime() - Date.parse(job.requestedAt) > overlayTtlSeconds(job.source) * 1000) {
       return await settle("skipped", "stale_job");
     }
     const context = await loadContext(deps.sql, job.channelId);
@@ -222,7 +222,7 @@ export async function processRoast(
         started
       });
     }
-    // A reward the frequency passed over: a short "no", no quota, no model.
+    // Legacy job from an older chat service: a reward the frequency passed over gets a short "no".
     if (job.declined) return await stub("stub_declined");
 
     const reservation = await reserve(deps, job, context.monthlyLimit ?? 0, context);
@@ -343,7 +343,7 @@ export async function processRoast(
     }
     const audioFile = await storeAudio(speech.audio, deps.config.AUDIO_DIR);
     const now = clock();
-    const expiresAt = new Date(now.getTime() + OVERLAY_EVENT_TTL_SECONDS * 1000);
+    const expiresAt = overlayExpiry(job, now);
     const ttsChars = Array.from(spoken).length;
     const currentRoastId = roastId;
 

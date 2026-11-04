@@ -3,7 +3,6 @@
 // and cannot post there, so the overlay is the only place to show it.
 import { findStopListMatch } from "@roastbot/prompts";
 import {
-  OVERLAY_EVENT_TTL_SECONDS,
   TOP_BOARD_COOLDOWN_MINUTES,
   TOP_BOARD_SIZE,
   TOP_BOARD_WINDOW_HOURS,
@@ -12,7 +11,7 @@ import {
 } from "@roastbot/shared";
 
 import type { OnAirCharacter, PipelineDependencies, RoastOutcome, Sql } from "./context.js";
-import { publishOverlay } from "./overlay.js";
+import { overlayExpiry, publishOverlay } from "./overlay.js";
 
 export interface BoardInput {
   job: RoastRequestedJob;
@@ -45,7 +44,7 @@ export async function playBoard(
 ): Promise<RoastOutcome> {
   const { job, roastId } = input;
   const now = deps.now?.() ?? new Date();
-  const expiresAt = new Date(now.getTime() + OVERLAY_EVENT_TTL_SECONDS * 1000);
+  const expiresAt = overlayExpiry(job, now);
   const reason = await deps.sql.begin(async (transaction) => {
     const tx = transaction as unknown as Sql;
     await tx`select pg_advisory_xact_lock(hashtext('roastbot-board'), hashtext(${job.channelId}::text))`;

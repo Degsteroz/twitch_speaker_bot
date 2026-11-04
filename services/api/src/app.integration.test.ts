@@ -3,7 +3,12 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { TWITCH_SCOPES, VOICE_SAMPLE_QUEUE, type StoredOverlayRoast } from "@roastbot/shared";
+import {
+  AUDIO_URL_TTL_SECONDS,
+  TWITCH_SCOPES,
+  VOICE_SAMPLE_QUEUE,
+  type StoredOverlayRoast
+} from "@roastbot/shared";
 import {
   createTestChannel,
   createTestEvent,
@@ -512,6 +517,10 @@ describe("overlay websocket", () => {
     });
     expect(audio.statusCode).toBe(200);
     expect(audio.headers["content-type"]).toBe("audio/wav");
+    // The overlay plays its queue in turn: the link outlives the event, not just the delivery.
+    expect(Number(audioUrl.searchParams.get("expires"))).toBeGreaterThanOrEqual(
+      Math.floor(Date.parse(String(event.expiresAt)) / 1000) + AUDIO_URL_TTL_SECONDS
+    );
     const forged = await app.inject({
       method: "GET",
       url: `${audioUrl.pathname.replace(/^\/api/u, "")}?expires=1&sig=x`

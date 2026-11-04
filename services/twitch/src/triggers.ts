@@ -65,7 +65,7 @@ export function boardCall(
 export const rollPercent = (percent: number, random: number) => random * 100 < percent;
 
 /**
- * "Every Nth" per channel for chat words and rewards (KEYWORD_EVERY, REWARD_EVERY): a hit is due
+ * "Every Nth" per channel for chat words (KEYWORD_EVERY): a hit is due
  * when N hits have come since the last answer. The first hit of a channel is due at once, so the
  * streamer sees the bot is alive. A due hit that could not be answered (a pause) stays due until
  * reset() after an answer.

@@ -10,7 +10,6 @@ import {
 } from "@roastbot/prompts";
 import {
   DEFAULT_CHAT_MODEL,
-  OVERLAY_EVENT_TTL_SECONDS,
   REWARD_DECLINED_STUB,
   STUB_CAPTION_MAX_CHARACTERS,
   STUB_PHRASES,
@@ -32,7 +31,7 @@ import {
 } from "./context.js";
 import { voiceReservations } from "./limits.js";
 import { modelRequest } from "./models.js";
-import { publishOverlay, storeAudio } from "./overlay.js";
+import { overlayExpiry, publishOverlay, storeAudio } from "./overlay.js";
 import { recordSpend, spendOf, textFrom, type Spend } from "./spend.js";
 import { cloudVoicesFor, speak, type Speech } from "./tts.js";
 
@@ -125,7 +124,7 @@ async function publishStub(
 ): Promise<void> {
   const { job, roastId, context, character, archetype, reason } = input;
   const now = deps.now?.() ?? new Date();
-  const expiresAt = new Date(now.getTime() + OVERLAY_EVENT_TTL_SECONDS * 1000);
+  const expiresAt = overlayExpiry(job, now);
   await deps.sql.begin(async (transaction) => {
     const tx = transaction as unknown as Sql;
     await tx`select pg_advisory_xact_lock(hashtext('roastbot-stub'),

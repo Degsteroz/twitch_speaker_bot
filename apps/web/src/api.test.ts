@@ -101,6 +101,8 @@ describe("quota estimate", () => {
       events: { ...busy.events, raid: { enabled: true, minViewers: 5 } }
     };
     expect(roastsPerMinute(withRaids, 60, true)).toBeCloseTo(1.01);
+    // Rewards are answered every time, past the pause.
+    expect(roastsPerMinute({ ...withRaids, rewardId: "r1" }, 60, true)).toBeCloseTo(1.31);
     expect(quotaMinutes(10, 2)).toBe(5);
   });
 });

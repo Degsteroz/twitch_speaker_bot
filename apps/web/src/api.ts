@@ -158,9 +158,8 @@ export interface EventTriggers {
   donation: { enabled: boolean; minAmount: number; delaySec: number };
 }
 export type ChatFrequency = "rare" | "normal" | "often";
-// Mirrors KEYWORD_EVERY and REWARD_EVERY in packages/shared.
+// Mirrors KEYWORD_EVERY in packages/shared.
 export const KEYWORD_EVERY: Record<ChatFrequency, number> = { rare: 12, normal: 9, often: 6 };
-export const REWARD_EVERY: Record<ChatFrequency, number> = { rare: 3, normal: 2, often: 1 };
 export const DEFAULT_COMMAND = "!роаст";
 export interface Triggers {
   command: boolean;
@@ -434,7 +433,7 @@ const RATES = {
   donation: 0.05
 };
 
-/** Expected roasts per minute of stream with these triggers; cooldowns cap chat and rewards. */
+/** Expected roasts per minute of stream with these triggers; cooldowns cap chat, not rewards. */
 export function roastsPerMinute(
   triggers: Triggers,
   cooldownSec: number,
@@ -444,12 +443,12 @@ export function roastsPerMinute(
   let throttled =
     (Math.min(triggers.keywords.length, RATES.maxKeywords) * RATES.keywordPerWord) /
     KEYWORD_EVERY[triggers.chatFrequency];
-  if (triggers.rewardId) throttled += RATES.reward / REWARD_EVERY[triggers.chatFrequency];
   if (commandAvailable && triggers.command) throttled += RATES.command;
   const events = triggers.events;
   if (events.follow.enabled) throttled += RATES.follow * chance(events.follow.chancePercent);
   if (cooldownSec > 0) throttled = Math.min(throttled, 60 / cooldownSec);
-  let always = 0;
+  // Rewards are paid in points: every one is answered, past pauses and the viewer limit.
+  let always = triggers.rewardId ? RATES.reward : 0;
   for (const key of [
     "cheer",
     "subscription",

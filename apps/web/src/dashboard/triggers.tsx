@@ -11,7 +11,6 @@ import {
   REWARD_REASON_TEXT,
   type DonationAlertsStatus,
   type EventTriggers,
-  REWARD_EVERY,
   type RewardsResponse,
   type Triggers,
   twitchLogin
@@ -234,11 +233,9 @@ export function TriggerSettings({
         )}
         <small className="hint below">
           Зритель пишет текст в награде, героиня читает его и отвечает по смыслу. Кого она при этом
-          жарит, решает переключатель «Кого жарить» в карточке персонажа.{" "}
-          {REWARD_EVERY[triggers.chatFrequency] === 1
-            ? "Отвечает на каждую награду"
-            : `Отвечает на каждую ${REWARD_EVERY[triggers.chatFrequency]}-ю награду`}{" "}
-          (частота — в карточке «Чат»), остальным и тем, кто частит, — «Мммммм, нет!».
+          жарит, решает переключатель «Кого жарить» в карточке персонажа. Отвечает на каждую
+          награду, без пауз и лимита на зрителя: частоту задаёт цена награды в баллах. Награды
+          тратят месячную квоту канала.
         </small>
       </Card>
       <Card tour="command">
@@ -311,11 +308,9 @@ export function TriggerSettings({
           сообщения ботов пропускаются, на сообщение самого стримера достаётся стримеру. Проверить
           ответ проще кнопкой теста в панели: слово срабатывает не каждый раз.
         </small>
-        {(triggers.keywords.length > 0 ||
-          (characterName && triggers.nameMention) ||
-          triggers.rewardId) && (
+        {(triggers.keywords.length > 0 || (characterName && triggers.nameMention)) && (
           <ScaleChoice
-            label="Как часто отвечать на слова и награды"
+            label="Как часто отвечать на слова"
             value={triggers.chatFrequency}
             steps={CHAT_FREQUENCY_STEPS}
             onChange={(chatFrequency) => set({ chatFrequency })}

@@ -1,7 +1,6 @@
 import {
   DEFAULT_TRIGGERS,
   KEYWORD_EVERY,
-  REWARD_EVERY,
   triggerSettingsSchema,
   type TriggerSettings
 } from "@roastbot/shared";
@@ -136,7 +135,6 @@ describe("every Nth", () => {
 
   it("answers every chat word only every 6th, 9th or 12th time", () => {
     expect(KEYWORD_EVERY).toEqual({ rare: 12, normal: 9, often: 6 });
-    expect(REWARD_EVERY).toEqual({ rare: 3, normal: 2, often: 1 });
   });
 });
 

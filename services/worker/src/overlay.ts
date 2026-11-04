@@ -6,6 +6,7 @@ import { join } from "node:path";
 import {
   ARCHETYPE_THEME,
   BRANDED_PLANS,
+  overlayTtlSeconds,
   type Archetype,
   type RoastRequestedJob,
   type StoredOverlayRoast,
@@ -13,6 +14,18 @@ import {
 } from "@roastbot/shared";
 
 import type { OnAirCharacter, Sql } from "./context.js";
+
+/**
+ * Until when the overlay may still play this roast: its source's TTL counted from the request, so
+ * the time spent in the worker queue and in generation is part of it. Never less than a minute
+ * from now, so a job that just made it still gets a chance to play.
+ */
+export function overlayExpiry(job: RoastRequestedJob, now: Date): Date {
+  const requested = Date.parse(job.requestedAt);
+  const fromRequest =
+    (Number.isFinite(requested) ? requested : now.getTime()) + overlayTtlSeconds(job.source) * 1000;
+  return new Date(Math.max(fromRequest, now.getTime() + 60_000));
+}
 
 export async function storeAudio(bytes: Uint8Array, audioDir: string): Promise<string> {
   const filename = `${randomUUID()}.wav`;

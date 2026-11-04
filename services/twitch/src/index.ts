@@ -6,7 +6,6 @@ import {
   CUSTOM_CHARACTER_PLANS,
   donationDelaySeconds,
   KEYWORD_EVERY,
-  REWARD_EVERY,
   ROAST_REQUESTED_QUEUE,
   ROAST_REQUESTED_QUEUE_OPTIONS,
   STREAMER_JOB_PRIORITY,
@@ -70,12 +69,11 @@ async function shutdown() {
 process.once("SIGINT", () => void shutdown().finally(() => process.exit(0)));
 process.once("SIGTERM", () => void shutdown().finally(() => process.exit(0)));
 const channelByLogin = new Map<string, Channel>();
-// How often chat words and rewards are answered, per channel (KEYWORD_EVERY, REWARD_EVERY).
-// In memory: a restart only makes the next hit due a little early.
+// How often chat words are answered, per channel (KEYWORD_EVERY). Rewards are paid in points
+// and always answered. In memory: a restart only makes the next hit due a little early.
 const keywordGate = new EveryNth();
 // When each channel last asked for "!топ".
 const lastBoard = new Map<string, number>();
-const rewardGate = new EveryNth();
 chat.on("message", (channelName, tags, message, self) => {
   if (self) return;
   const channel = channelByLogin.get(channelName.replace(/^#/u, "").toLowerCase());
@@ -170,12 +168,6 @@ const eventSubHooks: EventSubHooks = {
   notification: async (channel, { subscriptionType, event, messageId, raw }) => {
     const roast = eventRoast(subscriptionType, event, channel.triggers, channel.twitchLogin);
     if (!roast) return;
-    // Every Nth reward gets a roast, the others a short "no" (REWARD_DECLINED_STUB).
-    let declined = false;
-    if (roast.source === "reward" && !channel.unlimited) {
-      declined = !rewardGate.due(channel.id, REWARD_EVERY[channel.triggers.chatFrequency]);
-      if (!declined) rewardGate.reset(channel.id);
-    }
     await enqueueEvent(sql, boss, {
       channelId: channel.id,
       source: roast.source,
@@ -185,7 +177,6 @@ const eventSubHooks: EventSubHooks = {
       inputText: roast.inputText,
       target: roast.target,
       ...(roast.eventSummary ? { eventSummary: roast.eventSummary } : {}),
-      ...(declined ? { declined } : {}),
       // The streamer redeeming their own reward is the streamer's request too.
       ...(roast.viewerId === channel.twitchId ? { priority: STREAMER_JOB_PRIORITY } : {}),
       ...(await withGame(channel)),

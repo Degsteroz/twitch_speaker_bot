@@ -40,6 +40,15 @@ export async function registerOverlayRoutes(
     if (socket.readyState === socket.OPEN) socket.send(JSON.stringify(value));
   };
 
+  // Signed at delivery, but the overlay plays its queue in turn: a roast may start playing up to
+  // its expiresAt, so the link must outlive that, not just the moment it was sent.
+  const audioPath = (audioFile: string, expiresAt: string) =>
+    signAudioPath(
+      audioFile,
+      config.AUDIO_SIGNING_SECRET,
+      Math.max(Date.now(), Date.parse(expiresAt) || 0)
+    );
+
   const deliverPending = async (connection: OverlayConnection) => {
     const rows = await sql<{ id: string; payload: unknown }[]>`
       select id, payload from overlay_events where channel_id=${connection.channelId}
@@ -62,9 +71,7 @@ export async function registerOverlayRoutes(
           : {}),
         // A free stub has no audio file: the overlay plays its `sound` instead.
         ...(audioFile
-          ? {
-              audioUrl: `${connection.publicUrl}${signAudioPath(audioFile, config.AUDIO_SIGNING_SECRET)}`
-            }
+          ? { audioUrl: `${connection.publicUrl}${audioPath(audioFile, event.expiresAt)}` }
           : {})
       });
     }

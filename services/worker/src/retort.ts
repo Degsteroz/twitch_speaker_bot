@@ -13,7 +13,6 @@ import {
 } from "@roastbot/prompts";
 import {
   CHARACTER_NAMES,
-  OVERLAY_EVENT_TTL_SECONDS,
   rivalTone,
   type Archetype,
   type RoastRequestedJob,
@@ -29,7 +28,7 @@ import {
 } from "./context.js";
 import { extraSpendAllowed, voiceReservations } from "./limits.js";
 import { modelRequest } from "./models.js";
-import { publishOverlay, storeAudio } from "./overlay.js";
+import { overlayExpiry, publishOverlay, storeAudio } from "./overlay.js";
 import { recordSpend, spendOf, textFrom, type Spend } from "./spend.js";
 import { speak } from "./tts.js";
 
@@ -151,7 +150,7 @@ export async function playRetort(
         audioFile,
         part: 1,
         now,
-        expiresAt: new Date(now.getTime() + OVERLAY_EVENT_TTL_SECONDS * 1000)
+        expiresAt: overlayExpiry(job, now)
       });
     });
     return "played";

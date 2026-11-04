@@ -6,6 +6,7 @@ import { cleanupExpiredData, createDatabase } from "@roastbot/db";
 import {
   DEMO_REQUESTED_QUEUE,
   DEMO_REQUESTED_QUEUE_OPTIONS,
+  EVENT_OVERLAY_TTL_SECONDS,
   ROAST_REQUESTED_QUEUE,
   ROAST_REQUESTED_QUEUE_OPTIONS,
   TELEGRAM_NOTIFY_QUEUE,
@@ -22,8 +23,9 @@ import { notifyStreamer, sendStreamSummaries } from "./telegram.js";
 import { processRoast } from "./pipeline.js";
 import { recordVoiceComparison, recordVoiceSample, syncVoices } from "./voices.js";
 
-// Audio stays on disk well past the 2-minute overlay TTL plus the 60-second signed URL window.
-const AUDIO_MAX_AGE_MS = 10 * 60 * 1000;
+// Audio stays on disk past the longest overlay TTL (events wait their turn in a burst) plus the
+// signed URL window.
+const AUDIO_MAX_AGE_MS = (EVENT_OVERLAY_TTL_SECONDS + 5 * 60) * 1000;
 
 const config = loadConfig();
 // Roasts written at once by this process. Each one mostly waits on Anthropic and the voice, and

@@ -30,7 +30,12 @@ export const VIEWER_ROAST_LIMIT = 3;
 export const VIEWER_ROAST_WINDOW_MINUTES = 30;
 export const DEFAULT_GLOBAL_MONTHLY_ROAST_CAP = 4_000;
 export const MAX_ROAST_CHARACTERS = 200;
+// How long a reply to the chat (command, trigger word, dashboard test) may wait for the overlay:
+// later it lands at the wrong moment.
 export const OVERLAY_EVENT_TTL_SECONDS = 120;
+// Rewards, donations, bits, subs, raids and other events are paid for or rare and have no pauses,
+// so they come in bursts: each one waits its turn, however long the queue ahead of it plays.
+export const EVENT_OVERLAY_TTL_SECONDS = 600;
 export const AUDIO_URL_TTL_SECONDS = 60;
 export const DEFAULT_MONTHLY_BUDGET_USD = 10;
 
@@ -117,13 +122,14 @@ export const modelIdSchema = z.enum(MODEL_IDS);
 // pg-boss fetches by priority, then age: the streamer's own messages and rewards jump the line.
 export const STREAMER_JOB_PRIORITY = 1;
 export const ROAST_REQUESTED_QUEUE = "roast.requested";
-// A roast older than the overlay TTL is useless on stream, so jobs are never retried or kept long.
+// A roast older than its overlay TTL is useless on stream, so jobs are never retried or kept long:
+// the queue keeps a job for the longest TTL (events), the worker drops a stale chat job itself.
 // notify=true wakes the worker through LISTEN/NOTIFY instead of its 2-second poll.
 export const ROAST_REQUESTED_QUEUE_OPTIONS = Object.freeze({
   notify: true,
   retryLimit: 0,
   expireInSeconds: 60,
-  retentionSeconds: OVERLAY_EVENT_TTL_SECONDS
+  retentionSeconds: EVENT_OVERLAY_TTL_SECONDS
 });
 
 // Landing demo: anyone may try Ai without logging in, a few times a day. The per-IP and service
@@ -305,18 +311,26 @@ export const roastSourceSchema = z.enum([
   "donation"
 ]);
 // Sources where chat could flood the bot: they obey channel and viewer cooldowns. Paid or rare
-// events (bits, subs, raids, ads, predictions, donations) always play, within the quota.
+// events (rewards, bits, subs, raids, ads, predictions, donations) always play, within the quota:
+// a reward is paid in points, its price is the streamer's own brake.
 export const COOLDOWN_SOURCES: ReadonlySet<RoastSource> = new Set<RoastSource>([
   "chat_command",
   "chat_keyword",
-  "reward",
   "follow"
 ]);
-// Sources counted against VIEWER_ROAST_LIMIT.
-export const VIEWER_LIMITED_SOURCES: ReadonlySet<RoastSource> = new Set<RoastSource>([
+// Replies to the chat: they go stale fast. Everything else waits its turn (EVENT_OVERLAY_TTL_SECONDS).
+const CHAT_REPLY_SOURCES: ReadonlySet<RoastSource> = new Set<RoastSource>([
   "chat_command",
   "chat_keyword",
-  "reward"
+  "dashboard_test"
+]);
+/** How long a roast of this source may wait, from the request to the overlay playing it. */
+export const overlayTtlSeconds = (source: RoastSource): number =>
+  CHAT_REPLY_SOURCES.has(source) ? OVERLAY_EVENT_TTL_SECONDS : EVENT_OVERLAY_TTL_SECONDS;
+// Sources counted against VIEWER_ROAST_LIMIT. Rewards are not: they are paid in points.
+export const VIEWER_LIMITED_SOURCES: ReadonlySet<RoastSource> = new Set<RoastSource>([
+  "chat_command",
+  "chat_keyword"
 ]);
 // A viewer who calls the bot (command, reward, or the character's name) and hits a pause or their
 // limit hears a short stub instead of silence, so nobody thinks the bot is down. Ordinary chat words
@@ -495,19 +509,14 @@ function dropLegacyTriggers(value: unknown): unknown {
   return row;
 }
 
-// How often the character answers chat words and rewards. Chat: every Nth message with a trigger
-// word; rewards: every Nth redemption, the others hear REWARD_DECLINED_STUB.
+// How often the character answers chat words: every Nth message with a trigger word. Rewards are
+// paid in channel points and always answered.
 export const chatFrequencySchema = z.enum(["rare", "normal", "often"]);
 export type ChatFrequency = z.infer<typeof chatFrequencySchema>;
 export const KEYWORD_EVERY: Readonly<Record<ChatFrequency, number>> = {
   rare: 12,
   normal: 9,
   often: 6
-};
-export const REWARD_EVERY: Readonly<Record<ChatFrequency, number>> = {
-  rare: 3,
-  normal: 2,
-  often: 1
 };
 
 export const DEFAULT_COMMAND = "!роаст";
@@ -611,7 +620,8 @@ export const roastRequestedJobSchema = z
     eventSummary: z.string().max(500).optional(),
     // The channel's current Twitch category, for context; never "Just Chatting" (see JUST_CHATTING).
     game: z.string().min(1).max(100).optional(),
-    // A reward the frequency passed over: the character answers with REWARD_DECLINED_STUB.
+    // Legacy: a reward the frequency passed over, answered with REWARD_DECLINED_STUB. The chat
+    // service no longer sends it (rewards are always answered); kept so queued jobs still parse.
     declined: z.literal(true).optional(),
     // A chat word that calls the character by name (nameMention), not an ordinary keyword.
     named: z.literal(true).optional(),
